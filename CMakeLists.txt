@@ -18,5 +18,5 @@ if(TARGET LLVMDebugInfoPDB)
     LLVMBinaryFormat LLVMObject LLVMSupport LLVMDebugInfoCodeView LLVMDebugInfoMSF)
 endif()
 
-add_subdirectory(compiler)
 add_subdirectory(runtime)
+add_subdirectory(compiler)

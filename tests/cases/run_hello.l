@@ -1,0 +1,4 @@
+fun main() -> i32 {
+    print(42);
+    return 0;
+}

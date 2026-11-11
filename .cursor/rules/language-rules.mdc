@@ -187,3 +187,8 @@ Ensure the parser handles the code in `README.md` Section 18 / `tests/cases/gold
 - **UTF-8 Identifier Support**: NEVER use just `std::isalpha` for identifiers. The Lexer MUST support UTF-8/Unicode characters (e.g., Chinese). Any `unsigned char >= 128` must be treated as a valid part of an identifier. Continue consuming bytes until a whitespace or punctuation is met.
 - **Comment EOF Safety**: When skipping single-line (`//`) or multi-line (`/* */`) comments, the loop MUST strictly check for `EOF` (End of File). NEVER allow out-of-bounds memory access if a file ends inside a comment.
 
+## 30. LLVM API Version & Constraints
+- **Target LLVM Version**: 22.1.0.
+- **C++ API Only**: Prefer C++ APIs (`llvm::IRBuilder`, `llvm::LLVMContext`, `llvm::Module`). 
+- **Context Management**: Avoid deprecated global context C APIs (like `LLVMGetGlobalContext`). Use explicitly managed `llvm::LLVMContext` instances. 
+- **C API Warning**: If C APIs are used for convenience, use `LLVMContextCreate` and avoid `LLVMGetOrInsertFunction` alternatives that rely on global state.

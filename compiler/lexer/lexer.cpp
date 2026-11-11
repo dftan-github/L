@@ -229,6 +229,21 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "class") {
     return ast::TokenType::KwClass;
   }
+  if (text == "if") {
+    return ast::TokenType::KwIf;
+  }
+  if (text == "else") {
+    return ast::TokenType::KwElse;
+  }
+  if (text == "while") {
+    return ast::TokenType::KwWhile;
+  }
+  if (text == "true") {
+    return ast::TokenType::KwTrue;
+  }
+  if (text == "false") {
+    return ast::TokenType::KwFalse;
+  }
   if (text == "i32") {
     return ast::TokenType::TyI32;
   }
@@ -313,6 +328,36 @@ ast::Token Lexer::lexPunctuation() {
     advance();
     return makeToken(ast::TokenType::Arrow, "->", start);
   }
+  if (c == '=' && n == '=') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::EqEq, "==", start);
+  }
+  if (c == '!' && n == '=') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::NotEq, "!=", start);
+  }
+  if (c == '<' && n == '=') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::LessEq, "<=", start);
+  }
+  if (c == '>' && n == '=') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::GreaterEq, ">=", start);
+  }
+  if (c == '&' && n == '&') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::AmpAmp, "&&", start);
+  }
+  if (c == '|' && n == '|') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::PipePipe, "||", start);
+  }
 
   advance();
   switch (c) {
@@ -330,6 +375,12 @@ ast::Token Lexer::lexPunctuation() {
       return makeToken(ast::TokenType::Dot, ".", start);
     case '+':
       return makeToken(ast::TokenType::Plus, "+", start);
+    case '-':
+      return makeToken(ast::TokenType::Minus, "-", start);
+    case '*':
+      return makeToken(ast::TokenType::Star, "*", start);
+    case '/':
+      return makeToken(ast::TokenType::Slash, "/", start);
     case '|':
       return makeToken(ast::TokenType::Pipe, "|", start);
     case '(':

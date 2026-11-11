@@ -23,7 +23,7 @@ enum class TokenType {
   IntLiteral,
   StringLiteral,
 
-  // Keywords (README §18 golden case)
+  // Keywords
   KwConst,
   KwConstd,
   KwFun,
@@ -31,8 +31,13 @@ enum class TokenType {
   KwInterface,
   KwPartial,
   KwClass,
+  KwIf,
+  KwElse,
+  KwWhile,
+  KwTrue,
+  KwFalse,
 
-  // Phase 1 built-in types (+ String name for golden/stdlib surface)
+  // Built-in types
   TyI32,
   TyI64,
   TyF64,
@@ -43,6 +48,8 @@ enum class TokenType {
   // Punctuation / operators
   Bang,          // !
   Equal,         // =
+  EqEq,          // ==
+  NotEq,         // !=
   ColonAssign,   // :=
   Arrow,         // ->
   Colon,         // :
@@ -50,13 +57,20 @@ enum class TokenType {
   Comma,         // ,
   Dot,           // .
   Plus,          // +
+  Minus,         // -
+  Star,          // *
+  Slash,         // /
+  AmpAmp,        // &&
   Pipe,          // |
+  PipePipe,      // ||
   LParen,        // (
   RParen,        // )
   LBrace,        // {
   RBrace,        // }
   LAngle,        // <
   RAngle,        // >
+  LessEq,        // <=
+  GreaterEq,     // >=
 };
 
 struct Token {
@@ -65,7 +79,6 @@ struct Token {
   SourceLocation loc;
 };
 
-// Human-readable name for --dump-tokens and diagnostics.
 const char* toString(TokenType type);
 
 }  // namespace l::ast
