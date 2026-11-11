@@ -20,3 +20,8 @@ target_compile_options(l_compiler PRIVATE -fno-rtti)
 
 llvm_map_components_to_libnames(L_COMPILER_LLVM_LIBS core support)
 target_link_libraries(l_compiler PUBLIC ${L_COMPILER_LLVM_LIBS})
+
+add_executable(l main.cpp)
+target_link_libraries(l PRIVATE l_compiler)
+target_compile_features(l PRIVATE cxx_std_20)
+target_compile_options(l PRIVATE -fno-rtti)

@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-#include "lexer/lexer.hpp"
+#include "ast/token.hpp"
 
 // AST nodes: owned via std::unique_ptr only (no shared_ptr, no owning raw ptr).
 
@@ -11,7 +11,7 @@ namespace l::ast {
 
 struct Node {
   virtual ~Node() = default;
-  lexer::SourceLocation loc;
+  SourceLocation loc;
 };
 
 using NodePtr = std::unique_ptr<Node>;
