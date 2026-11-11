@@ -15,6 +15,14 @@ void l_print_int(int32_t val) {
   fflush(stdout);
 }
 
+void l_print_str(const char* s) {
+  if (s == NULL) {
+    return;
+  }
+  fputs(s, stdout);
+  fflush(stdout);
+}
+
 void l_panic(const char* message) {
   if (message != NULL) {
     fputs(message, stderr);

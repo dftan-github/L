@@ -12,6 +12,7 @@
 #include "codegen/codegen.hpp"
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
+#include "semantic/semantic.hpp"
 
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
@@ -30,9 +31,9 @@ namespace {
 
 void printUsage(const char* argv0) {
   std::cerr << "Usage:\n"
-            << "  " << argv0 << " [--dump-tokens|--dump-ast|--emit-llvm] <source.l>\n"
-            << "  " << argv0 << " -o <output.exe> <source.l>\n"
-            << "  " << argv0 << " --emit-obj -o <output.o> <source.l>\n";
+            << "  " << argv0 << " [--dump-tokens|--dump-ast|--emit-llvm] <source.l>...\n"
+            << "  " << argv0 << " -o <output.exe> <source.l>...\n"
+            << "  " << argv0 << " --emit-obj -o <output.o> <source.l>...\n";
 }
 
 std::string readFile(const std::string& path) {
@@ -59,19 +60,54 @@ void dumpTokens(const std::vector<l::ast::Token>& tokens) {
   }
 }
 
-std::unique_ptr<l::ast::Module> parseSource(const std::string& path,
-                                            const std::string& source) {
-  l::lexer::Lexer lexer(path, source);
-  std::vector<l::ast::Token> tokens = lexer.tokenize();
-  l::parser::Parser parser(std::move(tokens));
-  std::unique_ptr<l::ast::Module> module = parser.parseModule();
-  for (const std::string& diag : parser.diagnostics()) {
-    std::cerr << diag << '\n';
+void collectTypeNames(const l::ast::Module& module,
+                      std::vector<std::string>& classes,
+                      std::vector<std::string>& interfaces) {
+  for (const l::ast::StmtPtr& stmt : module.stmts) {
+    if (!stmt) {
+      continue;
+    }
+    if (stmt->kind() == l::ast::StmtKind::ClassDecl) {
+      classes.push_back(static_cast<const l::ast::ClassDeclStmt&>(*stmt).name);
+    } else if (stmt->kind() == l::ast::StmtKind::InterfaceDecl) {
+      interfaces.push_back(static_cast<const l::ast::InterfaceDeclStmt&>(*stmt).name);
+    }
   }
-  if (parser.hadError() || !module) {
-    return nullptr;
+}
+
+std::unique_ptr<l::ast::Module> parseSources(const std::vector<std::string>& paths) {
+  auto merged = std::make_unique<l::ast::Module>();
+  std::vector<std::string> known_classes;
+  std::vector<std::string> known_interfaces;
+
+  for (const std::string& path : paths) {
+    std::string source;
+    if (!loadSource(path, source)) {
+      std::cerr << "Cannot open source file: " << path << '\n';
+      return nullptr;
+    }
+    l::lexer::Lexer lexer(path, source);
+    std::vector<l::ast::Token> tokens = lexer.tokenize();
+    l::parser::Parser parser(std::move(tokens));
+    for (const std::string& c : known_classes) {
+      parser.registerClassName(c);
+    }
+    for (const std::string& i : known_interfaces) {
+      parser.registerInterfaceName(i);
+    }
+    std::unique_ptr<l::ast::Module> module = parser.parseModule();
+    for (const std::string& diag : parser.diagnostics()) {
+      std::cerr << diag << '\n';
+    }
+    if (parser.hadError() || !module) {
+      return nullptr;
+    }
+    collectTypeNames(*module, known_classes, known_interfaces);
+    for (l::ast::StmtPtr& stmt : module->stmts) {
+      merged->stmts.push_back(std::move(stmt));
+    }
   }
-  return module;
+  return merged;
 }
 
 std::string runtimeLibPath() {
@@ -97,14 +133,12 @@ bool linkExecutable(const std::string& object_path, const std::string& exe_path)
     return false;
   }
 
-  // Ensure output directory exists.
   {
     std::error_code ec;
     fs::create_directories(fs::path(exe_path).parent_path(), ec);
   }
 
 #ifdef _WIN32
-  // clang++ needs the MSVC LIB paths (kernel32.lib, ucrt, …). Enter vcvars then link.
   const char* vcvars =
       "C:\\Program Files\\Microsoft Visual Studio\\18\\Insiders\\VC\\Auxiliary\\Build\\vcvars64.bat";
   if (!fs::exists(vcvars)) {
@@ -155,7 +189,7 @@ int main(int argc, char** argv) {
   bool emit_llvm = false;
   bool emit_obj = false;
   std::string output_path;
-  std::string source_path;
+  std::vector<std::string> source_paths;
 
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg = argv[i];
@@ -187,46 +221,43 @@ int main(int argc, char** argv) {
       printUsage(argv[0]);
       return 0;
     }
-    if (!source_path.empty()) {
-      std::cerr << "Unexpected argument: " << arg << '\n';
-      printUsage(argv[0]);
-      return 1;
-    }
-    source_path = std::string(arg);
+    source_paths.emplace_back(arg);
   }
 
-  if (source_path.empty()) {
+  if (source_paths.empty()) {
     printUsage(argv[0]);
     return 1;
   }
 
-  std::string source;
-  if (!loadSource(source_path, source)) {
-    std::cerr << "Cannot open source file: " << source_path << '\n';
-    return 1;
-  }
-
   if (dump_tokens) {
-    l::lexer::Lexer lexer(source_path, source);
-    dumpTokens(lexer.tokenize());
-    return 0;
-  }
-
-  if (dump_ast) {
-    auto module = parseSource(source_path, source);
-    if (!module) {
-      return 1;
+    for (const std::string& path : source_paths) {
+      std::string source;
+      if (!loadSource(path, source)) {
+        std::cerr << "Cannot open source file: " << path << '\n';
+        return 1;
+      }
+      l::lexer::Lexer lexer(path, source);
+      dumpTokens(lexer.tokenize());
     }
-    module->dump(std::cout);
     return 0;
   }
 
-  auto ast = parseSource(source_path, source);
+  auto ast = parseSources(source_paths);
   if (!ast) {
     return 1;
   }
 
-  l::codegen::Codegen codegen(source_path);
+  if (dump_ast) {
+    ast->dump(std::cout);
+    return 0;
+  }
+
+  l::semantic::Analyzer analyzer;
+  if (!analyzer.analyze(*ast)) {
+    return 1;
+  }
+
+  l::codegen::Codegen codegen(source_paths.front());
   if (!codegen.emit(*ast)) {
     return 1;
   }
@@ -236,10 +267,9 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  // Object-only mode.
   if (emit_obj) {
     if (output_path.empty()) {
-      output_path = fs::path(source_path).replace_extension(".o").string();
+      output_path = fs::path(source_paths.front()).replace_extension(".o").string();
     }
     if (!codegen.emitObjectFile(output_path)) {
       return 1;
@@ -248,7 +278,6 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  // Default with -o: compile to object then link exe (+ runtime).
   if (!output_path.empty()) {
     const fs::path exe = output_path;
     const fs::path obj = fs::temp_directory_path() /

@@ -244,6 +244,15 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "false") {
     return ast::TokenType::KwFalse;
   }
+  if (text == "heap") {
+    return ast::TokenType::KwHeap;
+  }
+  if (text == "defer") {
+    return ast::TokenType::KwDefer;
+  }
+  if (text == "sync") {
+    return ast::TokenType::KwSync;
+  }
   if (text == "i32") {
     return ast::TokenType::TyI32;
   }
@@ -261,6 +270,9 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   }
   if (text == "String") {
     return ast::TokenType::TyString;
+  }
+  if (text == "ptr") {
+    return ast::TokenType::TyPtr;
   }
   return ast::TokenType::Identifier;
 }

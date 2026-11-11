@@ -16,6 +16,14 @@ FUNC_DEF = ROOT.join("tests", "cases", "func_def.l")
 CODEGEN_SIMPLE = ROOT.join("tests", "cases", "codegen_simple.l")
 RUN_HELLO = ROOT.join("tests", "cases", "run_hello.l")
 CONTROL_FLOW = ROOT.join("tests", "cases", "control_flow.l")
+CLASS_BASIC = ROOT.join("tests", "cases", "class_basic.l")
+INTERFACE_TEST = ROOT.join("tests", "cases", "interface_test.l")
+STRING_TEST = ROOT.join("tests", "cases", "string_test.l")
+STDLIB_STRING = ROOT.join("stdlib", "string.l")
+GENERIC_TEST = ROOT.join("tests", "cases", "generic_test.l")
+HEAP_DEFER = ROOT.join("tests", "cases", "heap_defer.l")
+SYNC_FAIL = ROOT.join("tests", "cases", "sync_fail.l")
+SYNC_PASS = ROOT.join("tests", "cases", "sync_pass.l")
 OUT_DIR = ROOT.join("build", "clang-debug", "test_out")
 COMPILER = ENV.fetch(
   "L_COMPILER",
@@ -242,6 +250,137 @@ def test_control_flow_e2e!
   puts "  OK control_flow e2e"
 end
 
+def test_class_basic_e2e!
+  assert!(File.exist?(CLASS_BASIC), "class_basic case not found: #{CLASS_BASIC}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("class_basic.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, CLASS_BASIC.to_s)
+  assert!(status.success?, "compile class_basic failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "class_basic.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "class_basic.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "30\n", "expected \"30\\n\", got #{normalized.inspect}")
+
+  puts "  OK class_basic e2e"
+end
+
+def test_interface_e2e!
+  assert!(File.exist?(INTERFACE_TEST), "interface_test case not found: #{INTERFACE_TEST}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("interface_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, INTERFACE_TEST.to_s)
+  assert!(status.success?, "compile interface_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "interface_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "interface_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "42\n", "expected \"42\\n\", got #{normalized.inspect}")
+
+  puts "  OK interface_test e2e"
+end
+
+def test_string_e2e!
+  assert!(File.exist?(STRING_TEST), "string_test case not found: #{STRING_TEST}")
+  assert!(File.exist?(STDLIB_STRING), "stdlib string not found: #{STDLIB_STRING}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("string_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, STDLIB_STRING.to_s, STRING_TEST.to_s)
+  assert!(status.success?, "compile string_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "string_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "string_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "Hello L!", "expected \"Hello L!\", got #{normalized.inspect}")
+
+  puts "  OK string_test e2e"
+end
+
+def test_generic_e2e!
+  assert!(File.exist?(GENERIC_TEST), "generic_test case not found: #{GENERIC_TEST}")
+
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", GENERIC_TEST.to_s)
+  assert!(ir_st.success?, "emit-llvm generic_test failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("print_val_Point"), "LLVM IR missing specialized print_val_Point\n#{ir}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("generic_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, GENERIC_TEST.to_s)
+  assert!(status.success?, "compile generic_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "generic_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "generic_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "88\n", "expected \"88\\n\", got #{normalized.inspect}")
+
+  puts "  OK generic_test e2e"
+end
+
+def test_heap_defer_e2e!
+  assert!(File.exist?(HEAP_DEFER), "heap_defer case not found: #{HEAP_DEFER}")
+
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", HEAP_DEFER.to_s)
+  assert!(ir_st.success?, "emit-llvm heap_defer failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("l_alloc"), "LLVM IR missing l_alloc\n#{ir}")
+  assert!(ir.include?("l_free"), "LLVM IR missing l_free\n#{ir}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("heap_defer.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, HEAP_DEFER.to_s)
+  assert!(status.success?, "compile heap_defer failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "heap_defer.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "heap_defer.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "77\n", "expected \"77\\n\", got #{normalized.inspect}")
+
+  puts "  OK heap_defer e2e"
+end
+
+def test_sync_race!
+  assert!(File.exist?(SYNC_FAIL), "sync_fail case not found: #{SYNC_FAIL}")
+  assert!(File.exist?(SYNC_PASS), "sync_pass case not found: #{SYNC_PASS}")
+
+  fail_out, fail_err, fail_st = run_compiler("--emit-llvm", SYNC_FAIL.to_s)
+  assert!(!fail_st.success?, "sync_fail.l should fail to compile")
+  combined = "#{fail_out}\n#{fail_err}"
+  assert!(
+    combined.include?("Data race detected") && combined.include?("mut_count!"),
+    "sync_fail missing data-race diagnostic, got:\n#{combined}"
+  )
+  puts "  OK sync_fail (data race rejected)"
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("sync_pass.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, SYNC_PASS.to_s)
+  assert!(status.success?, "compile sync_pass failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "sync_pass.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "sync_pass.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "1\n", "expected \"1\\n\", got #{normalized.inspect}")
+
+  puts "  OK sync_pass e2e"
+end
+
 def main
   test_golden_dump_tokens!
   test_var_decl_dump_ast!
@@ -251,6 +390,12 @@ def main
   test_codegen_simple_emit_llvm!
   test_run_hello_e2e!
   test_control_flow_e2e!
+  test_class_basic_e2e!
+  test_interface_e2e!
+  test_string_e2e!
+  test_generic_e2e!
+  test_heap_defer_e2e!
+  test_sync_race!
 
   puts color("PASS", GREEN)
   exit 0

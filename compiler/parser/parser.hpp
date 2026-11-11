@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "ast/ast.hpp"
@@ -17,10 +18,14 @@ public:
   ast::StmtPtr parseStatement();
   ast::ExprPtr parseExpression(int min_precedence = 0);
 
+  void registerClassName(const std::string& name);
+  void registerInterfaceName(const std::string& name);
+
   bool hadError() const { return had_error_; }
   const std::vector<std::string>& diagnostics() const { return diagnostics_; }
 
 private:
+  bool parseGenericParams(std::vector<ast::GenericParam>& out);
   const ast::Token& peek(std::size_t offset = 0) const;
   bool check(ast::TokenType type) const;
   bool match(ast::TokenType type);
@@ -31,22 +36,32 @@ private:
   void errorAt(const ast::Token& tok, const std::string& message);
   void synchronize();
 
-  static bool isTypeToken(ast::TokenType type);
+  static bool isBuiltinTypeToken(ast::TokenType type);
+  bool isTypeStart() const;
+  bool looksLikeTypedDecl() const;
+  std::string parseTypeName();
   static std::string typeTokenLexeme(const ast::Token& tok);
   static int infixPrecedence(ast::TokenType type);
 
   ast::ExprPtr parsePrimaryExpression();
+  ast::ExprPtr parsePostfix(ast::ExprPtr left);
   ast::ExprPtr parseCallArgs(std::string callee, ast::SourceLocation loc);
+  std::vector<ast::ExprPtr> parseArgList();
 
   ast::StmtPtr parseConstdDecl();
   ast::StmtPtr parseExplicitTypeDecl();
   ast::StmtPtr parseInferDecl();
-  ast::StmtPtr parseAssignStmt();
+  ast::StmtPtr parseAssignOrExprStmt();
   ast::StmtPtr parseFuncDecl();
+  std::unique_ptr<ast::FuncDeclStmt> parseFunCommon(bool allow_body);
   ast::StmtPtr parseReturnStmt();
   ast::StmtPtr parseExprStmt();
   ast::StmtPtr parseIfStmt();
   ast::StmtPtr parseWhileStmt();
+  ast::StmtPtr parseClassDecl();
+  ast::StmtPtr parseInterfaceDecl();
+  ast::StmtPtr parseDeferStmt();
+  ast::StmtPtr parseSyncBlock();
   ast::Param parseParam();
   std::vector<ast::StmtPtr> parseBlockBody();
 
@@ -54,6 +69,9 @@ private:
   std::size_t index_ = 0;
   bool had_error_ = false;
   std::vector<std::string> diagnostics_;
+  std::unordered_set<std::string> class_names_;
+  std::unordered_set<std::string> interface_names_;
+  std::unordered_set<std::string> generic_type_names_;  // in-scope <T: ...>
 };
 
 }  // namespace l::parser

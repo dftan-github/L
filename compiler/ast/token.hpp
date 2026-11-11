@@ -36,6 +36,9 @@ enum class TokenType {
   KwWhile,
   KwTrue,
   KwFalse,
+  KwHeap,
+  KwDefer,
+  KwSync,
 
   // Built-in types
   TyI32,
@@ -44,6 +47,7 @@ enum class TokenType {
   TyBool,
   TyVoid,
   TyString,
+  TyPtr,
 
   // Punctuation / operators
   Bang,          // !
