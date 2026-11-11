@@ -22,6 +22,8 @@ enum class ExprKind {
   MethodCall,
   New,
   Heap,
+  Index,
+  Sizeof,
 };
 
 enum class StmtKind {
@@ -32,11 +34,13 @@ enum class StmtKind {
   ExprStmt,
   If,
   While,
+  ForIn,
   ClassDecl,
   FieldDecl,
   InterfaceDecl,
   Defer,
   Sync,
+  Import,
 };
 
 struct Node {
@@ -89,9 +93,17 @@ struct BinaryExpr : Expr {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
+// One call-site argument: positional (name empty) or keyword (`name: value`).
+struct CallArg {
+  std::string name;  // empty => positional
+  ExprPtr value;
+  SourceLocation loc;
+  void dump(std::ostream& out, int indent = 0) const;
+};
+
 struct CallExpr : Expr {
   std::string callee;
-  std::vector<ExprPtr> args;
+  std::vector<CallArg> args;
   ExprKind kind() const override { return ExprKind::Call; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
@@ -106,14 +118,14 @@ struct MemberAccessExpr : Expr {
 struct MethodCallExpr : Expr {
   ExprPtr object;
   std::string method;
-  std::vector<ExprPtr> args;
+  std::vector<CallArg> args;
   ExprKind kind() const override { return ExprKind::MethodCall; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
 struct NewExpr : Expr {
   std::string class_name;
-  std::vector<ExprPtr> args;
+  std::vector<CallArg> args;
   ExprKind kind() const override { return ExprKind::New; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
@@ -121,6 +133,19 @@ struct NewExpr : Expr {
 struct HeapExpr : Expr {
   ExprPtr inner;  // typically NewExpr
   ExprKind kind() const override { return ExprKind::Heap; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
+struct IndexExpr : Expr {
+  ExprPtr object;
+  ExprPtr index;
+  ExprKind kind() const override { return ExprKind::Index; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
+struct SizeofExpr : Expr {
+  std::string type_name;
+  ExprKind kind() const override { return ExprKind::Sizeof; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
@@ -170,6 +195,8 @@ struct FuncDeclStmt : Stmt {
   std::vector<Param> params;
   std::vector<StmtPtr> body;  // empty for interface method signatures
   bool is_method = false;
+  bool is_pub = false;
+  std::string module_name;  // file stem; used for private mangling
   StmtKind kind() const override { return StmtKind::FuncDecl; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
@@ -195,6 +222,14 @@ struct WhileStmt : Stmt {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
+struct ForInStmt : Stmt {
+  std::string item_name;  // loop variable
+  ExprPtr iterable;       // typically IdentifierExpr naming an Array<T>
+  std::vector<StmtPtr> body;
+  StmtKind kind() const override { return StmtKind::ForIn; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
 struct FieldDeclStmt : Stmt {
   std::string type_name;
   std::string name;
@@ -204,9 +239,12 @@ struct FieldDeclStmt : Stmt {
 
 struct ClassDeclStmt : Stmt {
   std::string name;
+  std::vector<GenericParam> generics;  // empty => non-generic; naked <T> allowed for containers
   std::vector<std::string> interfaces;  // implemented interface names
   std::vector<std::unique_ptr<FieldDeclStmt>> fields;
   std::vector<std::unique_ptr<FuncDeclStmt>> methods;
+  bool is_pub = false;
+  std::string module_name;
   StmtKind kind() const override { return StmtKind::ClassDecl; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
@@ -214,7 +252,15 @@ struct ClassDeclStmt : Stmt {
 struct InterfaceDeclStmt : Stmt {
   std::string name;
   std::vector<std::unique_ptr<FuncDeclStmt>> methods;  // signatures only
+  bool is_pub = false;
+  std::string module_name;
   StmtKind kind() const override { return StmtKind::InterfaceDecl; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
+struct ImportStmt : Stmt {
+  std::string path;  // e.g. "mod_a.l"
+  StmtKind kind() const override { return StmtKind::Import; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
 

@@ -24,6 +24,20 @@ GENERIC_TEST = ROOT.join("tests", "cases", "generic_test.l")
 HEAP_DEFER = ROOT.join("tests", "cases", "heap_defer.l")
 SYNC_FAIL = ROOT.join("tests", "cases", "sync_fail.l")
 SYNC_PASS = ROOT.join("tests", "cases", "sync_pass.l")
+MAIN_IMPORT = ROOT.join("tests", "cases", "main_import.l")
+MOD_A = ROOT.join("tests", "cases", "mod_a.l")
+ARRAY_TEST = ROOT.join("tests", "cases", "array_test.l")
+STDLIB_ARRAY = ROOT.join("stdlib", "array.l")
+FOR_IN = ROOT.join("tests", "cases", "for_in.l")
+GENERIC_INFERENCE = ROOT.join("tests", "cases", "generic_inference.l")
+OPTIONAL_TEST = ROOT.join("tests", "cases", "optional_test.l")
+STDLIB_OPTIONAL = ROOT.join("stdlib", "optional.l")
+CONSTRUCTOR = ROOT.join("tests", "cases", "constructor.l")
+STRING_CONCAT = ROOT.join("tests", "cases", "string_concat.l")
+KW_MIXED = ROOT.join("tests", "cases", "kw_mixed.l")
+KW_BAD = ROOT.join("tests", "cases", "kw_bad.l")
+INPUT_TEST = ROOT.join("tests", "cases", "input_test.l")
+STDLIB_IO = ROOT.join("stdlib", "io.l")
 OUT_DIR = ROOT.join("build", "clang-debug", "test_out")
 COMPILER = ENV.fetch(
   "L_COMPILER",
@@ -167,11 +181,13 @@ def test_func_call_dump_ast!
   /x
   assert!(stdout.match?(paren_mul), "expected AST shape *(+(1, 2), 3), got:\n#{stdout}")
 
-  # CallExpr(add, [10, 20])
+  # CallExpr(add, [10, 20]) — args wrapped as CallArg (positional)
   call = /
     VarDeclStmt\ :=\ y\n
     \s+CallExpr\ add\ \[2\]\n
+    \s+CallArg\ \(positional\)\n
     \s+IntLiteralExpr\ 10\n
+    \s+CallArg\ \(positional\)\n
     \s+IntLiteralExpr\ 20\n
   /x
   assert!(stdout.match?(call), "expected CallExpr(add, [10, 20]), got:\n#{stdout}")
@@ -381,6 +397,225 @@ def test_sync_race!
   puts "  OK sync_pass e2e"
 end
 
+def test_import_module_e2e!
+  assert!(File.exist?(MAIN_IMPORT), "main_import case not found: #{MAIN_IMPORT}")
+  assert!(File.exist?(MOD_A), "mod_a case not found: #{MOD_A}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("main_import.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, MAIN_IMPORT.to_s)
+  assert!(status.success?, "compile main_import failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "main_import.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "main_import.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "99\n", "expected \"99\\n\", got #{normalized.inspect}")
+
+  puts "  OK main_import e2e"
+end
+
+def test_array_e2e!
+  assert!(File.exist?(ARRAY_TEST), "array_test case not found: #{ARRAY_TEST}")
+  assert!(File.exist?(STDLIB_ARRAY), "stdlib array not found: #{STDLIB_ARRAY}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("array_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, STDLIB_ARRAY.to_s, ARRAY_TEST.to_s)
+  assert!(status.success?, "compile array_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "array_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "array_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "22\n", "expected \"22\\n\", got #{normalized.inspect}")
+
+  puts "  OK array_test e2e"
+end
+
+def test_for_in_e2e!
+  assert!(File.exist?(FOR_IN), "for_in case not found: #{FOR_IN}")
+  assert!(File.exist?(STDLIB_ARRAY), "stdlib array not found: #{STDLIB_ARRAY}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("for_in.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, STDLIB_ARRAY.to_s, FOR_IN.to_s)
+  assert!(status.success?, "compile for_in failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "for_in.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "for_in.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "30\n", "expected \"30\\n\", got #{normalized.inspect}")
+
+  puts "  OK for_in e2e"
+end
+
+def test_generic_inference_e2e!
+  assert!(File.exist?(GENERIC_INFERENCE), "generic_inference case not found: #{GENERIC_INFERENCE}")
+  assert!(File.exist?(STDLIB_ARRAY), "stdlib array not found: #{STDLIB_ARRAY}")
+
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", STDLIB_ARRAY.to_s, GENERIC_INFERENCE.to_s)
+  assert!(ir_st.success?, "emit-llvm generic_inference failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("Array_i32") || ir.include?("%Array_i32"), "IR missing Array_i32 specialization\n#{ir}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("generic_inference.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, STDLIB_ARRAY.to_s, GENERIC_INFERENCE.to_s)
+  assert!(status.success?, "compile generic_inference failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "generic_inference.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "generic_inference.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "100\n", "expected \"100\\n\", got #{normalized.inspect}")
+
+  puts "  OK generic_inference e2e"
+end
+
+def test_optional_e2e!
+  assert!(File.exist?(OPTIONAL_TEST), "optional_test case not found: #{OPTIONAL_TEST}")
+  assert!(File.exist?(STDLIB_OPTIONAL), "stdlib optional not found: #{STDLIB_OPTIONAL}")
+
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", STDLIB_OPTIONAL.to_s, OPTIONAL_TEST.to_s)
+  assert!(ir_st.success?, "emit-llvm optional_test failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(
+    ir.match?(/%Optional_i32 = type \{ i1, i32 \}/) ||
+      ir.include?("%Optional_i32 = type { i1, i32 }"),
+    "IR missing Optional_i32 = { i1, i32 }\n#{ir}"
+  )
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("optional_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, STDLIB_OPTIONAL.to_s, OPTIONAL_TEST.to_s)
+  assert!(status.success?, "compile optional_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "optional_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "optional_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "42\n99\n", "expected \"42\\n99\\n\", got #{normalized.inspect}")
+
+  puts "  OK optional_test e2e"
+end
+
+def test_constructor_e2e!
+  assert!(File.exist?(CONSTRUCTOR), "constructor case not found: #{CONSTRUCTOR}")
+
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", CONSTRUCTOR.to_s)
+  assert!(ir_st.success?, "emit-llvm constructor failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("User_init") || ir.include?("@User_init"), "IR missing User_init\n#{ir}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("constructor.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, CONSTRUCTOR.to_s)
+  assert!(status.success?, "compile constructor failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "constructor.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "constructor.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "15\n", "expected \"15\\n\", got #{normalized.inspect}")
+
+  puts "  OK constructor e2e"
+end
+
+def test_string_concat_e2e!
+  assert!(File.exist?(STRING_CONCAT), "string_concat case not found: #{STRING_CONCAT}")
+  assert!(File.exist?(STDLIB_STRING), "stdlib string not found: #{STDLIB_STRING}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("string_concat.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, STDLIB_STRING.to_s, STRING_CONCAT.to_s)
+  assert!(status.success?, "compile string_concat failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "string_concat.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "string_concat.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  # printSelf does not append '\n'; accept either form.
+  assert!(
+    normalized == "Hello L!" || normalized == "Hello L!\n",
+    "expected \"Hello L!\" (optional trailing newline), got #{normalized.inspect}"
+  )
+
+  puts "  OK string_concat e2e"
+end
+
+def test_kw_mixed_e2e!
+  assert!(File.exist?(KW_MIXED), "kw_mixed case not found: #{KW_MIXED}")
+  assert!(File.exist?(STDLIB_STRING), "stdlib string not found: #{STDLIB_STRING}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("kw_mixed.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, STDLIB_STRING.to_s, KW_MIXED.to_s)
+  assert!(status.success?, "compile kw_mixed failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "kw_mixed.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "kw_mixed.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "Alice\n20\nadmin\n", "expected Alice/20/admin lines, got #{normalized.inspect}")
+
+  puts "  OK kw_mixed e2e"
+end
+
+def test_kw_bad_parse!
+  assert!(File.exist?(KW_BAD), "kw_bad case not found: #{KW_BAD}")
+
+  stdout, stderr, status = run_compiler("--dump-ast", KW_BAD.to_s)
+  assert!(!status.success?, "kw_bad was expected to fail parsing, but exited 0\n#{stdout}\n#{stderr}")
+  combined = "#{stdout}\n#{stderr}"
+  assert!(
+    combined.match?(/positional argument cannot follow keyword argument/i),
+    "kw_bad missing expected parse error, got:\n#{combined}"
+  )
+
+  puts "  OK kw_bad parse rejects positional-after-KW"
+end
+
+def test_input_readline_e2e!
+  assert!(File.exist?(INPUT_TEST), "input_test case not found: #{INPUT_TEST}")
+  assert!(File.exist?(STDLIB_STRING), "stdlib string not found: #{STDLIB_STRING}")
+  assert!(File.exist?(STDLIB_IO), "stdlib io not found: #{STDLIB_IO}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("input_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s, STDLIB_STRING.to_s, STDLIB_IO.to_s, INPUT_TEST.to_s
+  )
+  assert!(status.success?, "compile input_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "input_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s, stdin_data: "L Language\n")
+  assert!(st.success?, "input_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(
+    normalized.include?("Hello, L Language!"),
+    "expected greeting containing \"Hello, L Language!\", got #{normalized.inspect}"
+  )
+
+  puts "  OK input_test e2e (stdin → read_line)"
+end
+
 def main
   test_golden_dump_tokens!
   test_var_decl_dump_ast!
@@ -396,6 +631,16 @@ def main
   test_generic_e2e!
   test_heap_defer_e2e!
   test_sync_race!
+  test_import_module_e2e!
+  test_array_e2e!
+  test_for_in_e2e!
+  test_generic_inference_e2e!
+  test_optional_e2e!
+  test_constructor_e2e!
+  test_string_concat_e2e!
+  test_kw_mixed_e2e!
+  test_kw_bad_parse!
+  test_input_readline_e2e!
 
   puts color("PASS", GREEN)
   exit 0

@@ -41,6 +41,12 @@ std::unique_ptr<ast::Module> Parser::parseModule() {
 }
 
 ast::StmtPtr Parser::parseStatement() {
+  if (check(ast::TokenType::KwImport)) {
+    return parseImportStmt();
+  }
+  if (check(ast::TokenType::KwPub)) {
+    return parsePubDecl();
+  }
   if (check(ast::TokenType::KwFun)) {
     return parseFuncDecl();
   }
@@ -58,6 +64,9 @@ ast::StmtPtr Parser::parseStatement() {
   }
   if (check(ast::TokenType::KwWhile)) {
     return parseWhileStmt();
+  }
+  if (check(ast::TokenType::KwFor)) {
+    return parseForInStmt();
   }
   if (check(ast::TokenType::KwDefer)) {
     return parseDeferStmt();
@@ -138,18 +147,45 @@ ast::ExprPtr Parser::parsePostfix(ast::ExprPtr left) {
       left = std::move(access);
       continue;
     }
+    if (match(ast::TokenType::LBracket)) {
+      auto index = std::make_unique<ast::IndexExpr>();
+      index->loc = left->loc;
+      index->object = std::move(left);
+      index->index = parseExpression(0);
+      consume(ast::TokenType::RBracket, "expected ']' after index expression");
+      left = std::move(index);
+      continue;
+    }
     break;
   }
   return left;
 }
 
-std::vector<ast::ExprPtr> Parser::parseArgList() {
-  std::vector<ast::ExprPtr> args;
+std::vector<ast::CallArg> Parser::parseArgList() {
+  // Ruby-style: positional args first, then `name: value` keyword args.
+  // Once a KW arg appears, every following arg must be keyword-labeled.
+  std::vector<ast::CallArg> args;
   consume(ast::TokenType::LParen, "expected '('");
+  bool seen_kw = false;
   if (!check(ast::TokenType::RParen)) {
     for (;;) {
-      ast::ExprPtr arg = parseExpression(0);
-      if (!arg) {
+      ast::CallArg arg;
+      arg.loc = peek().loc;
+      const bool looks_kw =
+          check(ast::TokenType::Identifier) && peek(1).type == ast::TokenType::Colon;
+      if (looks_kw) {
+        arg.name = peek().lexeme;
+        advance();  // name
+        consume(ast::TokenType::Colon, "expected ':' after keyword argument name");
+        arg.value = parseExpression(0);
+        seen_kw = true;
+      } else {
+        if (seen_kw) {
+          errorAt(peek(), "positional argument cannot follow keyword argument");
+        }
+        arg.value = parseExpression(0);
+      }
+      if (!arg.value && !had_error_) {
         break;
       }
       args.push_back(std::move(arg));
@@ -236,11 +272,32 @@ ast::ExprPtr Parser::parsePrimaryExpression() {
     advance();
     const std::string name_text =
         name.type == ast::TokenType::TyString ? "String" : name.lexeme;
+
+    // sizeof(T) — compile-time size via DataLayout after monomorphization.
+    if (name_text == "sizeof" && check(ast::TokenType::LParen)) {
+      advance();
+      auto expr = std::make_unique<ast::SizeofExpr>();
+      expr->loc = name.loc;
+      if (!isTypeStart() && !check(ast::TokenType::Identifier)) {
+        errorAt(peek(), "expected type name in sizeof(...)");
+        expr->type_name = "i32";
+      } else {
+        expr->type_name = parseTypeName();
+      }
+      consume(ast::TokenType::RParen, "expected ')' after sizeof type");
+      return expr;
+    }
+
+    std::string type_or_name = name_text;
+    if (class_names_.count(name_text) != 0 && check(ast::TokenType::LAngle)) {
+      type_or_name = parseTypeArgsSuffix(name_text);
+    }
+
     if (check(ast::TokenType::LParen)) {
       if (class_names_.count(name_text) != 0) {
         auto expr = std::make_unique<ast::NewExpr>();
         expr->loc = name.loc;
-        expr->class_name = name_text;
+        expr->class_name = type_or_name;
         expr->args = parseArgList();
         return expr;
       }
@@ -379,18 +436,21 @@ std::vector<ast::StmtPtr> Parser::parseBlockBody() {
   return body;
 }
 
-bool Parser::parseGenericParams(std::vector<ast::GenericParam>& out) {
-  // <T: IReader, U: IFoo>
+bool Parser::parseGenericParams(std::vector<ast::GenericParam>& out, bool allow_naked) {
+  // Functions: <T: IReader>. Classes/containers may use naked <T>.
   consume(ast::TokenType::LAngle, "expected '<' to start generic parameters");
   for (;;) {
     ast::Token tname = consume(ast::TokenType::Identifier, "expected generic type name");
-    consume(ast::TokenType::Colon, "expected ':' after generic name (naked <T> is forbidden)");
-    ast::Token constraint =
-        consume(ast::TokenType::Identifier, "expected interface constraint after ':'");
     ast::GenericParam gp;
     gp.loc = tname.loc;
     gp.name = tname.lexeme;
-    gp.constraint = constraint.lexeme;
+    if (match(ast::TokenType::Colon)) {
+      ast::Token constraint =
+          consume(ast::TokenType::Identifier, "expected interface constraint after ':'");
+      gp.constraint = constraint.lexeme;
+    } else if (!allow_naked) {
+      errorAt(peek(), "expected ':' after generic name (naked <T> is forbidden)");
+    }
     if (generic_type_names_.count(gp.name) != 0) {
       errorAt(tname, "duplicate generic type parameter");
     }
@@ -414,7 +474,7 @@ std::unique_ptr<ast::FuncDeclStmt> Parser::parseFunCommon(bool allow_body) {
 
   const auto saved_generics = generic_type_names_;
   if (check(ast::TokenType::LAngle)) {
-    parseGenericParams(func->generics);
+    parseGenericParams(func->generics, /*allow_naked=*/false);
   }
 
   consume(ast::TokenType::LParen, "expected '(' after function name");
@@ -498,6 +558,20 @@ ast::StmtPtr Parser::parseWhileStmt() {
   return stmt;
 }
 
+ast::StmtPtr Parser::parseForInStmt() {
+  // for item in collection { ... }
+  ast::Token kw = consume(ast::TokenType::KwFor, "expected 'for'");
+  ast::Token item = consume(ast::TokenType::Identifier, "expected loop variable after 'for'");
+  consume(ast::TokenType::KwIn, "expected 'in' after for-loop variable");
+  ast::ExprPtr iterable = parseExpression(0);
+  auto stmt = std::make_unique<ast::ForInStmt>();
+  stmt->loc = kw.loc;
+  stmt->item_name = item.lexeme;
+  stmt->iterable = std::move(iterable);
+  stmt->body = parseBlockBody();
+  return stmt;
+}
+
 ast::StmtPtr Parser::parseDeferStmt() {
   ast::Token kw = consume(ast::TokenType::KwDefer, "expected 'defer'");
   auto stmt = std::make_unique<ast::DeferStmt>();
@@ -521,6 +595,49 @@ ast::StmtPtr Parser::parseSyncBlock() {
   stmt->loc = kw.loc;
   stmt->body = parseBlockBody();
   return stmt;
+}
+
+ast::StmtPtr Parser::parseImportStmt() {
+  ast::Token kw = consume(ast::TokenType::KwImport, "expected 'import'");
+  auto stmt = std::make_unique<ast::ImportStmt>();
+  stmt->loc = kw.loc;
+  if (check(ast::TokenType::StringLiteral)) {
+    stmt->path = peek().lexeme;
+    advance();
+  } else if (check(ast::TokenType::Identifier)) {
+    // import mod_a;  →  mod_a.l
+    stmt->path = peek().lexeme + ".l";
+    advance();
+  } else {
+    errorAt(peek(), "expected module path string or name after import");
+  }
+  consume(ast::TokenType::Semicolon, "expected ';' after import");
+  return stmt;
+}
+
+ast::StmtPtr Parser::parsePubDecl() {
+  consume(ast::TokenType::KwPub, "expected 'pub'");
+  if (check(ast::TokenType::KwFun)) {
+    auto fn = parseFunCommon(/*allow_body=*/true);
+    fn->is_pub = true;
+    return fn;
+  }
+  if (check(ast::TokenType::KwClass)) {
+    auto cls = parseClassDecl();
+    if (cls && cls->kind() == ast::StmtKind::ClassDecl) {
+      static_cast<ast::ClassDeclStmt&>(*cls).is_pub = true;
+    }
+    return cls;
+  }
+  if (check(ast::TokenType::KwInterface)) {
+    auto iface = parseInterfaceDecl();
+    if (iface && iface->kind() == ast::StmtKind::InterfaceDecl) {
+      static_cast<ast::InterfaceDeclStmt&>(*iface).is_pub = true;
+    }
+    return iface;
+  }
+  errorAt(peek(), "expected fun/class/interface after pub");
+  return nullptr;
 }
 
 ast::StmtPtr Parser::parseInterfaceDecl() {
@@ -568,6 +685,12 @@ ast::StmtPtr Parser::parseClassDecl() {
   cls->name = class_name;
   class_names_.insert(class_name);
 
+  const auto saved_generics = generic_type_names_;
+  if (check(ast::TokenType::LAngle)) {
+    // Containers may use naked <T>; constrained form still accepted.
+    parseGenericParams(cls->generics, /*allow_naked=*/true);
+  }
+
   if (match(ast::TokenType::Colon)) {
     for (;;) {
       ast::Token iface = consume(ast::TokenType::Identifier, "expected interface name after ':'");
@@ -581,6 +704,14 @@ ast::StmtPtr Parser::parseClassDecl() {
   consume(ast::TokenType::LBrace, "expected '{' after class header");
 
   while (!atEnd() && !check(ast::TokenType::RBrace)) {
+    if (check(ast::TokenType::KwPub) && peek(1).type == ast::TokenType::KwFun) {
+      advance();  // pub
+      auto method = parseFunCommon(/*allow_body=*/true);
+      method->is_method = true;
+      method->is_pub = true;
+      cls->methods.push_back(std::move(method));
+      continue;
+    }
     if (check(ast::TokenType::KwFun)) {
       auto method = parseFunCommon(/*allow_body=*/true);
       method->is_method = true;
@@ -603,6 +734,7 @@ ast::StmtPtr Parser::parseClassDecl() {
   }
 
   consume(ast::TokenType::RBrace, "expected '}' after class body");
+  generic_type_names_ = saved_generics;
   return cls;
 }
 
@@ -694,18 +826,74 @@ bool Parser::isTypeStart() const {
          generic_type_names_.count(peek().lexeme) != 0;
 }
 
+std::size_t Parser::skipGenericArgs(std::size_t from) const {
+  if (peek(from).type != ast::TokenType::LAngle) {
+    return from;
+  }
+  int depth = 0;
+  std::size_t i = from;
+  while (true) {
+    const ast::Token& tok = peek(i);
+    if (tok.type == ast::TokenType::EndOfFile) {
+      return i;
+    }
+    if (tok.type == ast::TokenType::LAngle) {
+      ++depth;
+    } else if (tok.type == ast::TokenType::RAngle) {
+      --depth;
+      ++i;
+      if (depth == 0) {
+        return i;
+      }
+      continue;
+    }
+    ++i;
+  }
+}
+
 bool Parser::looksLikeTypedDecl() const {
   if (isBuiltinTypeToken(peek().type)) {
     return peek(1).type == ast::TokenType::Identifier;
   }
   if (peek().type == ast::TokenType::Identifier &&
       (class_names_.count(peek().lexeme) != 0 ||
-       interface_names_.count(peek().lexeme) != 0) &&
-      peek(1).type == ast::TokenType::Identifier) {
-    const auto t2 = peek(2).type;
-    return t2 == ast::TokenType::Equal || t2 == ast::TokenType::Bang;
+       interface_names_.count(peek().lexeme) != 0)) {
+    std::size_t after_type = 1;
+    if (peek(1).type == ast::TokenType::LAngle) {
+      after_type = skipGenericArgs(1);
+    }
+    if (peek(after_type).type != ast::TokenType::Identifier) {
+      return false;
+    }
+    const auto next = peek(after_type + 1).type;
+    return next == ast::TokenType::Equal || next == ast::TokenType::Bang;
   }
   return false;
+}
+
+std::string Parser::parseTypeArgsSuffix(std::string base) {
+  consume(ast::TokenType::LAngle, "expected '<' after generic type");
+  std::string out = std::move(base);
+  out.push_back('<');
+  bool first = true;
+  for (;;) {
+    if (!first) {
+      out.push_back(',');
+    }
+    first = false;
+    std::string arg = parseTypeName();
+    if (arg.empty()) {
+      errorAt(peek(), "expected type argument");
+      arg = "?";
+    }
+    out += arg;
+    if (!match(ast::TokenType::Comma)) {
+      break;
+    }
+  }
+  consume(ast::TokenType::RAngle, "expected '>' after type arguments");
+  out.push_back('>');
+  return out;
 }
 
 std::string Parser::parseTypeName() {
@@ -717,6 +905,9 @@ std::string Parser::parseTypeName() {
   if (peek().type == ast::TokenType::Identifier) {
     std::string name = peek().lexeme;
     advance();
+    if (check(ast::TokenType::LAngle)) {
+      return parseTypeArgsSuffix(std::move(name));
+    }
     return name;
   }
   return {};

@@ -38,11 +38,15 @@ const char* toString(TokenType type) {
     case TokenType::KwIf: return "KwIf";
     case TokenType::KwElse: return "KwElse";
     case TokenType::KwWhile: return "KwWhile";
+    case TokenType::KwFor: return "KwFor";
+    case TokenType::KwIn: return "KwIn";
     case TokenType::KwTrue: return "KwTrue";
     case TokenType::KwFalse: return "KwFalse";
     case TokenType::KwHeap: return "KwHeap";
     case TokenType::KwDefer: return "KwDefer";
     case TokenType::KwSync: return "KwSync";
+    case TokenType::KwImport: return "KwImport";
+    case TokenType::KwPub: return "KwPub";
     case TokenType::TyI32: return "TyI32";
     case TokenType::TyI64: return "TyI64";
     case TokenType::TyF64: return "TyF64";
@@ -71,6 +75,8 @@ const char* toString(TokenType type) {
     case TokenType::RParen: return "RParen";
     case TokenType::LBrace: return "LBrace";
     case TokenType::RBrace: return "RBrace";
+    case TokenType::LBracket: return "LBracket";
+    case TokenType::RBracket: return "RBracket";
     case TokenType::LAngle: return "LAngle";
     case TokenType::RAngle: return "RAngle";
     case TokenType::LessEq: return "LessEq";
@@ -106,11 +112,21 @@ void BinaryExpr::dump(std::ostream& out, int indent) const {
   if (right) right->dump(out, indent + 1);
 }
 
+void CallArg::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  if (name.empty()) {
+    out << "CallArg (positional)\n";
+  } else {
+    out << "CallArg " << name << ":\n";
+  }
+  if (value) value->dump(out, indent + 1);
+}
+
 void CallExpr::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "CallExpr " << callee << " [" << args.size() << "]\n";
-  for (const ExprPtr& arg : args) {
-    if (arg) arg->dump(out, indent + 1);
+  for (const CallArg& arg : args) {
+    arg.dump(out, indent + 1);
   }
 }
 
@@ -124,16 +140,16 @@ void MethodCallExpr::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "MethodCallExpr ." << method << " [" << args.size() << "]\n";
   if (object) object->dump(out, indent + 1);
-  for (const ExprPtr& arg : args) {
-    if (arg) arg->dump(out, indent + 1);
+  for (const CallArg& arg : args) {
+    arg.dump(out, indent + 1);
   }
 }
 
 void NewExpr::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "NewExpr " << class_name << " [" << args.size() << "]\n";
-  for (const ExprPtr& arg : args) {
-    if (arg) arg->dump(out, indent + 1);
+  for (const CallArg& arg : args) {
+    arg.dump(out, indent + 1);
   }
 }
 
@@ -141,6 +157,18 @@ void HeapExpr::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "HeapExpr\n";
   if (inner) inner->dump(out, indent + 1);
+}
+
+void IndexExpr::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "IndexExpr\n";
+  if (object) object->dump(out, indent + 1);
+  if (index) index->dump(out, indent + 1);
+}
+
+void SizeofExpr::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "SizeofExpr " << type_name << '\n';
 }
 
 void VarDeclStmt::dump(std::ostream& out, int indent) const {
@@ -176,7 +204,7 @@ void ReturnStmt::dump(std::ostream& out, int indent) const {
 
 void FuncDeclStmt::dump(std::ostream& out, int indent) const {
   pad(out, indent);
-  out << "FuncDeclStmt " << name;
+  out << "FuncDeclStmt " << (is_pub ? "pub " : "") << name;
   if (!generics.empty()) {
     out << '<';
     for (size_t i = 0; i < generics.size(); ++i) {
@@ -217,6 +245,13 @@ void WhileStmt::dump(std::ostream& out, int indent) const {
   dumpStmts(out, indent + 1, body);
 }
 
+void ForInStmt::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "ForInStmt " << item_name << '\n';
+  if (iterable) iterable->dump(out, indent + 1);
+  dumpStmts(out, indent + 1, body);
+}
+
 void FieldDeclStmt::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "FieldDeclStmt " << type_name << ' ' << name << '\n';
@@ -224,7 +259,20 @@ void FieldDeclStmt::dump(std::ostream& out, int indent) const {
 
 void ClassDeclStmt::dump(std::ostream& out, int indent) const {
   pad(out, indent);
-  out << "ClassDeclStmt " << name;
+  out << "ClassDeclStmt " << (is_pub ? "pub " : "") << name;
+  if (!generics.empty()) {
+    out << '<';
+    for (size_t i = 0; i < generics.size(); ++i) {
+      if (i != 0) {
+        out << ", ";
+      }
+      out << generics[i].name;
+      if (!generics[i].constraint.empty()) {
+        out << ": " << generics[i].constraint;
+      }
+    }
+    out << '>';
+  }
   if (!interfaces.empty()) {
     out << " :";
     for (const std::string& iface : interfaces) {
@@ -242,10 +290,15 @@ void ClassDeclStmt::dump(std::ostream& out, int indent) const {
 
 void InterfaceDeclStmt::dump(std::ostream& out, int indent) const {
   pad(out, indent);
-  out << "InterfaceDeclStmt " << name << '\n';
+  out << "InterfaceDeclStmt " << (is_pub ? "pub " : "") << name << '\n';
   for (const auto& method : methods) {
     if (method) method->dump(out, indent + 1);
   }
+}
+
+void ImportStmt::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "ImportStmt \"" << path << "\"\n";
 }
 
 void DeferStmt::dump(std::ostream& out, int indent) const {

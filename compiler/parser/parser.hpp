@@ -25,7 +25,7 @@ public:
   const std::vector<std::string>& diagnostics() const { return diagnostics_; }
 
 private:
-  bool parseGenericParams(std::vector<ast::GenericParam>& out);
+  bool parseGenericParams(std::vector<ast::GenericParam>& out, bool allow_naked);
   const ast::Token& peek(std::size_t offset = 0) const;
   bool check(ast::TokenType type) const;
   bool match(ast::TokenType type);
@@ -39,14 +39,16 @@ private:
   static bool isBuiltinTypeToken(ast::TokenType type);
   bool isTypeStart() const;
   bool looksLikeTypedDecl() const;
+  std::size_t skipGenericArgs(std::size_t from) const;
   std::string parseTypeName();
+  std::string parseTypeArgsSuffix(std::string base);
   static std::string typeTokenLexeme(const ast::Token& tok);
   static int infixPrecedence(ast::TokenType type);
 
   ast::ExprPtr parsePrimaryExpression();
   ast::ExprPtr parsePostfix(ast::ExprPtr left);
   ast::ExprPtr parseCallArgs(std::string callee, ast::SourceLocation loc);
-  std::vector<ast::ExprPtr> parseArgList();
+  std::vector<ast::CallArg> parseArgList();
 
   ast::StmtPtr parseConstdDecl();
   ast::StmtPtr parseExplicitTypeDecl();
@@ -58,10 +60,13 @@ private:
   ast::StmtPtr parseExprStmt();
   ast::StmtPtr parseIfStmt();
   ast::StmtPtr parseWhileStmt();
+  ast::StmtPtr parseForInStmt();
   ast::StmtPtr parseClassDecl();
   ast::StmtPtr parseInterfaceDecl();
   ast::StmtPtr parseDeferStmt();
   ast::StmtPtr parseSyncBlock();
+  ast::StmtPtr parseImportStmt();
+  ast::StmtPtr parsePubDecl();
   ast::Param parseParam();
   std::vector<ast::StmtPtr> parseBlockBody();
 

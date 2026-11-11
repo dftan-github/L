@@ -21,7 +21,7 @@ void Analyzer::checkExpr(const ast::Expr& expr) {
     case ast::ExprKind::Call: {
       const auto& call = static_cast<const ast::CallExpr&>(expr);
       for (const auto& arg : call.args) {
-        if (arg) checkExpr(*arg);
+        if (arg.value) checkExpr(*arg.value);
       }
       break;
     }
@@ -34,7 +34,7 @@ void Analyzer::checkExpr(const ast::Expr& expr) {
       const auto& call = static_cast<const ast::MethodCallExpr&>(expr);
       if (call.object) checkExpr(*call.object);
       for (const auto& arg : call.args) {
-        if (arg) checkExpr(*arg);
+        if (arg.value) checkExpr(*arg.value);
       }
       break;
     }
@@ -46,7 +46,7 @@ void Analyzer::checkExpr(const ast::Expr& expr) {
     case ast::ExprKind::New: {
       const auto& neu = static_cast<const ast::NewExpr&>(expr);
       for (const auto& arg : neu.args) {
-        if (arg) checkExpr(*arg);
+        if (arg.value) checkExpr(*arg.value);
       }
       break;
     }
@@ -115,6 +115,12 @@ void Analyzer::checkStmt(const ast::Stmt& stmt) {
       const auto& wh = static_cast<const ast::WhileStmt&>(stmt);
       if (wh.cond) checkExpr(*wh.cond);
       checkStmtList(wh.body);
+      break;
+    }
+    case ast::StmtKind::ForIn: {
+      const auto& fin = static_cast<const ast::ForInStmt&>(stmt);
+      if (fin.iterable) checkExpr(*fin.iterable);
+      checkStmtList(fin.body);
       break;
     }
     case ast::StmtKind::Defer: {

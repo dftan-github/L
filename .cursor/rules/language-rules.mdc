@@ -192,3 +192,17 @@ Ensure the parser handles the code in `README.md` Section 18 / `tests/cases/gold
 - **C++ API Only**: Prefer C++ APIs (`llvm::IRBuilder`, `llvm::LLVMContext`, `llvm::Module`). 
 - **Context Management**: Avoid deprecated global context C APIs (like `LLVMGetGlobalContext`). Use explicitly managed `llvm::LLVMContext` instances. 
 - **C API Warning**: If C APIs are used for convenience, use `LLVMContextCreate` and avoid `LLVMGetOrInsertFunction` alternatives that rely on global state.
+
+## 31. Automatic Semicolon Insertion (ASI)
+- **No Mandatory Semicolons**: Source code MUST NOT require manual semicolons `;` at the end of lines.
+- **Lexer-level ASI**: The Lexer MUST auto-insert a virtual `Semicolon ";"` token upon encountering a newline `\n` if the previous non-whitespace token is one of: `Identifier`, `IntLiteral`, `StringLiteral`, `RParen ")"`, `RBrace "}"`, or `Bang "!"`.
+- **Parser Unchanged**: The Parser still relies on the `Semicolon ";"` token to terminate statements.
+- **Single-line Multi-statements**: If multiple statements are written on a single line, the programmer MUST explicitly use `;` to separate them (since no newline exists).
+
+## 32. Parameter Passing Model (Pass by Value vs. Reference)
+- **Primitives (i32, f64, bool, ptr)**: MUST pass by value (via LLVM registers).
+- **Classes / Structs (String, Array, User)**: MUST pass by reference (LLVM pointer or Fat Pointer). NEVER copy the whole struct on function calls.
+- **Read-Only Constraint via `!`**: 
+  - `fun foo(Box b)` -> Passes `Box*` but the frontend MUST reject any mutation to `b`'s fields (equivalent to `const Box*`).
+  - `fun foo(Box b!)` -> Passes `Box*` and ALLOWS mutation of `b`'s fields.
+- **Assignment**: `b2 := b1` for classes MUST copy the pointer/reference, NOT deep-copy the object.

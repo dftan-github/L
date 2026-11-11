@@ -11,7 +11,7 @@
 #include "ast/token.hpp"
 #include "codegen/codegen.hpp"
 #include "lexer/lexer.hpp"
-#include "parser/parser.hpp"
+#include "module/loader.hpp"
 #include "semantic/semantic.hpp"
 
 #include "llvm/Support/Program.h"
@@ -58,56 +58,6 @@ void dumpTokens(const std::vector<l::ast::Token>& tokens) {
               << tok.loc.filename << ':' << tok.loc.line << ':' << tok.loc.column
               << '\n';
   }
-}
-
-void collectTypeNames(const l::ast::Module& module,
-                      std::vector<std::string>& classes,
-                      std::vector<std::string>& interfaces) {
-  for (const l::ast::StmtPtr& stmt : module.stmts) {
-    if (!stmt) {
-      continue;
-    }
-    if (stmt->kind() == l::ast::StmtKind::ClassDecl) {
-      classes.push_back(static_cast<const l::ast::ClassDeclStmt&>(*stmt).name);
-    } else if (stmt->kind() == l::ast::StmtKind::InterfaceDecl) {
-      interfaces.push_back(static_cast<const l::ast::InterfaceDeclStmt&>(*stmt).name);
-    }
-  }
-}
-
-std::unique_ptr<l::ast::Module> parseSources(const std::vector<std::string>& paths) {
-  auto merged = std::make_unique<l::ast::Module>();
-  std::vector<std::string> known_classes;
-  std::vector<std::string> known_interfaces;
-
-  for (const std::string& path : paths) {
-    std::string source;
-    if (!loadSource(path, source)) {
-      std::cerr << "Cannot open source file: " << path << '\n';
-      return nullptr;
-    }
-    l::lexer::Lexer lexer(path, source);
-    std::vector<l::ast::Token> tokens = lexer.tokenize();
-    l::parser::Parser parser(std::move(tokens));
-    for (const std::string& c : known_classes) {
-      parser.registerClassName(c);
-    }
-    for (const std::string& i : known_interfaces) {
-      parser.registerInterfaceName(i);
-    }
-    std::unique_ptr<l::ast::Module> module = parser.parseModule();
-    for (const std::string& diag : parser.diagnostics()) {
-      std::cerr << diag << '\n';
-    }
-    if (parser.hadError() || !module) {
-      return nullptr;
-    }
-    collectTypeNames(*module, known_classes, known_interfaces);
-    for (l::ast::StmtPtr& stmt : module->stmts) {
-      merged->stmts.push_back(std::move(stmt));
-    }
-  }
-  return merged;
 }
 
 std::string runtimeLibPath() {
@@ -236,13 +186,14 @@ int main(int argc, char** argv) {
         std::cerr << "Cannot open source file: " << path << '\n';
         return 1;
       }
+      // dump-tokens keeps a direct lexer path (no import expansion).
       l::lexer::Lexer lexer(path, source);
       dumpTokens(lexer.tokenize());
     }
     return 0;
   }
 
-  auto ast = parseSources(source_paths);
+  auto ast = l::module::loadEntries(source_paths);
   if (!ast) {
     return 1;
   }

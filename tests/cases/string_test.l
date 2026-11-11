@@ -1,5 +1,5 @@
 fun main() -> i32 {
-    String s = String("Hello L!");
-    s.printSelf();
-    return 0;
+    s := String("Hello L!")
+    s.printSelf()
+    return 0
 }

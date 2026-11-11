@@ -34,11 +34,15 @@ enum class TokenType {
   KwIf,
   KwElse,
   KwWhile,
+  KwFor,
+  KwIn,
   KwTrue,
   KwFalse,
   KwHeap,
   KwDefer,
   KwSync,
+  KwImport,
+  KwPub,
 
   // Built-in types
   TyI32,
@@ -71,6 +75,8 @@ enum class TokenType {
   RParen,        // )
   LBrace,        // {
   RBrace,        // }
+  LBracket,      // [
+  RBracket,      // ]
   LAngle,        // <
   RAngle,        // >
   LessEq,        // <=

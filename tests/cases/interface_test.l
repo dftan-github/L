@@ -1,20 +1,21 @@
 interface IReader {
-    fun read_value() -> i32;
+    fun read_value() -> i32
 }
 
 class Point : IReader {
-    i32 x;
+    i32 x
     fun read_value() -> i32 {
-        return x;
+        return x
     }
 }
 
 fun main() -> i32 {
-    Point p = Point();
-    p.x = 42;
+    p := Point()
+    p.x = 42
 
-    IReader iface = p;
-    i32 result = iface.read_value();
-    print(result);
-    return 0;
+    // Interface binding needs an explicit type (:= would infer Point).
+    IReader iface = p
+    result := iface.read_value()
+    print(result)
+    return 0
 }

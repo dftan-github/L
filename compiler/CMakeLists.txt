@@ -5,6 +5,7 @@ add_library(l_compiler STATIC
   ast/ast.cpp
   semantic/semantic.cpp
   codegen/codegen.cpp
+  module/loader.cpp
 )
 
 target_include_directories(l_compiler

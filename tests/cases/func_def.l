@@ -1,3 +1,3 @@
 fun add(i32 a, i32 b) -> i32 {
-    return a + b;
+    return a + b
 }

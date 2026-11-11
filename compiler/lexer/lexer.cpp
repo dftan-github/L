@@ -15,8 +15,52 @@ Lexer::Lexer(std::string filename, std::string_view source)
   }
 }
 
+bool Lexer::asiTrigger(ast::TokenType type) {
+  switch (type) {
+    case ast::TokenType::Identifier:
+    case ast::TokenType::IntLiteral:
+    case ast::TokenType::StringLiteral:
+    case ast::TokenType::RParen:
+    case ast::TokenType::RBrace:
+    case ast::TokenType::Bang:
+    // Type tokens end interface method signatures: `fun f() -> i32`
+    case ast::TokenType::TyI32:
+    case ast::TokenType::TyI64:
+    case ast::TokenType::TyF64:
+    case ast::TokenType::TyBool:
+    case ast::TokenType::TyVoid:
+    case ast::TokenType::TyString:
+    case ast::TokenType::TyPtr:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool Lexer::shouldInsertAsiBeforeNext() const {
+  // RBrace is listed as an ASI trigger, but L block statements (if/while/sync/
+  // defer/fun/class) are not semicolon-terminated, and the parser has no empty
+  // statement. Inserting after '}' breaks `}\nprint(...)` and `}\nif`.
+  // Trailing-block expression statements must use an explicit ';' after '}'.
+  if (prev_type_ == ast::TokenType::RBrace) {
+    return false;
+  }
+  if (!asiTrigger(prev_type_)) {
+    return false;
+  }
+  if (atEnd()) {
+    return true;
+  }
+  if (peek() == ';') {
+    return false;
+  }
+  return true;
+}
+
 std::vector<ast::Token> Lexer::tokenize() {
   std::vector<ast::Token> tokens;
+  prev_type_ = ast::TokenType::EndOfFile;
+  resumed_after_asi_ = false;
   for (;;) {
     ast::Token tok = next();
     tokens.push_back(tok);
@@ -28,11 +72,30 @@ std::vector<ast::Token> Lexer::tokenize() {
 }
 
 ast::Token Lexer::next() {
-  skipWhitespaceAndComments();
+  if (!resumed_after_asi_) {
+    bool saw_newline = false;
+    skipWhitespaceAndComments(saw_newline);
+    if (saw_newline && shouldInsertAsiBeforeNext()) {
+      const ast::SourceLocation loc = location();
+      resumed_after_asi_ = true;
+      prev_type_ = ast::TokenType::Semicolon;
+      return makeToken(ast::TokenType::Semicolon, ";", loc);
+    }
+  } else {
+    resumed_after_asi_ = false;
+  }
+
   if (atEnd()) {
+    prev_type_ = ast::TokenType::EndOfFile;
     return makeToken(ast::TokenType::EndOfFile, "", location());
   }
 
+  ast::Token tok = lexTokenAtCursor();
+  prev_type_ = tok.type;
+  return tok;
+}
+
+ast::Token Lexer::lexTokenAtCursor() {
   const char c = peek();
   if (c == '"') {
     return lexString();
@@ -85,20 +148,28 @@ void Lexer::advanceBytes(std::size_t n) {
   }
 }
 
-void Lexer::skipWhitespaceAndComments() {
+void Lexer::skipWhitespaceAndComments(bool& saw_newline) {
+  saw_newline = false;
   for (;;) {
     if (atEnd()) {
       return;
     }
     const char c = peek();
-    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+    if (c == ' ' || c == '\t' || c == '\r') {
+      advance();
+      continue;
+    }
+    if (c == '\n') {
+      saw_newline = true;
       advance();
       continue;
     }
     if (trySkipLineComment()) {
+      // Line comment body stopped before '\n'; the following newline is ASI-relevant.
       continue;
     }
     if (trySkipBlockComment()) {
+      // Newlines inside block comments do not trigger ASI.
       continue;
     }
     return;
@@ -238,6 +309,12 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "while") {
     return ast::TokenType::KwWhile;
   }
+  if (text == "for") {
+    return ast::TokenType::KwFor;
+  }
+  if (text == "in") {
+    return ast::TokenType::KwIn;
+  }
   if (text == "true") {
     return ast::TokenType::KwTrue;
   }
@@ -252,6 +329,12 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   }
   if (text == "sync") {
     return ast::TokenType::KwSync;
+  }
+  if (text == "import") {
+    return ast::TokenType::KwImport;
+  }
+  if (text == "pub") {
+    return ast::TokenType::KwPub;
   }
   if (text == "i32") {
     return ast::TokenType::TyI32;
@@ -403,6 +486,10 @@ ast::Token Lexer::lexPunctuation() {
       return makeToken(ast::TokenType::LBrace, "{", start);
     case '}':
       return makeToken(ast::TokenType::RBrace, "}", start);
+    case '[':
+      return makeToken(ast::TokenType::LBracket, "[", start);
+    case ']':
+      return makeToken(ast::TokenType::RBracket, "]", start);
     case '<':
       return makeToken(ast::TokenType::LAngle, "<", start);
     case '>':

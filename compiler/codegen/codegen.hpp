@@ -42,6 +42,10 @@ private:
     std::unordered_map<std::string, llvm::Function*> methods;
     std::unordered_map<std::string, llvm::GlobalVariable*> vtables;
     const ast::ClassDeclStmt* ast = nullptr;
+    // For specialized generic classes (e.g. Array<i32>): concrete type args.
+    std::vector<std::string> type_args;
+    std::string template_name;  // "Array" when name is "Array<i32>"
+    std::string ir_name;        // LLVM-friendly name (Array_i32)
   };
 
   llvm::Type* i32Ty();
@@ -65,12 +69,35 @@ private:
   llvm::Function* getOrDeclarePrintInt();
   llvm::Function* getOrDeclarePrintStr();
   llvm::Function* getOrDeclareAlloc();
+  llvm::Function* getOrDeclareRealloc();
   llvm::Function* getOrDeclareFree();
+  llvm::Function* getOrDeclareStrConcat();
+  llvm::Function* getOrDeclareReadLine();
   llvm::Type* llvmTypeForTypeName(const std::string& name);
+  // Best-effort expression type for operator lowering / := inference.
+  std::string exprTypeOf(const ast::Expr& expr) const;
+  bool isStringOperand(const ast::Expr& expr) const;
+  // Materialize a String object pointer (alloca / class ptr) for concat / print.
+  llvm::Value* emitStringObjectPtr(const ast::Expr& expr);
+  // Materialize a String by-value for concat RHS / returns.
+  llvm::Value* emitStringByValue(const ast::Expr& expr);
+  llvm::Value* emitStringAdd(const ast::BinaryExpr& bin);
   bool initClassAtPtr(llvm::Value* base, const ClassInfo& info, const ast::NewExpr& neu);
   bool initClassFromNew(llvm::AllocaInst* alloca, const ClassInfo& info,
                         const ast::NewExpr& neu);
   llvm::Value* classObjectPtr(const std::string& name);
+
+  static bool splitGenericType(const std::string& name, std::string& base,
+                               std::vector<std::string>& args);
+  static std::string mangleSpecName(const std::string& base,
+                                    const std::vector<std::string>& args);
+  bool ensureTypeAvailable(const std::string& name);
+  bool specializeClass(const ast::ClassDeclStmt& tmpl, const std::vector<std::string>& args,
+                       const std::string& instance_name);
+  uint64_t allocSizeOfTypeName(const std::string& type_name);
+  llvm::Type* elementTypeForPtrIndex() const;
+  llvm::Value* emitIndexLValue(const ast::IndexExpr& expr);
+  llvm::Value* emitSizeof(const ast::SizeofExpr& expr);
 
   llvm::Value* toI1(llvm::Value* v);
   llvm::Value* toI32(llvm::Value* v);
@@ -102,13 +129,21 @@ private:
   llvm::Function* ensureSpecialized(const ast::FuncDeclStmt& tmpl,
                                     const std::vector<std::string>& arg_type_names);
   llvm::Value* emitGenericOrPlainCall(const ast::CallExpr& call);
+  // Reorder positional+keyword CallArgs to match FuncDecl param order.
+  bool resolveCallArgs(const ast::FuncDeclStmt& fn, const std::vector<ast::CallArg>& raw,
+                       std::vector<const ast::Expr*>& ordered);
+  llvm::Value* emitValueForParam(const ast::Expr& expr, llvm::Type* expected,
+                                 const std::string& expected_type_name);
 
   bool emitVarDecl(const ast::VarDeclStmt& decl);
+  // Infer local type from RHS for `name := expr` (NewExpr / heap New / literals).
+  std::string inferTypeFromExpr(const ast::Expr& expr);
   bool emitAssign(const ast::AssignStmt& assign);
   bool emitReturn(const ast::ReturnStmt& ret);
   bool emitExprStmt(const ast::ExprStmt& stmt);
   bool emitIf(const ast::IfStmt& stmt);
   bool emitWhile(const ast::WhileStmt& stmt);
+  bool emitForIn(const ast::ForInStmt& stmt);
   bool emitDefer(const ast::DeferStmt& stmt);
   bool emitSync(const ast::SyncBlockStmt& stmt);
 
@@ -119,6 +154,10 @@ private:
   void error(const std::string& message);
   void ensureDataLayout();
 
+  static std::string mangleName(const std::string& module_name, const std::string& name,
+                                bool is_pub);
+  std::string resolveFuncIrName(const std::string& callee) const;
+
   std::unique_ptr<llvm::Module> module_;
   llvm::IRBuilder<> builder_;
   std::unordered_map<std::string, llvm::AllocaInst*> named_values_;
@@ -127,8 +166,14 @@ private:
   std::unordered_map<std::string, ClassInfo> classes_;
   std::unordered_map<std::string, InterfaceInfo> interfaces_;
   std::unordered_map<std::string, const ast::FuncDeclStmt*> generic_templates_;
+  std::unordered_map<std::string, const ast::FuncDeclStmt*> concrete_funcs_;  // for KW reorder
+  std::unordered_map<std::string, const ast::ClassDeclStmt*> generic_class_templates_;
   std::unordered_map<std::string, llvm::Function*> specialized_funcs_;
   std::unordered_map<std::string, std::string> type_subst_;
+  // Cross-module symbol tables: short name → LLVM IR name.
+  std::unordered_map<std::string, std::string> public_funcs_;
+  std::unordered_map<std::string, std::string> private_funcs_;  // "mod::name" → IR
+  std::string current_module_;
   llvm::StructType* fat_ptr_ty_ = nullptr;
 
   // Defer scopes: outer -> inner. Each scope holds DeferStmt* in registration order.
