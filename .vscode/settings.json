@@ -1,0 +1,13 @@
+{
+  "clangd.path": "D:/Librarys/clang+llvm-22.1.0-x86_64-pc-windows-msvc/bin/clangd.exe",
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build/clang-clangd",
+    "--background-index",
+    "--clang-tidy=false"
+  ],
+  "cmake.configurePreset": "clang-debug",
+  "cmake.buildPreset": "clang-debug",
+  "clangd.fallbackFlags": [
+    "-std=c++20"
+  ]
+}

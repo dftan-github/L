@@ -1,0 +1,52 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_CXX_SCAN_FOR_MODULES": "OFF"
+      }
+    },
+    {
+      "name": "clang-base",
+      "hidden": true,
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "D:/Librarys/clang+llvm-22.1.0-x86_64-pc-windows-msvc/bin/clang++.exe",
+        "CMAKE_MAKE_PROGRAM": "${sourceDir}/tools/bin/ninja.exe",
+        "LLVM_DIR": "D:/Librarys/clang+llvm-22.1.0-x86_64-pc-windows-msvc/lib/cmake/llvm"
+      }
+    },
+    {
+      "name": "clang-debug",
+      "displayName": "Clang + Ninja (Debug)",
+      "inherits": "clang-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "clang-clangd",
+      "displayName": "Clang compile_commands for clangd only",
+      "inherits": "clang-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "clang-debug",
+      "configurePreset": "clang-debug"
+    }
+  ]
+}

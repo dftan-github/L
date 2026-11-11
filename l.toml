@@ -1,0 +1,20 @@
+[package]
+name = "L"
+version = "0.1.0"
+description = "Language L compiler, runtime, and stdlib"
+edition = "2026"
+
+[lib]
+# Source modules under stdlib/ (Phase 1: empty). Binary modules use .li + .o/.a.
+path = "stdlib"
+
+[dependencies]
+# name = { path = "...", version = "..." }
+
+[build]
+# Debug: -O0 | Release: -O3 + LTO (wired by the driver later).
+default-mode = "Debug"
+
+[targets]
+compiler = "compiler"
+runtime = "runtime"

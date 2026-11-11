@@ -1,0 +1,14 @@
+---
+description: Only use rules and conventions defined inside this project; ignore personal/external agent skills and stores.
+alwaysApply: true
+---
+
+# Project-only rules
+
+For this repository (`L`):
+
+- Follow only guidance that lives **in this project** (e.g. `.cursor/rules/`, `AGENTS.md`, project docs, and code in this tree).
+- Do **not** load, cite, or follow personal Cursor skills, agent stores, or lessons from outside this repo.
+- Do **not** write new skills/lessons into personal or global agent stores for work done here; if a convention must persist, put it under this project's `.cursor/rules/` (or other project docs the user names).
+- Prefer the project's own patterns and files over any prior external habit when they conflict.
+

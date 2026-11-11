@@ -1,0 +1,265 @@
+---
+description: 语言 L 的核心语法与架构规范
+alwaysApply: true
+---
+
+# Language L Compiler - Cursor Rules & Constraints
+
+You are an expert compiler engineer building a new high-performance language "L" using LLVM. 
+The goal of Language L is to provide C/C++ level performance, seamless C/C++ DLL interop, but **completely eliminate the complex C++ dependency model** (no inheritance, no ABI coupling, no macro hell).
+
+## 1. Core Object Model (STRICT RULES)
+- **NO INHERITANCE**: Classes have no base classes. Classes are pure data structures.
+- **Pure Data Layout**: Map classes directly to LLVM `StructType` without hidden vptrs. 
+- **Interface Implementation**: Use a "fat pointer" / two-pointer approach `{ data_ptr, vtable_ptr }` for interfaces. A class can implement multiple interfaces.
+- **Delegation**: Implement reuse via explicit delegation, not inheritance.
+- **Compile-Time Polymorphism**: Implement generics via **Monomorphization**. Generate specialized LLVM IR functions for every concrete type instantiation. Zero runtime overhead for generics. Use `LinkOnceODR` for generic instantiations.
+
+## 2. Syntax & Language Features (DO NOT DEVIATE)
+- **No `let` or `var` keywords**.
+- **Type Inference**: Use `:=` for variable declaration with type inference.
+  * Example: `count := 0` (infers `i32`)
+- **Explicit Typing**: Type comes first.
+  * Example: `i32 count = 0`
+- **Mutability**: Variables are IMMUTABLE by default. Use `!` suffix on the LHS to declare or assign a mutable variable.
+  * Declare: `count! := 0;`
+  * Assign: `count! = 1;`
+  * Read (R-value): MUST NOT use `!`. `print(count)` is valid. `count! + 1` must throw a parsing error to avoid logical NOT ambiguity.
+- **Constants**: 
+  * `const`: Compile-time literal, inlined, no runtime memory.
+  * `constd`: Dynamic constant (runtime initialized, then locked). Example: `constd size = get_size();`
+- **Functions**: Use `fun` keyword. Syntax: `fun add(i32 a, i32 b) -> i32 { ... }`
+- **Trailing Blocks**: Support Ruby-style trailing blocks for the last function argument.
+  * Syntax MUST be: `function_call(args) { |param1, param2| statements }`.
+  * The parser must automatically convert this block into an anonymous `fun` and pass it as the final argument.
+- **Partial Classes**: `partial class`. Must merge ASTs during semantic analysis into a single LLVM `StructType`. No duplicate types.
+- **Variable Declaration**: No comma-separated declarations. One variable per statement. No uninitialized variables (no `i32 a;`).
+
+## 3. Module System & Namespaces
+- **File-as-Module**: No `#include`. Use binary module imports.
+- **Symbol Mangling**: Flatten namespaces in LLVM IR. E.g., `math::add` -> `@math_add`.
+- **Extern C**: Wrap external C functions in `extern module` blocks.
+
+## 4. C/C++ Interop (Glue Layer)
+- **No Direct C++ ABI Calls**: Never parse C++ mangled symbols.
+- **C Proxy DLL**: C++ assets must be wrapped in C++ proxy DLLs with `extern "C"` exports.
+- **LLVM ExternalLinkage**: Declare proxy DLL functions with `ExternalLinkage` and generate standard C ABI `CallInst`s.
+- **Exception Isolation**: C++ exceptions must be caught and converted to error codes in the proxy DLL.
+
+## 5. Runtime & Memory
+- **Explicit Memory**: No implicit copies or conversions. 
+- **Runtime in C**: Runtime must be pure C (`l_alloc`, `l_free`). No GC or ref counting.
+- **Strings**: `{ char* data, size_t length }`. No null-terminated strings (except at C ABI boundaries).
+- **Standard Library**: Do NOT use `std::` containers. Implement L's stdlib using L's generics and standard C `malloc`/`free`.
+- **Config System (No Implicit Nulls)**: Configuration loading MUST return `Optional<T>`. Never introduce implicit default/unknown values in the language. Use `unwrap_or(default)` for fallback values.
+
+## 6. Error Handling
+- **No Exceptions**: Align with Rust's `Result<T, E>` and `?` operator.
+- **Cold Path**: Use LLVM `llvm.expect` to mark error branches as cold paths.
+
+## 7. LLVM Backend Requirements
+- **SSA Construction**: Correctly convert mutable AST variables into SSA form by inserting `phi` nodes.
+- **Devirtualization**: Structure interface calls to allow LLVM's `Devirtualization`.
+- **Alignment**: Use non-packed `StructType` to allow LLVM to insert C ABI padding. Fat pointers must be naturally aligned.
+- **Diagnostics**: Frontend must not crash on syntax errors. Use Panic Mode AST recovery and collect multiple errors.
+
+## 8. Golden Syntax Test Case (Verify Parser against this)
+```text
+const MAX_LIMIT = 100;
+constd start_time = get_current_time();
+size := get_file_size("data.bin");
+
+mut_count! := 0;           
+i32 age! = 18;             
+mut_count! = 10;           
+
+fun add(i32 a, i32 b) -> i32 {
+    return a + b;
+}
+
+interface IPrint {
+    fun printSelf();
+}
+
+partial class User : IPrint {
+    String name = "L";
+    i32 age := 18;
+}
+
+partial class User {
+    fun printSelf() {
+        print(name);
+    }
+}
+
+fun processList<T>(Array<T> list, fun(T) -> void action) {}
+
+list := Array<i32>(3);
+list.push(1);
+
+processList(list) { |item| 
+    print(item); 
+}
+
+## 9. Compile-Time Execution (comptime)
+- **Syntax**: Support `comptime { ... }` blocks and `comptime expr`.
+- **Evaluation**: The frontend MUST evaluate `comptime` using an internal interpreter or LLVM JIT.
+- **Return Types**: Can return compile-time constants, AST nodes (injected dynamically into the current AST), or code sequences.
+- **Strict Boundaries**: `comptime` code MUST NOT perform runtime I/O, network requests, or call external C DLLs.
+
+## 10. Public API & Interface Extraction
+- **`pub` Keyword**: Only `pub` declarations are visible to external modules. Unmarked is private.
+- **Extractor Tool**: The compiler MUST support generating pure interface files (`.li`) from source files.
+- **Extraction Rules**: 
+  - Keep ONLY `pub` AST nodes.
+  - Strip all function bodies (replace `{ ... }` with `;`).
+  - Omit private fields and methods.
+  - Merge `partial class` before extracting.
+  - Keep generic signatures as-is (do NOT monomorphize).
+- **Usage**: `.li` files are for type checking and IDE completion, linked against compiled binaries.
+
+## 11. Generics & Anti-Angle-Bracket-Hell
+- **Syntax & Bounds**: Use `<T: InterfaceName>`. Naked generics without bounds (e.g., `<T>`) are FORBIDDEN.
+- **Inference**: Do NOT require `<T>` at call sites. Infer from arguments (e.g., `sort(my_list)`).
+- **Nesting Depth Limit (CRITICAL)**: 
+  - The parser MUST calculate generic nesting depth. Max allowed depth is **2** (e.g., `Map<String, Array<T>>`).
+  - Depth >= 3 (e.g., `Array<Map<String, Array<i32>>>`) MUST trigger a compile error.
+  - Error message MUST suggest using `type AliasName = ComplexType;` to flatten the nesting.
+- **No Template Specialization**: Absolutely forbid C++ style template specialization. Use `comptime` for type-specific branching.
+
+## 12. Concurrency & Threading Model
+- **No Built-in Thread Keywords**: Do NOT implement `thread`/`async` keywords in Phase 1. Thread spawning and Mutex are provided via external C Runtime functions (`extern module std::thread`).
+- **Immutability for Safety**: Immutable variables (`:=`, `constd`) are strictly thread-safe by default.
+- **Structured Concurrency**: Leverage the `spawn { |...| ... }` trailing block syntax for thread creation.
+- **Explicit `sync` Block**: Implement `sync { ... }` which translates to safe Mutex lock/unlock using C Runtime. Ensure auto-unlock on early returns via LLVM landing pads.
+- **Absolute Strictness (Data Race Zero Tolerance)**: 
+  - Inside a `spawn { ... }` block, ANY read or write to a captured external mutable variable (declared with `!`) MUST be enclosed in a `sync { ... }` block.
+  - The frontend MUST perform scope capture analysis. If a mutable variable is accessed inside `spawn` but outside `sync`, it MUST trigger a **fatal compile error** and halt code generation.
+  - Error message must be exactly: `Error: Data race detected. Mutable variable 'xxx!' captured in 'spawn' must be accessed inside a 'sync' block.`
+- **Deferred Features**: Do NOT implement Channels or Actor models in Phase 1. Stick to basic Atomics and Mutexes.
+
+## 13. Library & Package System
+- **No Header Files**: NEVER implement C++ style header files (`#include`, `.h`, `.hpp`). 
+- **Library Types**: Libraries are either provided as `.l` source modules or as Binary Modules (`.li` interface files + compiled `.o`/`.a`).
+- **Interface (`.li`)**: Use `.li` files for type checking and IDE completion. These are generated via `l gen-interface`.
+- **Package Manifest**: Support a `l.toml` manifest file at the root of a library for metadata and dependency management.
+- **Circular Dependencies**: The compiler frontend MUST detect and reject circular module dependencies (e.g., Module A imports B, B imports A).
+
+## 14. Build Modes & Conditional Compilation
+- **No Preprocessor**: NEVER generate `#define`, `#ifdef`, or text-substitution macros.
+- **Built-in Constant**: Inject a compile-time constant `BUILD_MODE` (values: `Debug`, `Release`).
+- **Zero Overhead Conditional Compilation**: 
+  - Use `if BUILD_MODE == Debug { ... }`. 
+  - The frontend (for `comptime`) and LLVM backend (via Constant Propagation & DCE) MUST eliminate the dead branch entirely. 
+  - The final machine code MUST contain ZERO branch instructions for these checks.
+- **Safety Checks (Strict)**: 
+  - `assert(cond)`: Generate `llvm.trap` in Debug mode. In Release mode, the frontend MUST skip generating the instruction completely (no dead calls).
+  - Bounds checking on arrays MUST ONLY be generated in Debug mode.
+- **Optimization Levels**: Debug uses `-O0`, Release uses `-O3` and LTO.
+
+## 15. Multi-Process Model
+- **Compiler Separation**: Process creation is NOT a compiler concern. No special AST nodes or IR generation for multi-processing.
+- **Stdlib Responsibility**: Implement process spawning (`fork`/`CreateProcess`) via external C Runtime calls (`extern module std::process`).
+- **Data Passing**: Cross-process data transfer MUST require explicit serialization/deserialization (no raw pointer passing between processes).
+
+## 16. Strict Initialization & No Implicit Nulls
+- **No `nil` / `null` / `undefined`**: NEVER implement implicit null values or implicit zero-initialization for variables.
+- **Strict Init**: All variable declarations MUST have an explicit initial value.
+- **Optional Type**: To represent nullable values, use the `Optional<T>` generic type explicitly. Raw pointers (`ptr`) default to non-null semantics; if a pointer can be null, it must be wrapped in `Optional<ptr>` or explicitly checked at C ABI boundaries.
+
+## 17. Memory, Casting, Iteration & Field Access
+- **Stack vs Heap**: Objects are stack-allocated by default. Use `heap` keyword for heap allocation. Manual `free()` or `defer` is required for heap objects.
+- **Type Casting**: Use `as` for all casts. No implicit conversions. Interface downcasting (`iface as Class`) MUST return `Optional<Class>`.
+- **Loops**: NO C-style `for(;;)`. ONLY `for item in collection { ... }` and `while condition { ... }`.
+- **Fields**: Class fields are PRIVATE and IMMUTABLE by default. `pub` fields are read-only to the outside. Mutation MUST be done via `pub fun` methods.
+
+## 18. Property Accessors (Getter/Setter Sugar)
+- **AST-Level Desugaring**: 
+  - `obj.name` (R-value) -> `obj.get_name()` if the method exists.
+  - `obj.name = val` (L-value) -> `obj.set_name(val)` if the method exists.
+- **Naming & Conflict**: Real data fields MUST be private and use a trailing underscore (e.g., `name_`). No duplicate names between real fields and synthetic properties. Parser MUST throw an error if a `pub name` field and a `get_name` method coexist.
+- **Type Safety**: `get_name` return type MUST match `set_name` parameter type. If only `get_name` exists, it's read-only.
+- **LLVM Backend**: LLVM MUST NOT know about properties; they are purely frontend `CallExpr` nodes.
+
+## 19. Build Modes & Conditional Compilation
+- **No Preprocessor**: NEVER generate `#define`, `#ifdef`, or text-substitution macros.
+- **Built-in Constant**: Inject a compile-time constant `BUILD_MODE` (values: `Debug`, `Release`).
+- **Zero Overhead Conditional Compilation**: 
+  - Use `if BUILD_MODE == Debug { ... }`. 
+  - The frontend (for `comptime`) and LLVM backend (via Constant Propagation & DCE) MUST eliminate the dead branch entirely. 
+  - The final machine code MUST contain ZERO branch instructions for these checks.
+- **Safety Checks (Strict)**: 
+  - `assert(cond)`: Generate `llvm.trap` in Debug mode. In Release mode, the frontend MUST skip generating the instruction completely.
+  - Bounds checking on arrays MUST ONLY be generated in Debug mode.
+- **Optimization Levels**: Debug uses `-O0`, Release uses `-O3` and LTO.
+
+## 20. Library & Package System
+- **No Header Files**: NEVER implement C++ style header files (`#include`, `.h`, `.hpp`). 
+- **Library Types**: Libraries are either provided as `.l` source modules or as Binary Modules (`.li` interface files + compiled `.o`/`.a`).
+- **Interface (`.li`)**: Use `.li` files for type checking and IDE completion. These are generated via `l gen-interface`.
+- **Package Manifest**: Support a `l.toml` manifest file at the root of a library for metadata and dependency management.
+- **Circular Dependencies**: The compiler frontend MUST detect and reject circular module dependencies (e.g., Module A imports B, B imports A).
+t
+## 21. Internationalization & Interop
+- **UTF-8 Only**: The `String` type is strictly UTF-8. No `wchar_t` or UTF-16 in the language core. Lexer MUST support Unicode identifiers.
+- **i18n as a Library**: Internationalization must be implemented via `std::i18n` using dictionary mapping, not built into the compiler core.
+- **Formatting & Interpolation**: i18n string formatting MUST use **named parameters** (e.g., `i18n.format("key", { "name": name })`), NOT positional placeholders (like `%s` or `%d`). This supports arbitrary word order across different languages.
+- **C ABI for Interop**: Cross-language calls (Python, Node.js, Rust) MUST use standard C ABI (`extern "C"`) or compile `.o` files and link them directly via LLVM.
+
+## 22. Standard Library Boundaries (Phase 1)
+- **Do NOT implement Stdlib internals now**: Focus strictly on Lexer, Parser, AST, and LLVM IR generation. Do not write the full implementations of `Array<T>`, `Map<K, V>`, or network sockets yet.
+- **Interfaces Only**: If a built-in function is needed (e.g., `malloc`), use `extern "C"` declarations.
+- **Stdlib Blueprint**: The standard library MUST be written in L itself later. NEVER inject C++ `std::` containers or algorithms into the compiler code.
+
+## 23. Standard Library Layer Separation
+- **NO C++ Stdlib**: Absolutely FORBID writing any part of the L standard library in C++. Never use `std::string`, `std::vector`, etc.
+- **Layer 1 (C Runtime)**: Pure C. Exposes system calls, memory (`l_alloc`, `l_free`), threading (`l_mutex_lock`), and panic via `extern "C"`. 
+- **Layer 2 (L Stdlib)**: Written entirely in L language using its own generics and interfaces. 
+- **Strict Dependency**: Layer 2 MUST depend on Layer 1 for all low-level operations. L Stdlib MUST NOT call OS APIs directly.
+
+## 24. Project Directory Structure & AI Boundaries
+- **Strict Workspace Boundaries**: You are currently responsible for the **Compiler Frontend/Backend (`compiler/`)**. Do NOT implement the full standard library or runtime unless explicitly asked.
+- **Directory Layout**:
+  - `compiler/`: Written in **C++** (or Rust). Responsible for Lexer, Parser, AST, and LLVM IR generation.
+  - `runtime/`: Written in **Pure C**. Implements `l_alloc`, `l_free`, `l_print`, `l_mutex`. Exposes APIs via `extern "C"`.
+  - `stdlib/`: Written in **L language (`.l`)**. Implements `Array<T>`, `String`, etc. (Leave this empty during Phase 1).
+  - `tests/`: Contains `.l` test source files.
+- **Do Not Mix Languages**: 
+  - NEVER create `.cpp` or `.hpp` files inside `runtime/` or `stdlib/`.
+  - NEVER create `.c` files inside `compiler/` (unless writing a C-compatible bindings layer).
+  - NEVER use C++ `std::` containers for `runtime/` and `stdlib/`.
+
+## 25. Compiler Frontend Engineering (C++ specific)
+- **Smart Pointers**: Use `std::unique_ptr` for AST nodes and ownership. NEVER use raw pointers (`*`) for ownership, and NEVER use `std::shared_ptr` in the AST (to avoid cycles and overhead).
+- **No Exceptions for Control Flow**: Do NOT use `try/catch` for syntax errors. Use a custom `DiagnosticEngine` class to collect and report errors gracefully.
+- **Token & Lexer**: Tokens must be lightweight structs. Store the `SourceLocation` (filename, line, column) in every token and AST node for high-quality error reporting.
+
+## 26. LLVM IR Generation Rules (Codegen)
+- **IRBuilder is King**: Use `llvm::IRBuilder<>` extensively. Do NOT manually construct LLVM instructions unless strictly necessary.
+- **SSA & Phi Nodes**: The frontend MUST correctly convert mutable variables into SSA form. You MUST create `llvm::PHINode` at the end of if/else and loop blocks to merge variable states.
+- **Zero Magic Numbers**: Never hardcode LLVM type sizes. Use `DataLayout` or LLVM's `getInt32Ty(Context)` to ensure cross-platform compatibility.
+
+## 27. Diagnostics (Error Reporting Quality)
+- **Fatal vs. Recoverable**: Only stop compilation on unrecoverable errors. For missing semicolons or typos, emit a diagnostic and try to recover (e.g., skip to the next `;`).
+- **Actionable Messages**: Error messages must be human-readable. Instead of `Unexpected token`, use `Expected ';' after expression, found '}'`. 
+
+## 28. Testing Strategy & TDD
+- **TDD Mandatory**: Whenever implementing a new feature (e.g., `:=` inference, `sync` block), you MUST create a corresponding test file in `tests/` FIRST or ALONGSIDE the implementation.
+- **4-Tier Testing**:
+  1. `tests/lexer/`: Assert token types and values.
+  2. `tests/parser/`: Assert AST structure (can be dumped to JSON).
+  3. `tests/semantic/`: Assert expected compile errors (e.g., data races without `sync`, missing `!` for mutable vars).
+  4. `tests/e2e/`: Full `.l` scripts compiled and executed, asserting stdout matches expectations.
+- **Never Break the Golden Test**: The code in `README.md` Section 18 MUST always parse and compile successfully.
+
+## 28. Testing Strategy & Ruby Test Runner
+- **Test Runner in Ruby**: All automation test scripts MUST be written in **Ruby** (e.g., `tests/run_tests.rb`). Do NOT write the test runner in C++ or Bash.
+- **TDD Mandatory**: Whenever implementing a new feature, create a corresponding `.l` test case in `tests/cases/`.
+- **4-Tier Testing**: Ensure tests cover Lexer, Parser, Semantic errors, and E2E execution.
+- **Ruby Script Scope**: Ruby is ONLY used for automation (spawning processes, comparing strings). NEVER implement compiler logic or stdlib in Ruby.
+- **Never Break the Golden Test**: The code in `README.md` Section 18 MUST always parse and compile successfully via the Ruby script.
+
+## 29. Incremental Development Protocol
+- **Do NOT Jump Ahead**: If the user asks to "create a directory structure" or "setup build scripts", ONLY do that. Do NOT write the implementation logic of the compiler or runtime in the same turn.
+- **Empty Source Files**: When creating source files, create empty placeholders first. Wait for explicit instruction to implement them.
+
