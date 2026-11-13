@@ -1,0 +1,482 @@
+{
+  "files": {
+    "build/clang-debug/compiler/l.exe": {
+      "md5": "37fff73b4bd0843f314bc01c408937a0",
+      "size": 53011968,
+      "mtime": 1794573085
+    },
+    "build/clang-debug/compiler/l_compiler.lib": {
+      "md5": "3322f17dda26498874114f85e8cef84f",
+      "size": 36110090,
+      "mtime": 1794573085
+    },
+    "build/clang-debug/runtime/l_runtime.lib": {
+      "md5": "2ea74434088d702b787088716ea7cd6e",
+      "size": 181558,
+      "mtime": 1794538469
+    },
+    "stdlib/io.l": {
+      "md5": "d9344ed4cef8b2cc43358850dcf3f255",
+      "size": 2474,
+      "mtime": 1794538433
+    },
+    "stdlib/memory.l": {
+      "md5": "c0f6558df153d0e244173dc94e6bc2e1",
+      "size": 648,
+      "mtime": 1794495294
+    },
+    "stdlib/thread.l": {
+      "md5": "a4d88743de4dc7be7bb3f6ff2545cd00",
+      "size": 776,
+      "mtime": 1794514604
+    },
+    "tests/cases/delegate_test.l": {
+      "md5": "cc871713c5d523e09ce4a8a06f7467ef",
+      "size": 165,
+      "mtime": 1794566915
+    },
+    "tests/cases/delegate_conflict_test.l": {
+      "md5": "4a3c72c2f5ffd56c1f752029b4939c58",
+      "size": 367,
+      "mtime": 1794566915
+    },
+    "tests/cases/delegate_conflict_bad.l": {
+      "md5": "3aa10422a131de1cdda7395744316a74",
+      "size": 248,
+      "mtime": 1794566915
+    },
+    "tests/cases/golden.l": {
+      "md5": "c4836aaaf1de5371c21558f0906ff48b",
+      "size": 1099,
+      "mtime": 1794426928
+    },
+    "tests/cases/var_decl.l": {
+      "md5": "c1c18ea13a49f2278ace35ff8b17a7c5",
+      "size": 36,
+      "mtime": 1794426761
+    },
+    "tests/cases/expr.l": {
+      "md5": "7b31a6ee3bc0eb8e8ae8713feb4e87f7",
+      "size": 36,
+      "mtime": 1794426761
+    },
+    "tests/cases/func_call.l": {
+      "md5": "59027fae35f8fddec30170a167613a62",
+      "size": 39,
+      "mtime": 1794426761
+    },
+    "tests/cases/func_def.l": {
+      "md5": "e5b41da76bc0dd259525ba03032e761f",
+      "size": 53,
+      "mtime": 1794426761
+    },
+    "tests/cases/codegen_simple.l": {
+      "md5": "11a71b7c0ef1dabfea29675e642b7336",
+      "size": 68,
+      "mtime": 1794427921
+    },
+    "tests/cases/run_hello.l": {
+      "md5": "7b8a1d5061036ff89049c66ce79f4590",
+      "size": 53,
+      "mtime": 1794426761
+    },
+    "tests/cases/control_flow.l": {
+      "md5": "56b8d9319990b2ed5f8eafbbe6b3a9a6",
+      "size": 213,
+      "mtime": 1794427918
+    },
+    "tests/cases/class_basic.l": {
+      "md5": "44ae97cd7437225cf8594d2008842497",
+      "size": 164,
+      "mtime": 1794427917
+    },
+    "tests/cases/static_method_test.l": {
+      "md5": "9fef91bd4f48ff825c5eb5b4a967e6c3",
+      "size": 240,
+      "mtime": 1794497151
+    },
+    "tests/cases/static_method_bad.l": {
+      "md5": "1b59106a23bda1b1687aba06c0a8cf17",
+      "size": 135,
+      "mtime": 1794497152
+    },
+    "tests/cases/interface_test.l": {
+      "md5": "67d9de847fa46787e8ecafbac3ca2c52",
+      "size": 373,
+      "mtime": 1794427920
+    },
+    "tests/cases/dynamic_dispatch.l": {
+      "md5": "9f474d985c415498e93c3f712f0049df",
+      "size": 615,
+      "mtime": 1794484017
+    },
+    "stdlib/string.l": {
+      "md5": "0fcbf247aa9c421c6386192b8e76f5d8",
+      "size": 6318,
+      "mtime": 1794538976
+    },
+    "tests/cases/string_test.l": {
+      "md5": "07b3d7dab0f434dcade5b7999aa92c7d",
+      "size": 86,
+      "mtime": 1794427916
+    },
+    "tests/cases/print_format.l": {
+      "md5": "0bb66af5081365fff7120dc905f19e3b",
+      "size": 224,
+      "mtime": 1794469276
+    },
+    "tests/cases/generic_test.l": {
+      "md5": "d4d69c48b22ca7a4d32bbda5ca2d117e",
+      "size": 324,
+      "mtime": 1794427919
+    },
+    "tests/cases/generic_constraint.l": {
+      "md5": "dda8dc32e89b73d3a15ae9230594e81a",
+      "size": 458,
+      "mtime": 1794467639
+    },
+    "tests/cases/generic_constraint_bad.l": {
+      "md5": "d18e4ff32832e8f342827289817123ae",
+      "size": 344,
+      "mtime": 1794467640
+    },
+    "tests/cases/heap_defer.l": {
+      "md5": "126b59af5d1dd047d55674be6889c455",
+      "size": 145,
+      "mtime": 1794427916
+    },
+    "tests/cases/auto_free.l": {
+      "md5": "4a932a27c5a4debebfe66b363811146e",
+      "size": 301,
+      "mtime": 1794484017
+    },
+    "tests/cases/sync_fail.l": {
+      "md5": "c57cee5656d420a765137ac59dee9c5f",
+      "size": 103,
+      "mtime": 1794437704
+    },
+    "tests/cases/sync_pass.l": {
+      "md5": "1ebfa05caf699df8e900663110a6b4a9",
+      "size": 124,
+      "mtime": 1794426761
+    }
+  },
+  "tests": {
+    "test_delegate_e2e!": {
+      "status": "pass",
+      "body_md5": "684830f86f9d167aa7c7c239484ee784",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/delegate_test.l"
+      ]
+    },
+    "test_delegate_conflict_e2e!": {
+      "status": "pass",
+      "body_md5": "60d1098d726f7fbc03ad04b5a5a89c25",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/delegate_conflict_test.l"
+      ]
+    },
+    "test_delegate_conflict_bad_rejected!": {
+      "status": "pass",
+      "body_md5": "7aad79d11515f11de595b177e2329aff",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/delegate_conflict_bad.l"
+      ]
+    },
+    "test_golden_dump_tokens!": {
+      "status": "pass",
+      "body_md5": "da7872640c6e5f6b85bfafc60f9345e2",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/golden.l"
+      ]
+    },
+    "test_var_decl_dump_ast!": {
+      "status": "pass",
+      "body_md5": "6fd7c6e423b8a4cea6190cbf591b8aa7",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/var_decl.l"
+      ]
+    },
+    "test_expr_dump_ast!": {
+      "status": "pass",
+      "body_md5": "5ffd5019bf6c403a2feed13732973c17",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/expr.l"
+      ]
+    },
+    "test_func_call_dump_ast!": {
+      "status": "pass",
+      "body_md5": "af6519dd487c385e00dde9a94ecbcaed",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/func_call.l"
+      ]
+    },
+    "test_func_def_dump_ast!": {
+      "status": "pass",
+      "body_md5": "f41f75359479188569f4b1bb49f9c1e8",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/func_def.l"
+      ]
+    },
+    "test_codegen_simple_emit_llvm!": {
+      "status": "pass",
+      "body_md5": "fa6f3b15dd85fa4471545e4b70262c22",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/codegen_simple.l"
+      ]
+    },
+    "test_run_hello_e2e!": {
+      "status": "pass",
+      "body_md5": "1378ac5a170b09341e01ab991966aa78",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/run_hello.l"
+      ]
+    },
+    "test_control_flow_e2e!": {
+      "status": "pass",
+      "body_md5": "d3c046c1e986a42a0f9acee90f966334",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/control_flow.l"
+      ]
+    },
+    "test_class_basic_e2e!": {
+      "status": "pass",
+      "body_md5": "1e30d6973dfb14a51d90c01bdba506ce",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/class_basic.l"
+      ]
+    },
+    "test_static_method_e2e!": {
+      "status": "pass",
+      "body_md5": "878ca723916d26cdb46689cb979ba8e9",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/static_method_test.l"
+      ]
+    },
+    "test_static_method_bad_rejected!": {
+      "status": "pass",
+      "body_md5": "5a516912f1ee2680242f9f0f8f332402",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/static_method_bad.l"
+      ]
+    },
+    "test_interface_e2e!": {
+      "status": "pass",
+      "body_md5": "6ebd02b1c183c298e26d1224afc4a265",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/interface_test.l"
+      ]
+    },
+    "test_dynamic_dispatch_e2e!": {
+      "status": "pass",
+      "body_md5": "3a8b4b7f2e497292e5c134f59d757f67",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/dynamic_dispatch.l"
+      ]
+    },
+    "test_gen_interface_string!": {
+      "status": "pass",
+      "body_md5": "7e2e714d66caff444e215ac1d03b095b",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/string.l",
+        "stdlib/thread.l"
+      ]
+    },
+    "test_string_e2e!": {
+      "status": "pass",
+      "body_md5": "7e3ecb4b08ab3e11128fa77686c6f5e5",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/string.l",
+        "stdlib/thread.l",
+        "tests/cases/string_test.l"
+      ]
+    },
+    "test_print_format_e2e!": {
+      "status": "pass",
+      "body_md5": "cdf7caa45abcc1f0e82e3efc0c9218fb",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/string.l",
+        "stdlib/thread.l",
+        "tests/cases/print_format.l"
+      ]
+    },
+    "test_generic_e2e!": {
+      "status": "pass",
+      "body_md5": "ae8ac3c6c7d2fb6b84c0a54874a6f0e8",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/generic_test.l"
+      ]
+    },
+    "test_generic_constraint_e2e!": {
+      "status": "pass",
+      "body_md5": "0e7c58c230c4140c79d90ac3ae26a80a",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/generic_constraint.l",
+        "tests/cases/generic_constraint_bad.l"
+      ]
+    },
+    "test_heap_defer_e2e!": {
+      "status": "pass",
+      "body_md5": "2a0f86d5f5e9aa5c7a6c0864560667d1",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/heap_defer.l"
+      ]
+    },
+    "test_auto_free_e2e!": {
+      "status": "pass",
+      "body_md5": "d10eaea4cbd942f8e6cc8d5421832b57",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/auto_free.l"
+      ]
+    },
+    "test_sync_race!": {
+      "status": "pass",
+      "body_md5": "de9a47763f43075a41a3ad400e9549f6",
+      "files": [
+        "build/clang-debug/compiler/l.exe",
+        "build/clang-debug/compiler/l_compiler.lib",
+        "build/clang-debug/runtime/l_runtime.lib",
+        "stdlib/io.l",
+        "stdlib/memory.l",
+        "stdlib/thread.l",
+        "tests/cases/sync_fail.l",
+        "tests/cases/sync_pass.l"
+      ]
+    }
+  }
+}
