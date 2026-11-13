@@ -1,0 +1,275 @@
+#include "doc/gen_doc.hpp"
+
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace l::doc {
+namespace {
+
+std::vector<std::string> splitLines(const std::string& source) {
+  std::vector<std::string> lines;
+  std::string cur;
+  for (char c : source) {
+    if (c == '\n') {
+      if (!cur.empty() && cur.back() == '\r') {
+        cur.pop_back();
+      }
+      lines.push_back(std::move(cur));
+      cur.clear();
+    } else {
+      cur.push_back(c);
+    }
+  }
+  if (!cur.empty() && cur.back() == '\r') {
+    cur.pop_back();
+  }
+  if (!cur.empty() || source.empty() || source.back() == '\n') {
+    lines.push_back(std::move(cur));
+  }
+  return lines;
+}
+
+bool isDocCommentLine(const std::string& line) {
+  std::size_t i = 0;
+  while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) {
+    ++i;
+  }
+  if (i >= line.size()) {
+    return false;
+  }
+  if (line[i] == '#') {
+    return true;
+  }
+  if (i + 1 < line.size() && line[i] == '/' && line[i + 1] == '/') {
+    // Keep //LCMD_ out of API docs.
+    if (i + 7 <= line.size() && line.compare(i, 7, "//LCMD_") == 0) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+bool isBlankLine(const std::string& line) {
+  for (char c : line) {
+    if (c != ' ' && c != '\t' && c != '\r') {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string stripDocMarker(const std::string& line) {
+  std::size_t i = 0;
+  while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) {
+    ++i;
+  }
+  if (i < line.size() && line[i] == '#') {
+    ++i;
+    if (i < line.size() && line[i] == ' ') {
+      ++i;
+    }
+    return line.substr(i);
+  }
+  if (i + 1 < line.size() && line[i] == '/' && line[i + 1] == '/') {
+    i += 2;
+    if (i < line.size() && line[i] == ' ') {
+      ++i;
+    }
+    return line.substr(i);
+  }
+  return line;
+}
+
+// Collect consecutive # / // comments immediately above 1-based `decl_line`.
+std::string docsAbove(const std::vector<std::string>& lines, std::uint32_t decl_line) {
+  if (decl_line == 0 || decl_line > lines.size()) {
+    return {};
+  }
+  std::vector<std::string> block;
+  // Walk upward from the line before the declaration.
+  int i = static_cast<int>(decl_line) - 2;  // 0-based index of previous line
+  while (i >= 0 && isBlankLine(lines[static_cast<std::size_t>(i)])) {
+    --i;
+  }
+  while (i >= 0 && isDocCommentLine(lines[static_cast<std::size_t>(i)])) {
+    block.push_back(stripDocMarker(lines[static_cast<std::size_t>(i)]));
+    --i;
+  }
+  if (block.empty()) {
+    return {};
+  }
+  std::ostringstream out;
+  for (auto it = block.rbegin(); it != block.rend(); ++it) {
+    if (it != block.rbegin()) {
+      out << '\n';
+    }
+    out << *it;
+  }
+  return out.str();
+}
+
+void appendGenerics(std::ostringstream& out, const std::vector<ast::GenericParam>& generics) {
+  if (generics.empty()) {
+    return;
+  }
+  out << '<';
+  for (size_t i = 0; i < generics.size(); ++i) {
+    if (i != 0) {
+      out << ", ";
+    }
+    out << generics[i].name;
+    if (!generics[i].constraint.empty()) {
+      out << ": " << generics[i].constraint;
+    }
+  }
+  out << '>';
+}
+
+void appendParams(std::ostringstream& out, const std::vector<ast::Param>& params) {
+  out << '(';
+  for (size_t i = 0; i < params.size(); ++i) {
+    if (i != 0) {
+      out << ", ";
+    }
+    const ast::Param& p = params[i];
+    if (!p.type_name.empty()) {
+      out << p.type_name;
+      if (!p.name.empty()) {
+        out << ' ';
+      }
+    }
+    out << p.name;
+    if (p.is_mutable) {
+      out << '!';
+    }
+  }
+  out << ')';
+}
+
+std::string funcSignature(const ast::FuncDeclStmt& fn) {
+  std::ostringstream out;
+  if (fn.is_pub) {
+    out << "pub ";
+  }
+  if (fn.is_static) {
+    out << "static ";
+  }
+  out << "fun " << fn.name;
+  appendGenerics(out, fn.generics);
+  appendParams(out, fn.params);
+  if (!fn.return_type.empty() && fn.return_type != "void") {
+    out << " -> " << fn.return_type;
+  }
+  return out.str();
+}
+
+bool shouldSkipFunc(const ast::FuncDeclStmt& fn) {
+  if (fn.is_extern || fn.is_compiler_generated) {
+    return true;
+  }
+  if (fn.name == "__compile_time_handler" || fn.name == "__on_class_parsed" ||
+      fn.name == "__init" || fn.name == "__deinit") {
+    return true;
+  }
+  return false;
+}
+
+void emitDocSection(std::ostringstream& md, const std::string& signature,
+                    const std::string& description) {
+  md << "### `" << signature << "`\n\n";
+  if (!description.empty()) {
+    md << description << "\n\n";
+  }
+}
+
+}  // namespace
+
+std::string generateMarkdownDoc(const ast::Module& module, const std::string& source,
+                                const std::string& only_module, const std::string& title) {
+  const std::vector<std::string> lines = splitLines(source);
+  std::ostringstream md;
+  if (!title.empty()) {
+    md << "# " << title << "\n\n";
+  } else {
+    md << "# API\n\n";
+  }
+  md << "_Generated by `l doc`._\n\n";
+
+  auto in_target = [&](const std::string& mod) {
+    return only_module.empty() || mod.empty() || mod == only_module;
+  };
+
+  for (const ast::StmtPtr& stmt : module.stmts) {
+    if (!stmt) {
+      continue;
+    }
+    switch (stmt->kind()) {
+      case ast::StmtKind::FuncDecl: {
+        const auto& fn = static_cast<const ast::FuncDeclStmt&>(*stmt);
+        if (!in_target(fn.module_name) || !fn.is_pub || fn.is_method || shouldSkipFunc(fn)) {
+          break;
+        }
+        emitDocSection(md, funcSignature(fn), docsAbove(lines, fn.loc.line));
+        break;
+      }
+      case ast::StmtKind::InterfaceDecl: {
+        const auto& iface = static_cast<const ast::InterfaceDeclStmt&>(*stmt);
+        if (!in_target(iface.module_name) || !iface.is_pub) {
+          break;
+        }
+        std::ostringstream sig;
+        sig << "pub interface " << iface.name;
+        emitDocSection(md, sig.str(), docsAbove(lines, iface.loc.line));
+        for (const auto& method : iface.methods) {
+          if (!method || shouldSkipFunc(*method)) {
+            continue;
+          }
+          emitDocSection(md, funcSignature(*method), docsAbove(lines, method->loc.line));
+        }
+        break;
+      }
+      case ast::StmtKind::ClassDecl: {
+        const auto& cls = static_cast<const ast::ClassDeclStmt&>(*stmt);
+        if (!in_target(cls.module_name) || !cls.is_pub) {
+          break;
+        }
+        std::ostringstream sig;
+        sig << "pub class " << cls.name;
+        appendGenerics(sig, cls.generics);
+        if (!cls.interfaces.empty()) {
+          sig << " : ";
+          for (size_t i = 0; i < cls.interfaces.size(); ++i) {
+            if (i != 0) {
+              sig << ", ";
+            }
+            sig << cls.interfaces[i];
+          }
+        }
+        emitDocSection(md, sig.str(), docsAbove(lines, cls.loc.line));
+        for (const auto& field : cls.fields) {
+          if (!field || !field->is_pub) {
+            continue;
+          }
+          std::ostringstream fsig;
+          fsig << "pub " << field->type_name << ' ' << field->name;
+          emitDocSection(md, fsig.str(), docsAbove(lines, field->loc.line));
+        }
+        for (const auto& method : cls.methods) {
+          if (!method || !method->is_pub || shouldSkipFunc(*method)) {
+            continue;
+          }
+          emitDocSection(md, funcSignature(*method), docsAbove(lines, method->loc.line));
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return md.str();
+}
+
+}  // namespace l::doc

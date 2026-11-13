@@ -32,6 +32,9 @@ private:
   void skipWhitespaceAndComments(bool& saw_newline);
   bool trySkipLineComment();
   bool trySkipBlockComment();
+  // True when cursor is at `//LCMD_` (directive, not a normal comment).
+  bool atLcmdDirective() const;
+  ast::Token lexLcmdDirective();
 
   ast::Token makeToken(ast::TokenType type, std::string lexeme, ast::SourceLocation loc);
   ast::Token lexTokenAtCursor();  // no whitespace skip; cursor on token start

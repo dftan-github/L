@@ -1,0 +1,6 @@
+[package]
+name = "pkg_test"
+version = "0.1.0"
+
+[dependencies]
+math_lib = "1.0"

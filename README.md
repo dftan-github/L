@@ -1,594 +1,477 @@
-# 语言 L 编译器架构设计备忘录（中文对照版）
+# L Language
 
-> **说明**：本文件是 L 语言的架构总览与语法规范，用于人类开发者阅读理解，并作为 AI 代码生成（Cursor）的强约束规则。
+**目标：解放程序员的心智负担——无废话代码。**
 
-## 1. 项目愿景
+把仪式感、样板和记忆负担扔给编译器；你只写**业务真正需要的那几行**。  
+L 是一门 **编译型、静态强类型** 的系统语言（LLVM 22）：短得像脚本，快得像 C，类型与安全在编译期钉死——**不是解释器，不是动态类型猜谜**。  
+当前主线由 **`ruby tests/run_tests.rb` 的 111 条自动化用例**端到端兜底（Lexer / AST / Codegen / 并发 / FFI / 元编程 / `l doc` …）。
 
-L 语言是一门基于 LLVM 的高性能编译型语言。它的核心目标是：
-- **拥有 C/C++ 的极致性能**。
-- **彻底去除 C++ 复杂的依赖模型**（废除继承、废除头文件宏、废除复杂的 ABI）。
-- **无缝复用现有 C/C++ 资产**（通过 DLL 代理调用）。
-- **拥有现代化的工程体验**（极简语法、编译期泛型、分部类）。
+### 心智负担怎么被拿掉
 
-## 2. 核心对象模型（极简主义）
+| 你不必再操心 | 编译器 / 语言替你做 |
+| --- | --- |
+| 分号、`let`/`var`、尾下划线 | ASI；`:=` / `!`；字段自动加 `_`，对外只写 `u.age` |
+| 「这是编译期常量还是运行期锁定？」 | `const` vs `constd` 两个关键字说完，不再靠命名约定 |
+| 满屏 getter 样板或裸 `age_` | 有 accessor 就走方法，没有且 `pub` 就直接字段——**一种写法** |
+| 记参数位置、或抄一堆重载 | 关键字参数 `name: val`；位置参数在前，关键字可乱序 |
+| 每个出口手写 `free` | 作用域结束自动 `l_free`；需要时再 `defer` |
+| 「这里会不会数据竞争？」 | `spawn` 里写 `!` 没进 `sync` → **直接编不过** |
+| 再解析一遍 YAML/TOML | 配置就是 L 源码，相对赋值降成内存写入 |
+| 宏语言第二套语法 | `//LCMD_` 用 L 自己生成代码并注入 |
+| 宏里手搓唯一符号名 | 编译期 `uid_counter()` → 单调 `i64`，直接拼进注入源码 |
+| 「配置对不对？要不要禁编？」 | `comptime { … }` 前端跑完即剥；`compile_error` / `comptime_assert` 直接否决 |
+| `null` 心智税 | 只有 `Optional` / `Result`，没有隐式空 |
 
-- **无继承**：类没有基类，不支持虚继承。这不仅让 ABI 极其稳定，还能让 LLVM 优化器更容易看清内存布局。
-- **纯数据布局**：类在底层就是 LLVM 的 `StructType`，不带有隐藏的 vptr（虚表指针），纯数据排布。
-- **多接口实现**：如果类需要多态，通过“胖指针/双指针”结构实现，即 `{ 数据指针, 接口虚表指针 }`。调用时从虚表里取函数指针执行。
-- **显式委托**：类的复用不靠继承，靠组合。类内部可以包含委托字段，调用时显式转发给其他对象。
-- **编译期多态（泛型）**：泛型在编译时全量展开（单态化 Monomorphization），为每个具体类型生成专属机器码，运行时零开销。
-
-## 3. 模块与命名空间
-
-- **文件即模块**：彻底抛弃 C++ 的 `#include` 文本替换。导入模块直接读取序列化好的二进制（类似 Clang Modules），大幅度提升编译速度，根绝宏污染。
-- **符号扁平化**：源码里写 `math::add`，编译到 LLVM IR 时，前端统一将符号名改写为带前缀的扁平名（如 `@math_add`），解决底层同名冲突。
-- **外部 C 函数隔离**：调用 C 代码时，必须显式包裹在 `extern module` 块中，避免污染 L 语言自身的命名空间。
-
-## 4. 源码组织特性
-
-- **分部类（Partial Class）**：支持把一个类拆到多个文件写（类似 C#）。前端在语法树（AST）阶段自动合并，防止 LLVM 生成重复的 StructType 导致崩溃。
-- **分部方法（Partial Method）**：声明与实现分离。如果某个分部方法只声明了没实现，编译器在前端直接删掉调用它的代码，做到真正的零成本抽象。
-
-## 5. 复用 C/C++ 资产（防腐层策略）
-
-- **绝不直接调用 C++ ABI**：C++ 的名字修饰和内存布局太复杂，L 语言不去解析。
-- **C 代理 DLL 架构**：用 C++ 写一层代理 DLL，对外全部用 `extern "C"` 导出纯 C 接口。L 语言通过 LLVM 的 `ExternalLinkage` 调用这些标准 C 接口，从而曲线使用 C++ 资产。
-- **异常隔离**：C++ 的异常必须在代理 DLL 内部捕获并转为错误码返回。绝不允许 C++ 异常跨边界抛入 L 的代码栈。
-
-## 6. 标准库与内存
-
-- **显式内存管理**：禁止类似 C++ 的隐式拷贝和隐式转换。对象的生命周期必须清晰可控。
-- **容器自研**：不直接包装 C++ 的 `std::vector` 或 `std::unordered_map`。使用 L 的泛型自研这些容器（Array、HashMap 等），底层直接调用 C 的 `malloc` / `free`。这样一来，LLVM 能对内联和向量化做到极致优化。
-
-### 6.1 极简标准库（Stdlib）规范
-- **绝对禁止**：标准库的底层实现严禁使用任何 C++ 标准库（如 `std::string`, `std::vector`, `std::map` 等）。
-- **实现语言**：标准库的基础数据结构（如 `Array`, `String`）必须使用 L 语言自身的泛型机制实现。内存管理全部调用纯 C 运行时接口（如 `l_alloc`, `l_free`）。
-- **初期边界**：在第一阶段（Phase 1 & 2），标准库仅需实现极简基础（`String` 轻量结构、`Array<T>` 动态数组、基础 Print）。
-- **暂缓实现**：在编译器自身跑通之前，暂不实现 `HashMap`、`List` 树形结构以及复杂的迭代器协议。
-
-### 6.2 配置系统规范（Config 应用）
-
-- **禁止隐式零值**：配置读取必须显式处理“未设置”的情况，严禁在语言层面引入 `unknown` 或 Go 风格的隐式零值初始化。
-- **接口设计**：标准库的 `Config` 模块读取字段时，必须返回 `Optional<T>`。
-- **显式回退**：开发者必须使用 `Optional::unwrap_or(default_value)` 提供默认值，或者通过 `match` / `if` 处理缺失状态。
-- **类型安全**：如果配置文件中类型不匹配（如配置期望 `i32`，但用户填了字符串），`Config` 模块必须返回 `Result` 错误码，拒绝启动程序，而不是回退到默认值（避免掩盖用户的配置错误）。
-
-
-## 7. 后端对接（LLVM 层面）
-
-- **SSA 构建**：前端负责把有变量的 AST 转成 LLVM 的静态单赋值（SSA）形式，自动插入 `phi` 节点。
-- **去虚拟化配合**：接口调用虽然是间接调用，但代码生成要保留上下文信息，让 LLVM 的 `Devirtualization` 优化能生效。
-- **泛型链接**：泛型单态化生成的函数，必须使用 `LinkOnceODR` 链接属性，这样多个模块包含同一个泛型实例时，链接器会自动去重合并。
-
-## 8. 编译流水线与工具链
-
-- **前端架构**：手写或使用工具生成 Lexer 和 Parser，构建独立的 AST。
-- **IR 构建**：使用 C++ API（`IRBuilder`）或 LLVM C API，将 AST 降维翻译为 LLVM IR。
-- **优化与控制**：默认使用 LLVM 的 `O2` 优化管道。对于追求极致性能的模块，可开放 `O3` 或 LTO 选项。
-
-## 9. 运行时库（Runtime Library）
-
-- **强制规定**：Runtime 必须使用纯 C 语言编写，并通过标准 C ABI 导出函数。
-- **内存策略**：强制采用简单的内存分配接口（如 `l_alloc`, `l_free`），早期实现直接包装 `malloc` 和 `free`。禁止引入任何复杂的 GC 或引用计数机制。
-- **字符串处理**：字符串底层强制使用 `{ char* data, size_t length }` 结构，禁止使用依赖 `\0` 结尾的隐式长度字符串（跨 C ABI 边界时需显式提供安全转换方法）。
-
-## 10. 错误处理模型
-
-- **强制规定**：全面对齐 Rust 的 `Result<T, E>` 模型。禁止使用异常（Exception）。
-- **语法糖**：必须支持类似 Rust 的 `?` 操作符（提前返回错误）。
-- **IR 生成要求**：当生成 `Result` 分支代码时，LLVM 代码生成器必须使用 `llvm.expect` 标记错误分支为“冷路径（Cold Path）”，保障主流程指令的缓存局部性。
-
-## 11. 开发路线图（Roadmap）
-
-- **Phase 1**：基础表达式与函数调用（打通 LLVM 后端）。
-- **Phase 2**：结构体、指针操作与 C 代理 DLL 互操作验证。
-- **Phase 3**：实现接口（胖指针 + 虚表）与显式委托。
-- **Phase 4**：编译器多态（泛型单态化）、分部类合并。
-- **Phase 5**：自研基础容器（Array, HashMap）与标准库构建。
-
-## 11.1 最小语义核与启动约定（冻结）
-
-Phase 1 只保证下面这组规则可实现、可测试。其余章节视为附录，不得拖慢本阶段。
-
-### 内建类型（Built-ins）vs 标准库类型（鸡生蛋）
-
-| 类别 | 类型 | 地位 |
-|---|---|---|
-| **编译器内建** | `i32`、`i64`、`f64`、`bool`、`void`、`ptr` | 前端直接映射到 LLVM Type（如 `i32`→`i32`，`ptr`→指针宽整数/指针类型）。不依赖 `stdlib` |
-| **标准库（非内建）** | `String`、`Array<T>`、`Optional<T>`、`Result<T,E>`、`Map<K,V>` | 用 L 自研，底层只调 C Runtime。**第一份能真正链接跑通的程序只允许使用内建类型** |
-| 语法黄金用例 | `tests/cases/golden.l` | 允许出现 `String`/`Array`/class 等名字，供 Lexer/Parser 验收；不等于第一份可执行程序 |
-
-### `:=` 与 `constd` 分工（禁止混用场景）
-
-- **`:=`**：仅用于**函数/块内的局部变量**类型推导（含 `name! :=` 局部可变推导）。
-- **`constd`**：用于**模块级**以及**class 字段**上的运行期一次初始化后锁定的绑定。
-- **模块级可变**：必须显式类型 + `!`，例如 `i32 count! = 0;`，禁止模块级 `:=`。
-- **字段**：禁止 `:=`；用 `T name = init;` 或语义上等价的 `constd` 字段规则（实现阶段统一）。
-
-### 入口函数
-
-- Phase 1 可执行入口固定为：`fun main() -> i32`
-- 返回值即进程退出码。
-- 不支持其它入口签名；不从 `image.entry` 启动。
-
-### 多文件如何合成一个程序
-
-- 命令行一次传入多个 `.l` 源文件，例如：`l a.l b.l --emit-exe out.exe`
-- 每个 `.l` 是一个模块，各自生成一个 `llvm::Module`，最后链接为一个可执行文件。
-- 全程序有且仅有一个 `fun main() -> i32`；重复定义视为错误。
-- 模块间依赖通过正式 `import`（后续实现），Phase 1 可先要求命令行列出的文件按顺序编译并在链接期解析符号。
-
-### Debug / Release 与 `BUILD_MODE`
-
-- 默认 Debug。命令行出现 `--release` 时，编译期常量 `BUILD_MODE = Release`；否则 `BUILD_MODE = Debug`。
-- 该常量供 `if BUILD_MODE == Debug { ... }` 与 `assert` 等使用，由前端/LLVM DCE 消掉死分支。
-- Debug：`-O0`；Release：`-O3` + LTO（后端阶段落地）。
-
-### Phase 1 必须能表达的最小语法
-
-- 局部：`:=` / `name! :=`；模块级：`const` / `constd` / 显式类型（可 `!`）
-- 函数：`fun`、`->`、`return`、调用与基础算术
-- 泛型声明必须 `<T: InterfaceName>`（禁止裸 `<T>`）
-
-### 内存安全边界（取舍写死）
-
-- **编译期负责**：类型安全；以及 `spawn` 捕获外部可变变量时的 **`sync` 数据竞争红线**（违规即致命错误）。
-- **编译期不负责**：借用检查、悬垂指针、内存泄漏、use-after-free、双重释放（类似 C++，程序员用 `free`/`defer` 负责）。
-- **Debug 运行时**：可插入检查（越界、`assert`→`llvm.trap`、以及后续约定的调试期指针/分配检查）。**Release 不生成这些检查指令**。
-
-## 12. 核心语法与关键字约定
-
-- **变量与常量**：废除 `let` / `var`。`:=` 仅局部推导；`const` 编译期常量；`constd` 模块级/字段级运行期动态常量。
-- **可变性后缀**：默认不可变。声明和赋值左侧加 `!`（局部可用 `count! := 0;`；模块级用 `i32 count! = 0;`）。右值读取禁止带 `!`。
-- **对象声明**：使用 `class` 定义类（无继承）。使用 `interface` 定义接口。使用 `partial` 拆分。
-- **泛型约束**：使用 `<T: InterfaceName>` 语法，禁止毫无约束的模板推导。
-- **内存操作**：保留 `ptr` 作为明确的裸指针类型，所有指针解引用必须显式操作，禁止隐式转换指针类型。
-
-## 13. ABI 与内存对齐规则
-
-- **结构体布局**：在生成 LLVM `StructType` 时，默认必须使用非紧凑（Non-packed）布局，让 LLVM 自动根据目标平台的 C ABI 插入 Padding。
-- **C 互操作对齐**：当声明 `extern "C"` 接口时，L 的结构体字段布局必须严格等于对应 C 结构体。
-- **接口胖指针（Fat Pointer）**：`{ data_ptr, vtable_ptr }` 结构体，必须保证按指针宽度（64位系统为8字节）自然对齐。
-
-## 14. 编译器前端的健壮性规范
-
-- **禁止编译期直接崩溃**：L 编译器前端（用 C++ 或 Rust 编写）在遇到语法错误、类型不匹配时，绝对禁止直接抛出异常导致程序崩溃。
-- **错误收集机制**：必须实现统一的 Diagnostics 模块，记录错误发生的源文件行号和列号，尽可能在一次编译中收集所有错误后统一打印。
-- **AST 恢复**：Parser 在遇到无法识别的 Token 时，应尽量采用“恐慌模式（Panic Mode）”同步到下一个安全符号，继续解析后续代码。
+原则很简单：**能推断的不写，能注入的不抄，能编译期拦的不靠人记。**
 
 ---
 
-## 15. 变量声明与可变性规范
+## L 的特色（一眼看懂）
 
-**核心哲学**：保持极致简洁，绝不把语法复杂度推给程序员。废除 `let` 和 `_` 占位符，所有状态通过明确的符号或关键字表达。
+| 别人常见做法 | L 的选择（少废话） |
+| --- | --- |
+| 解释执行 / 动态类型运行时 | **编译型**：AOT 原生码或 ORC JIT；类型编译期钉死 |
+| `any` / 隐式转型 / 运行时才炸 | **静态强类型**：`:=` 只是少写类型名，结果仍是具体类型 |
+| `let` / `var` / `mut` 堆叠 | `:=` 声明，`!` 才可变；读从不带 `!` |
+| `#define` / `constexpr` / `final` 混用 | **`const`**（编译期内联）与 **`constd`**（运行期一次锁定）分工明确 |
+| `obj.age_` 泄漏物理名 | 源码禁止尾 `_`；声明 `i32 age`，对外一律 `u.age` |
+| 只靠位置传参 / 重载爆炸 | **关键字参数** `role: "admin"`；位置在前，关键字可乱序 |
+| 类继承 + 对象内藏 vptr | **无继承**；接口胖指针 `{data, vtable}` |
+| GC / 手工 `free` 满天飞 | `heap` + `defer` + **自动 `l_free`** |
+| 数据竞争靠纪律 | 少写 `sync` → 编译错误 |
+| C 宏 / 模板黑盒 | `//LCMD_`：L 写给 L，注入 AST；`uid_counter()` 生成唯一 ID |
+| `#error` / 手写静态断言散落 | **`comptime { }`** + `compile_error` / `comptime_assert`（前端剥干净） |
+| YAML 再解析一遍 | **源码即配置** |
+| `null` 到处飞 | 只有 `Optional<T>` / `Result<T,E>` |
 
-### 15.1 变量声明（三种形态）
-- **显式类型前置**：`类型 变量名 = 初始值`（模块级、字段级、局部均可）
-  - 例：`i32 count = 0`
-  - 例：`String name = "L"`
-- **局部推导（中缀 `:=`）**：**仅允许出现在函数/块内部**，自动推导类型。
-  - 例：`count := 0` （局部，推导为 `i32`）
-  - 禁止：模块级 `size := ...;`、字段 `i32 age := 18;`
-- **禁止无初值声明**：绝不允许写 `i32 count;`。所有变量必须在声明时初始化。
-
-### 15.2 不可变性与后缀 `!`
-- L 语言中所有变量**默认不可变**。
-- 如果需要一个可修改的变量，在**声明和赋值时的左侧**，变量名必须带后缀 `!`。
-  - 局部推导：`count! := 0;`
-  - 显式类型（含模块级）：`i32 count! = 0;`
-  - 赋值：`count! = 1;`
-- **读取时禁止带 `!`**：在表达式中读取变量时，必须使用纯净名称（如 `print(count)`）。
-  - Parser 强制规则：后缀 `!` 绝对不能出现在右值表达式中。遇到 `count! + 1` 直接报错，以避免与前缀逻辑非（`!count`）产生任何解析歧义。
-
-### 15.3 常量的三种形态（清晰区分编译期与运行期）
-- **编译期常量 `const`**：必须编译期求值，直接内联为字面量，无运行时内存。
-  - 例：`const MAX_SIZE = 100;`
-- **运行期动态常量 `constd`**：用于**模块级 / 字段**；运行期初始化一次后永久锁定，禁止再 `=`。
-  - 例：`constd file_size = get_dll_size("a.txt");`
-- **`:=` 不是 `constd` 的糖**：`:=` 只表示“局部推导绑定”；不可变局部与 `constd` 语义相近，但作用域规则不同，禁止互相替换写法。
+更多可运行片段：[`examples/all_samples.l`](examples/all_samples.l)
 
 ---
 
-## 16. 函数定义与尾随块（Block）
+## `const` 与 `constd`
 
-### 16.1 函数定义
-- 使用 `fun` 关键字，语法：`fun 名字(参数列表) -> 返回类型 { ... }`
-- 示例：
-fun add(i32 a, i32 b) -> i32 {
-    return a + b;
-}
+不可变性分两档，对应「编译期就能定」和「运行期算一次就锁死」——**不要靠命名习惯区分**。
 
-### 16.2 尾随块（Trailing Block）与闭包
-如果函数的最后一个参数是函数类型，允许在调用时使用尾随块（省略 `fun` 和括号内传参，类似 Ruby）。
-- 定义高阶函数：
-fun each<T: IPrint>(Array<T> list, fun(T) -> void action) { ... }
-- 尾随块调用：
-list.each { |item| print(item); }
-- **LLVM 底层要求**：无捕获块直接编译为函数指针；有捕获块必须生成隐藏的 Context 结构体作为 LLVM 函数的第一个隐式参数。
+| | `const` | `constd` |
+| --- | --- | --- |
+| 何时求值 | **编译期** | **运行期**（初始化一次） |
+| 之后能否改 | 不能 | 不能（永久锁定） |
+| 底层 | 直接内联为字面量，**无运行时存储** | 有真实绑定；初始化后禁止再 `=` |
+| 典型用途 | 上限、魔数、尺寸表 | 读文件大小、取启动时间、依赖运行时的配置快照 |
+| 作用域 | 模块级常量 | 模块级（及字段级动态常量） |
 
----
+```l
+const MAX_SIZE = 10              // 编译期常量，用点即内联
 
-## 17. 类、接口与分部类
+constd GLOBAL_VERSION = 42       // 运行期初始化后锁定
+constd start_time = get_current_time()
+constd size = get_file_size("data.bin")
 
-### 17.1 定义规则
-- 无继承。使用 `class` 定义类，使用 `interface` 定义接口。
-- 多接口使用 `:` 声明：`class User : IPrint, ILog { ... }`
-- 使用 `partial class` 将类拆分到多个文件，前端在 AST 阶段自动合并。
+i32 global_count = 0             // 可变全局：必须显式写类型（不能靠 :=）
+```
 
-### 17.2 示例
-interface IPrint {
-    fun printSelf();
-}
+### 和 `:=` 的边界（别混）
 
-partial class User : IPrint {
-    String name = "L";
-    i32 age := 18;
-}
+- **`:=`**：只用于**函数内局部**推导绑定；默认不可变，要改写 `name! :=`。  
+- **`constd`**：模块级 / 字段级的「运行期动态常量」写法——**不是** `:=` 的语法糖。  
+- 模块顶层：用 `const` / `constd` / 显式类型（可变如 `i32 x = 0`）。顶层 `:=` 若出现，语义上按不可变的 `constd` 理解，但推荐直接写清 `const`/`constd`。  
+- 不可变绑定默认可跨线程只读共享，少一层「要不要加锁」的心智税。
 
-partial class User {
-    fun printSelf() {
-        // 实现接口方法
-    }
-}
-
----
-
-## 18. 黄金测试用例（Golden Syntax）
-
-> **验收标准：Cursor 必须确保以下代码完整通过 Lexer 和 Parser 的解析。**
-
-// 1. 模块级：只用 const / constd / 显式类型（:= 仅限函数内局部推导）
-const MAX_LIMIT = 100;
-constd start_time = get_current_time();
-constd size = get_file_size("data.bin");
-
-i32 mut_count! = 0;
-i32 age! = 18;
-mut_count! = 10;
-
-// 2. 函数定义
-fun add(i32 a, i32 b) -> i32 {
-    return a + b;
-}
-
-// 3. 类与接口（字段禁止 :=）
-interface IPrint {
-    fun printSelf();
-}
-
-partial class User : IPrint {
-    String name = "L";
-    i32 age = 18;
-}
-
-partial class User {
-    fun printSelf() {
-        print(name);
-    }
-}
-
-// 4. 尾随块与泛型（必须带接口约束，禁止裸 <T>）
-fun processList<T: IPrint>(Array<T> list, fun(T) -> void action) {
-    // 内部逻辑
-}
-
-// 5. Phase 1 入口；:= 仅出现在局部作用域
+```l
 fun main() -> i32 {
-    list! := Array<User>(1);
-    u := User();
-    list.push(u);
+    n := MAX_SIZE                // 局部推导；读的是编译期常量
+    print(n)
+    print(GLOBAL_VERSION)        // constd：运行期已锁，只能读
+    // GLOBAL_VERSION = 99       // 错误：constd 禁止再赋值
+    return 0
+}
+```
 
-    processList(list) { |item|
-        item.printSelf();
+---
+
+## 属性写法（Property）
+
+这是 L 最“有辨识度”的表面语法之一：**你永远不写尾下划线**；物理字段名由编译器在底层自动加 `_`。
+
+### 声明
+
+类里 `Type name`（无 `fun`、无 `()`）就是物理字段。不要写 `var`，也不要手写 `age_`。
+
+```l
+class User {
+    i32 age              // 底层 LLVM 字段：age_
+    pub String name      // pub → 允许无 accessor 时直接读写
+    fun init(i32 a, String n) {
+        age = a          // 类内部：直接碰物理字段
+        name = n
     }
+}
+```
 
-    sum := add(1, 2);
-    return sum;
+源码里写 `u.age_` → **编译错误**（长度 > 1 的标识符禁止尾 `_`；单独的 `_` 只留给 `match` 通配）。
+
+### 访问优先级
+
+对 `u.age` / `u.age = v`（无括号）：
+
+1. **先找** `get_age()` / `set_age()` → 降成方法调用  
+2. **否则**，若存在 **`pub`** 物理字段 `age_` → 降成 GEP 读写  
+3. 都没有，或字段非 `pub` → 报错（私有字段不能靠属性名偷渡）
+
+```l
+class User {
+    i32 score
+    pub fun get_score() -> i32 { return score }
+    pub fun set_score(i32 v) { score = v + 1 }   // 赋值走 setter
+
+    pub i32 level                                // 无 accessor → 直接读写 level_
 }
 
-## 19. 编译期生成与元编程（comptime）
-
-**核心目标**：拒绝 C++ 的文本宏（#define），引入类型安全的编译期执行与代码生成能力。
-
-- **语法定义**：使用 `comptime { ... }` 块，或 `comptime expression`。
-- **执行机制**：`comptime` 内部的代码在编译期间求值。前端可以直接解释执行，或通过 LLVM JIT 运行。
-- **允许（白名单）**：
-  1. **常量折叠**：求值得到 `i32` / `f64` / `bool` / 编译期可知的聚合常量，内联为 LLVM `Constant`。
-  2. **声明列表生成**：在当前模块作用域**追加**新的函数/类型声明节点（只增不改已有私有 AST）。
-  3. **固定上界循环展开**：循环次数必须编译期可求值；展开为顺序语句，不得引入运行期依赖。
-- **禁止（黑名单）**：
-  - 运行时 I/O、网络、用户输入、调用外部 C 代理 DLL。
-  - 任意改名、删除或改写其它声明的私有 AST。
-  - 跨文件偷改已解析模块的私有节点。
-  - 重新引入文本宏式的“无约束源码拼接”。
-- **原则**：`comptime` 是受控的编译期求值，不是第二个预处理器。
-
-## 20. 模块可见性与第三方接口生成
-
-**核心目标**：保护内部实现，提供干净的 SDK 接口。供第三方团队使用的接口必须能够一键剥离实现代码。
-
-- **可见性修饰符**：使用 `pub` 关键字显式导出类、函数、接口和常量。默认未加 `pub` 的均为模块私有（Private）。
-- **接口生成工具（Interface Extractor）**：编译器必须实现 `l gen-interface` 命令。
-  - **输入**：L 语言的源码文件（`.l`）。
-  - **输出**：纯净的接口文件（`.li`）。
-- **提取规则**：
-  - 仅保留 `pub` 修饰的 AST 节点。
-  - 完全剥离函数体（`{ ... }` 替换为 `;`）。
-  - 完全剥离私有字段和私有方法。
-  - 对于分部类（`partial class`），先合并 AST，再剔除私有项。
-  - 对于泛型，保留泛型参数占位符，严禁在接口文件中单态化展开。
-  - 对于 `comptime` 宏展开的代码，直接输出展开后的最终公共签名。
-- **第三方集成**：第三方只需包含生成的 `.li` 文件即可完成编译和代码提示，对应的机器码通过 C 代理 DLL 或静态链接库在链接期合并。
-
-## 21. 泛型语法规范与防止“尖括号地狱”
-
-**核心目标**：保留 C 系语言的 `<T>` 视觉习惯，消除 C++ 模板带来的心智负担，通过强制限制嵌套深度保证代码的极致可读性。
-
-- **基础语法**：
-  - 声明：使用 `<>` 并在其中使用 `:` 指定强制接口约束，如 `<T: InterfaceName>`。严禁无约束的裸泛型 `<T>`。
-  - 调用：编译器必须支持从参数自动推导泛型类型，严禁在调用处手写 `<T>`。
-- **防嵌套地狱（强制限制）**：
-  - 编译器 Parser 必须计算泛型嵌套深度。**最大允许嵌套深度为 2 层**（例如 `Map<String, Array<i32>>` 是合法极限）。
-  - 任何达到或超过第 3 层的嵌套（如 `Map<String, Array<Map<i32, String>>>`）必须在语义分析阶段直接报错。
-  - 报错时，必须强制引导开发者使用 `type` 关键字定义别名来拍平类型（如 `type MyList = Array<i32>;`）。
-- **禁止模板特化**：严禁实现 C++ 风格的模板特化。所有针对特定类型的逻辑分支，必须使用 `comptime` 处理。
-## 22. 并发与多线程模型
-
-**核心目标**：提供底层的原子操作和锁，以及高层的结构化并发。避免 C++ 隐式数据竞争导致的内存踩踏，并在编译期拦截所有可能的数据竞争。
-
-- **基础并发原语**：L 语言本身不内置 `thread` 关键字。线程的创建、锁（Mutex）、条件变量（Condvar）通过 Runtime（C 运行时）提供，通过 `extern module` 引入。
-- **不可变性的红利**：默认不可变变量（`constd`、`:=`）天然线程安全，可以直接跨线程共享，无需加锁。
-- **结构化并发（尾随块的应用）**：提供基于闭包的线程派生原语，利用已有的尾随块语法：
-  ```text
-  spawn { |i| print(i); }
-
-### 22.1 线程同步与编译期数据竞争检查（最高红线）
-
-L 语言拒绝隐式自动加锁，采用“严格静态检查 + 显式同步块”机制。
-
-- **显式同步块（`sync`）**：使用 `sync { ... }` 块包裹需要线程安全的代码。编译器在生成 LLVM IR 时，会将其降级为底层 C Runtime 的 `Mutex` 加锁/解锁指令，并确保提前返回时也能安全解锁。
-- **最高红线（数据竞争零容忍）**：
-  - 在 `spawn { ... }` 派生出的多线程闭包中，**任何**对外部可变变量（带 `!` 的变量）的读取或写入操作，**绝对必须**被包裹在 `sync { ... }` 块内部。
-  - 编译器前端必须在语义分析（Semantic Analysis）阶段执行严格的**作用域捕获（Scope Capture）检查**。
-  - **报错机制**：如果检测到在 `spawn` 块中存在对 `!` 变量的操作，且当前 AST 节点不在 `sync` 父节点之下，必须**立即停止编译**，并抛出致命错误（Fatal Compile Error）。
-  - 报错信息模板：`Error: Data race detected. Mutable variable 'xxx!' captured in 'spawn' must be accessed inside a 'sync' block.`
-
-### 22.2 多进程模型（Process Model）
-
-- **进程与线程的严格区分**：多线程（Thread）共享内存，需要编译器进行 `sync` 检查；多进程（Process）在 OS 层面完全隔离，内存不共享，因此**不需要编译器进行内存竞争分析**。
-- **多进程归属**：进程的创建（`fork` / `spawn_process`）和进程间通信（IPC）属于标准库（Stdlib）和运行时（Runtime）的职责，而非编译器核心。
-- **标准库接口设计**：通过 `extern module std::process` 暴露进程管理接口。
-- **IPC 抽象**：标准库后期需提供极简的 IPC 封装（如基于管道 `Pipe` 或共享内存 `SharedMemory` 的泛型数据结构），全部通过底层调用 C 运行时的系统 API 实现。
-- **传递约束**：跨进程传递数据结构时，必须进行显式的序列化/反序列化（因为地址空间隔离，绝对不能直接传指针）。
-
-  
-## 23. 库（Library）的形态与包管理
-
-**核心目标**：彻底消灭 C++ 的头文件包含（#include）和 ABI 兼容性问题。L 语言的库由“源码模块”或“预编译模块”组成，对外只暴露干净的接口。
-
-- **库的两种形态**：
-  1. **源码库（Source Library）**：直接提供 `.l` 源码文件。编译器在编译当前项目时，会自动读取并编译这些源码（受限于 `LinkOnceODR` 机制，不会导致符号重复）。
-  2. **二进制库（Binary Library）**：提供预编译好的 `.li` 接口文件（由 `l gen-interface` 生成）和对应的目标文件（`.o` / `.a` / `.lib`）。
-- **无缝对接**：第三方开发者只需将 `.li` 文件放入 `import` 路径，编译器就能从中读取所有的类型签名和接口，用于代码提示和语法检查；在链接阶段，直接链接对应的二进制。
-- **包管理器约定（预留）**：库的根目录必须包含一个 `l.toml` 配置文件，声明库名称、版本、依赖项和编译选项（类似 Cargo 的 `Cargo.toml`）。
-- **依赖解析原则**：严禁循环依赖。如果模块 A 依赖 B，B 依赖 A，编译前端必须直接报错终止。
-
-## 24. 构建模式（Debug / Release）与条件编译
-
-**核心目标**：彻底废除 C++ 的预处理器宏（如 `#ifdef _DEBUG`），采用编译期常量与 LLVM 的死代码消除来区分构建模式。确保 Debug 模式下的调试代码在 Release 编译时**零运行时开销（连分支指令都不生成）**。
-
-- **废除预处理器**：严禁实现任何类似 `#define` 或 `#ifdef` 的文本替换指令。
-- **内置编译期常量**：编译器前端需内置一个枚举常量 `BUILD_MODE`（值为 `Debug` 或 `Release`）。
-- **条件编译（编译期消除）**：开发者使用 `if BUILD_MODE == Debug { ... }`。
-  - 对于 `comptime` 块内的条件判断，前端在 AST 阶段直接物理删除不符合条件的节点，不生成对应的 LLVM IR。
-  - 对于普通代码中的条件判断，依赖 LLVM 的常量传播（Constant Propagation）和死代码消除（DCE）将其完全剔除。最终机器码中**不存在任何条件分支指令**。
-- **断言与安全检查**：
-  - 提供内置的 `assert(condition)` 函数。在 `Debug` 模式下，生成 LLVM 的条件分支与崩溃指令（`llvm.trap`）；在 `Release` 模式下，**必须直接在 IR 生成阶段跳过（不生成任何指令）**。
-  - 数组越界检查（Bounds Check）同理，仅在 Debug 模式下生成检查指令，Release 模式下彻底剥离。
-- **代码优化级别**：Debug 模式默认使用 `-O0`，Release 模式默认使用 `-O3` 并启用 LTO（链接时优化）。
-
-## 25. 现代语言核心机制补全
-
-### 25.1 内存所有权与对象生命周期
-- **栈分配（默认）**：`User u = User();` 默认在栈上分配，随着作用域结束自动释放，零运行时开销。
-- **堆分配（显式）**：使用 `heap` 关键字在堆上分配，如 `u := heap User();`。
-- **释放机制**：第一阶段不引入 GC 和复杂借用检查。堆对象必须显式调用 `free(u)`，或者配合 `defer u.free();` 确保释放。未来可引入基于作用域的 Arena 内存池。
-- **杜绝隐式拷贝**：严禁 C++ 那种无意识的深拷贝/浅拷贝，对象传递需显式使用移动或克隆（后续通过 `comptime` 生成 `clone` 方法）。
-- **安全边界（强制）**：编译期负责类型安全与 `spawn`/`sync` 数据竞争红线；**不做**借用检查。泄漏与悬垂指针类似 C++ 由程序员负责；**Debug** 可插入运行时检查，**Release** 剥离。
-
-### 25.2 安全类型转换（Casting）
-- 使用 `as` 关键字进行类型转换。
-- 严禁隐式转换。基础类型转换如 `i32_val as f64`。
-- 接口/类的向下转型：`user := iface as User;` 必须返回 `Optional<User>`，强制开发者判空，彻底消灭 C++ 的 `dynamic_cast` 悬垂指针风险。
-
-### 25.3 遍历与循环（For-In）
-- **不支持 C 风格 `for(;;)`**。仅支持 `for item in collection { ... }` 和 `while condition { ... }`。
-- 所有的集合（Array、Map）必须实现统一的迭代协议（底层降级为 LLVM 的函数指针或 `yield` 指令），保证 `for-in` 可以无脑使用。
-
-### 25.4 类的字段访问控制
-- **默认私有**：类内部的字段默认仅类内可见，且默认不可变（无 `!`）。
-- **对外只读**：如果需要对外提供，使用 `pub` 修饰字段，但外部依然只能读，不能写。
-- **修改字段**：外部必须通过类提供的 `pub fun` 方法进行修改，禁止直接访问外部可变字段（彻底杜绝 C++ 指针乱飞）。
-
-### 25.5 属性访问器（Getter / Setter 语法糖）
-
-**核心目标**：提供类似 C# 的属性（Property）体验，让访问私有数据像访问公开字段一样自然，同时保留方法的控制力。
-
-- **触发规则**：
-  - 当编译器遇到 `obj.name` 且作为**右值（读取）**时，如果类中定义了 `get_name()` 方法，编译器在 AST 阶段自动将其替换为 `obj.get_name()`。
-  - 当编译器遇到 `obj.name = value` 且作为**左值（赋值）**时，如果类中定义了 `set_name(value)` 方法，编译器自动将其替换为 `obj.set_name(value)`。
-- **命名约定与冲突处理**：
-  - 底层实际存储的数据字段必须定义为私有，且为了防重名，**推荐使用后缀下划线（如 `name_`，而不是前缀 `_name`）**。
-  - 如果类中显式声明了公开字段 `pub name`，则优先当作字段直接访问，不允许存在同名的 `get_name`/`set_name` 方法，Parser 必须报错拦截。
-- **类型检查**：`get_name()` 的返回类型必须与 `set_name()` 的参数类型一致。如果只有 `get_name()`，则属性**只读**（赋值会报错）。
-- **底层降维**：AST 树中不生成任何特殊的 Property 节点，而是直接替换为对应的 `CallExpr`。LLVM 后端完全不需要感知属性的存在。
-
-## 26. 构建模式（Debug / Release）与条件编译
-**核心目标**：彻底废除 C++ 的预处理器宏（如 `#ifdef _DEBUG`），采用编译期常量与 LLVM 的死代码消除来区分构建模式。确保 Debug 模式下的调试代码在 Release 编译时**零运行时开销（连分支指令都不生成）**。
-- **废除预处理器**：严禁实现任何类似 `#define` 或 `#ifdef` 的文本替换指令。
-- **内置编译期常量**：编译器前端需内置一个枚举常量 `BUILD_MODE`（值为 `Debug` 或 `Release`）。
-- **条件编译（编译期消除）**：开发者使用 `if BUILD_MODE == Debug { ... }`。
-  - 对于 `comptime` 块内的条件判断，前端在 AST 阶段直接物理删除不符合条件的节点，不生成对应的 LLVM IR。
-  - 对于普通代码中的条件判断，依赖 LLVM 的常量传播（Constant Propagation）和死代码消除（DCE）将其完全剔除。最终机器码中**不存在任何条件分支指令**。
-- **断言与安全检查**：
-  - 提供内置的 `assert(condition)` 函数。在 `Debug` 模式下，生成 LLVM 的条件分支与崩溃指令（`llvm.trap`）；在 `Release` 模式下，**必须直接在 IR 生成阶段跳过（不生成任何指令）**。
-  - 数组越界检查（Bounds Check）同理，仅在 Debug 模式下生成检查指令，Release 模式下彻底剥离。
-- **代码优化级别**：Debug 模式默认使用 `-O0`，Release 模式默认使用 `-O3` 并启用 LTO（链接时优化）。
-
-## 27. 多进程模型（Process Model）
-- **进程与线程的严格区分**：多线程（Thread）共享内存，需要编译器进行 `sync` 检查；多进程（Process）在 OS 层面完全隔离，内存不共享，因此**不需要编译器进行内存竞争分析**。
-- **多进程归属**：进程的创建（`fork` / `spawn_process`）和进程间通信（IPC）属于标准库（Stdlib）和运行时（Runtime）的职责，而非编译器核心。
-- **标准库接口设计**：通过 `extern module std::process` 暴露进程管理接口。
-- **IPC 抽象**：标准库后期需提供极简的 IPC 封装（如基于管道 `Pipe` 或共享内存 `SharedMemory` 的泛型数据结构），全部通过底层调用 C 运行时的系统 API 实现。
-- **传递约束**：跨进程传递数据结构时，必须进行显式的序列化/反序列化（因为地址空间隔离，绝对不能直接传指针）。
-
-## 28. 库（Library）形态与包管理
-**核心目标**：彻底消灭 C++ 的头文件包含（#include）和 ABI 兼容性问题。L 语言的库由“源码模块”或“预编译模块”组成，对外只暴露干净的接口。
-- **库的两种形态**：
-  1. **源码库（Source Library）**：直接提供 `.l` 源码文件。
-  2. **二进制库（Binary Library）**：提供预编译好的 `.li` 接口文件（由 `l gen-interface` 生成）和对应的目标文件（`.o` / `.a` / `.lib`）。
-- **无缝对接**：第三方开发者只需将 `.li` 文件放入 `import` 路径，编译器就能从中读取所有的类型签名和接口，用于代码提示和语法检查；在链接阶段，直接链接对应的二进制。
-- **包管理器约定（预留）**：库的根目录必须包含一个 `l.toml` 配置文件，声明库名称、版本、依赖项和编译选项。
-- **依赖解析原则**：严禁循环依赖。如果模块 A 依赖 B，B 依赖 A，编译前端必须直接报错终止。
-
-## 29. 多语言与国际化（i18n / Interop）
-
-**核心目标**：语言内核保持轻量（只认 UTF-8），多语言和跨语言调用由标准库与 C ABI 机制完美承载。
-
-### 29.1 国际化（i18n）与 Unicode 支持
-- **源码与字符串**：L 语言源码强制使用 UTF-8 编码。Lexer 必须支持 Unicode 标识符（支持中文等作为变量/方法名）。内置 `String` 类型底层强制为 UTF-8 字节序列，**严禁**在语言核心引入 `wchar_t` 或 UTF-16 的复杂性。
-- **多语言标准库**：国际化功能通过 `std::i18n` 提供。基于 `Map<String, String>` 查表实现，运行时完全无侵入。
-
-### 29.2 跨语言互操作（FFI）
-- **统一 C ABI**：L 语言只通过标准 C ABI 调用其他语言的库。无论是 Python（C Extensions）、Node.js（N-API）还是 Rust，只要提供 `extern "C"` 接口，即可通过 `extern module` 引入。
-- **二进制链接**：支持通过 LLVM 的 `.o` / `.a` 链接机制，直接将其他语言编译出的 LLVM IR/机器码嵌入 L 语言模块中。
-
-## 30. 标准库（Stdlib）架构蓝图（第一阶段）
-
-**核心原则**：标准库完全使用 L 语言自身的泛型机制编写，底层通过 `extern module` 调用纯 C 运行时或系统 API。**严禁**使用 C++ 标准库（std::）。
-
-### 30.1 核心模块划分（Phase 1 仅实现骨架与接口）
-- **`std::core`**：基础类型、内存分配（`l_alloc`, `l_free`）、基础 trait（如 `IHashable`, `IComparable`）。
-- **`std::string`**：UTF-8 字符串（底层 `{ char*, len }`），提供拼接、切片、格式化。
-- **`std::collections`**：`Array<T>`（动态数组）、`Map<K, V>`（哈希表）、`Optional<T>`、`Result<T, E>`。
-- **`std::io`**：基础的文件读写、控制台输出（对接 C 的 `printf` / `fopen`）。
-- **`std::math`**：基础数学函数（对接 C 的 `<math.h>`）。
-- **`std::i18n`**：多语言字典与命名参数格式化。
-- **`std::thread`**：线程创建（`spawn`）、锁（`Mutex`）、同步块（`sync`）。
-
-### 30.2 第一阶段明确“不实现”的内容
-- **不实现网络库**（Socket、HTTP）。
-- **不实现复杂的并发模型**（如 Go 的 Channel、协程）。
-- **不实现复杂的序列化**（JSON、Protobuf）。
-- 以上功能留到编译器自身跑通、能编译 L 语言代码之后，再作为高级库开发。
-
-## 31. 标准库的分层架构（C Runtime vs L Stdlib）
-
-**核心原则**：严禁使用 C++ 编写 L 语言的标准库。标准库严格分为两层：底层的纯 C 运行时（C Runtime）和上层的 L 语言标准库（L Stdlib）。
-
-### 31.1 第一层：纯 C 运行时（C Runtime）
-- **编写语言**：100% 纯 C 语言。
-- **职责**：直接与操作系统打交道，提供最底层的内存分配、线程原语、系统调用。
-- **暴露方式**：通过 `extern "C"` 导出，L 语言通过 `extern module` 引入。
-- **必须提供的核心 API**：
-  - 内存：`l_alloc(size_t)`, `l_free(ptr)`
-  - 字符串输出：`l_print(const char*)`
-  - 线程与锁：`l_thread_spawn(fn, arg)`, `l_mutex_lock(m)`, `l_mutex_unlock(m)`
-  - 断言与崩溃：`l_panic(const char*)` （对接 LLVM 的 `llvm.trap`）
-- **优点**：极其稳定、毫无隐藏魔法，任何平台（Windows/Linux/macOS）都能用 C 编译器直接编出对应的 `.a` 或 `.dll`。
-
-### 31.2 第二层：L 语言标准库（L Stdlib）
-- **编写语言**：100% 使用 L 语言自身编写。
-- **职责**：利用 L 的泛型（`<T>`）和接口（`interface`），实现数据结构和高层抽象。
-- **核心模块**：`Array<T>`、`String`、`Map<K, V>`、`Optional<T>`、`Result<T, E>`、`std::i18n` 等。
-- **底层依赖**：它们内部的每一次内存申请、每一次打印，都**必须**调用第一层的纯 C 运行时（如 `l_alloc`, `l_print`）。
-- **禁止事项**：L Stdlib 严禁调用任何操作系统的原生 API（不能直接调 `malloc` 或 `printf`），必须通过 C Runtime 代理，以保证跨平台的一致性。
-
-### 31.3 为什么要这样分层？
-1. **彻底消灭 C++ 污染**：没有 C++ 的 `std::string` 和 `std::vector`，L 语言生成出来的 LLVM IR 会无比干净，LLVM 优化器能发挥 100% 的威力。
-2. **“吃狗粮”倒逼语言完善**：用 L 语言自身写标准库，是检验编译器功能（特别是泛型单态化和内存对齐）的最强测试用例。如果连 `Array<T>` 都编译不过，说明你的编译器还不合格。
-3. **极佳的跨平台性**：C Runtime 可以直接用 GCC/Clang 编译成各个平台的动态库。L Stdlib 只需要导入这个动态库即可，完全不需要修改一行 L 代码。
-
-## 32. 测试驱动与自动化验收（TDD for Compiler）
-
-**核心原则**：编译器开发必须采用“测试驱动”。任何新增的语法特性，都必须先写 `.l` 测试用例，再写编译器代码。
-
-### 32.1 四层测试架构
-1. **Lexer 测试（词法层）**：输入源码片段，断言 Token 序列的 Type 和 Value 是否正确。
-2. **Parser 测试（语法层）**：输入源码，断言 AST 结构是否与预期匹配（可输出 AST 的 JSON 树）。
-3. **Semantic 测试（语义层）**：输入错误代码（如数据竞争、类型不匹配），断言编译器是否能抛出正确的 Error Code 和行号。
-4. **End-to-End 测试（端到端执行层）**：输入完整的 `.l` 程序，编译并运行它，断言程序的打印输出（stdout）或返回值是否符合预期。
-
-### 32.2 黄金用例即测试集
-- `README.md` 第 18 条的代码必须作为最基础的测试用例（`tests/golden.l`）。
-- 禁止任何代码提交如果导致 `tests/` 目录下的历史用例失败。
-
-### 32.3 测试脚本的实现语言（Ruby）
-
-**核心目标**：编译器本体使用 C++ 实现，但**自动化测试驱动脚本（Test Runner）强制使用 Ruby 编写**。
-
-- **为什么用 Ruby**：Ruby 处理文本、正则表达式、文件系统以及对进程（编译和执行）的调用极其优雅，能极大提高测试用例的编写效率。
-- **边界隔离**：Ruby 脚本仅负责执行测试用例（调用 `l_compiler` 编译 `.l` 文件、运行生成的程序、对比输出结果），**绝对禁止**使用 Ruby 编写编译器核心逻辑或标准库。
-- **目录结构**：
-  - `tests/run_tests.rb`：统一的 Ruby 测试入口脚本。
-  - `tests/cases/`：存放所有的 `.l` 测试用例。
-  - `tests/expected/`：存放对应的预期输出（`.txt`）或预期报错（`.err`）。
-- **执行流程**：
-  1. Ruby 脚本遍历 `tests/cases/` 目录。
-  2. 调用编译器编译 `.l` 文件。
-  3. 如果预期是报错，检查编译器的 stderr 是否包含特定的错误关键词。
-  4. 如果预期是可执行程序，运行生成的二进制，对比 stdout 和预期输出是否完全一致。
-
-## 33. 类型推导与底层符号修饰
-
-### 33.1 类型推导规则（仅限 `:=`）
-- 当 Parser 遇到 `name := expression` 时，前端必须立即从右侧 `expression` 的 AST 节点中提取 `TypeInfo`。
-- **推导规则**：
-  - 整数字面量默认为 `i32`（32位），浮点字面量默认为 `f64`（64位）。
-  - 函数调用的返回值类型必须由其函数签名决定。
-  - 如果右侧表达式无法推导出类型（如传入了空结构体），必须直接报错。
-- **类型锁定**：推导完成后，该变量的类型在编译期永远固定，后续赋值必须严格匹配，绝不允许隐式类型转换。
-
-### 33.2 泛型单态化的符号修饰（Name Mangling）
-- 泛型函数（如 `fun map<T: IHashable>(...)`）在底层转化为 LLVM IR 函数时，必须使用确定的名字拼接规则。
-- **格式要求**：`原函数名_泛型类型列表`（例如 `map` 在传入 `i32` 和 `String` 时，底层函数名为 `map_i32_String`）。
-- 避免使用 LLVM 的 `LinkOnceODR` 导致跨模块合并时名字冲突。
-
-## 34. LLVM 后端内存与上下文管理
-
-- **Context 唯一性**：整个编译器进程必须只维护一个全局的 `llvm::LLVMContext`。严禁在每次生成 AST 节点或函数时新建 Context。
-- **Module 管理**：每个 L 语言模块（对应一个 `.l` 文件）生成一个独立的 `llvm::Module`。模块名必须带有当前路径的前缀以防冲突。
-- **IRBuilder 生命周期**：`llvm::IRBuilder` 的生命周期必须与编译流程严格绑定，不可跨函数泄漏。
-
-## 35. 编译器的自举与跨平台（展望）
-- 编译器（C++）本身最终要能编译 L 语言编写的标准库（`stdlib/*.l`）。
-- 编译器前端（Lexer、Parser）在设计时，应尽量避免依赖特定操作系统的专有 API，以保证未来能在 Linux、macOS 和 Windows 上无缝编译。
-
-## 36. 分号自动插入（ASI）规范
-
-**核心目标**：保持代码的极致简洁，杜绝满屏的冗余分号，同时保证 Parser 不会因为换行产生歧义。
-
-- **不强制要求分号**：L 语言在绝大多数情况下不要求程序员手动书写分号 `;`，只需依赖换行即可。
-- **词法层自动生成（ASI 机制）**：分号由 Lexer（词法分析器）在扫描到换行符 `\n` 时自动生成。
-  - **插入规则**：当 Lexer 遇到换行符时，如果上一个非空白 Token 是 `Identifier`（标识符）、`IntLiteral` / `StringLiteral`（字面量）、`RParen ")"`、`RBrace "}"` 或 `Bang "!"`，则自动在 Token 流中插入一个虚拟的 `Semicolon ";"`，并忽略该换行符。
-  - **不插入规则**：如果上一 Token 是运算符（如 `+`）、逗号 `,`、左括号 `(` / `{` 等，则不插入。
-- **Parser 无需感知**：Parser 内部的语法规则完全不变，依然通过寻找 `Semicolon ";"` 来判定语句结束。
-- **一行多语句的例外**：如果在一行内书写多条语句，换行符不再存在，Lexer 无法自动插入分号，此时程序员**必须显式**使用分号 `;` 进行分隔。
-
-## 37. 函数传参模型（传值与传引用）
-
-**核心目标**：彻底消灭 C/C++ 隐式的结构体拷贝灾难，利用 LLVM 指针实现极高的性能，同时依靠 `!` 后缀提供编译期的只读安全保证。
-
-### 37.1 基础类型：按值传递（Pass by Value）
-- 类型：`i32`, `f64`, `bool`, `ptr` 等。
-- 机制：直接将数据复制到 LLVM 的寄存器中。函数内部修改不影响外部。
-
-### 37.2 类与结构体：按引用传递（Pass by Reference）
-- 类型：任何 `class` 或自定义结构体（如 `String`, `Array`, `User`）。
-- 机制：**严禁在函数调用时进行结构体级别的值拷贝**。底层 LLVM 函数签名接收的永远是对象的指针（或接口胖指针 `{data, vtable}`）。
-- **只读约束（`!` 后缀的作用）**：
-  - 如果参数声明为 `fun foo(Box b)`（无 `!`），底层传入的是 `Box*`。但编译器在语义分析时，**必须强制禁止**在函数内部修改 `b` 的任何字段（相当于 C++ 的 `const Box*`）。
-  - 如果参数声明为 `fun foo(Box b!)`（带 `!`），编译器允许在函数内部通过指针修改对象字段，从而影响外部。
-
-### 37.3 赋值与变量本身的引用
-- 在 L 语言中，`b2 := b1`（其中 b1 是类实例）是**引用拷贝**，底层只拷贝指针，而不是深拷贝整个对象。若要深拷贝，需显式实现 `clone()` 方法。
+fun main() -> i32 {
+    u := User()
+    u.score = 10        // → set_score(10) → 内部存 11
+    print(u.score)      // → get_score()
+    u.level = 99        // → 物理字段
+    print(u.level)
+    return 0
+}
+```
+
+带括号的是方法：`u.get_age()` 永远是直接调用，不走属性规则。
+
+### 相对赋值（配置友好）
+
+```l
+app.rs232 {
+    .baud = 115200
+    .parity = "none"
+}
+```
+
+前端降成 `app.rs232.baud = 115200`，再走同一套属性优先级——适合强类型、零解析成本的配置文件。
+
+---
+
+## 关键字参数（Keyword Arguments）
+
+调用时可以写 `形参名: 值`，少记位置、少造重载——**可读性换心智负担**。
+
+### 规则
+
+1. **位置参数必须在前**，关键字参数在后。  
+2. 关键字之间**可以乱序**；Codegen 会按函数签名顺序重排。  
+3. **禁止**在关键字之后再跟裸位置参数（解析期直接拒绝）。  
+4. 关键字名必须是真实形参名；与签名对不上会报错。
+
+```l
+fun create_user(String name, i32 age, String role) {
+    print(name)
+    print(age)
+    print(role)
+}
+
+fun main() -> i32 {
+    // 位置 + 关键字混用；关键字不必按声明顺序
+    create_user("Alice", role: "admin", age: 20)
+
+    // 也可以全关键字
+    create_user(name: "Bob", age: 18, role: "user")
+
+    // create_user("Bob", age: 20, "user")  // 错误：关键字后面不能再跟位置参数
+    return 0
+}
+```
+
+这和属性写法同一哲学：表面少废话，底层仍是普通强类型调用——没有运行时「按名查参」的动态税。
+
+---
+
+## 元编程（LCMD / Hook / comptime）
+
+L 没有文本宏。元编程跑在**前端**：树行走解释器执行 L 回调，返回源码字符串 → 再 parse → **注入当前作用域**。降 LLVM 之前全部结束，**运行时零成本**。
+
+### 指令：`//LCMD_name(args)`
+
+```l
+pub fun __compile_time_handler(String path, String cmd, String args) -> String {
+    if cmd == "make_answer" {
+        return "i32 the_answer = 42;"   // 同一行多语句要用 ;
+    }
+    return ""
+}
+
+fun main() -> i32 {
+    //LCMD_make_answer()
+    print(the_answer)                  // 注入后的符号
+    return 0
+}
+```
+
+### 层级上下文路径
+
+回调拿到完整路径（如 `User.generate`）。在类体里注入的节点会成为**该类成员**：
+
+```l
+pub fun __compile_time_handler(String path, String cmd, String args) -> String {
+    if path == "User.generate" && cmd == "make_hello" {
+        return "pub fun say_hello() -> i32 { return 42; }"
+    }
+    return ""
+}
+
+class User {
+    fun generate() {
+        //LCMD_make_hello()
+    }
+}
+```
+
+### 按需 Hook（默认关闭）
+
+不会对每个 AST 节点盲触发。类/函数 Hook 必须显式打开，否则解释器整条短路：
+
+```l
+pub fun __on_class_parsed(String className) -> String {
+    if className == "UserAuto" {
+        return "pub fun print_auto_log() -> i32 { return 888; }"
+    }
+    return ""
+}
+
+//LCMD_enable_class_hook()
+class UserAuto { i32 id }
+//LCMD_disable_class_hook()
+class ShouldNotTrigger { i32 x }   // 不再触发
+```
+
+### 源码位置与 `uid_counter()`（编译期专用）
+
+Lexer 为每个 Token / AST 节点记录精确的 **行号、列号**。触发 LCMD 时，这些位置进入前端解释器上下文：
+
+- 内建 **`source_line()` / `source_column()`** → 当前指令处的行列（`i64`）  
+- 也可把 handler 写成 5 参：`(path, cmd, args, line, column)`
+
+**`uid_counter() -> i64`**：编译器内全局单调计数器；每次在 LCMD / `comptime` 里调用，返回当前值再 `+1`，结果**内联为常量**——**绝不**生成运行时 LLVM 调用，也无共享可变状态，避免并发错乱。
+
+```l
+pub fun __compile_time_handler(String path, String cmd, String args) -> String {
+    if cmd == "gen_var" {
+        id := uid_counter()
+        return "i32 temp_" + id + " = 100;"   // → temp_0, temp_1, …
+    }
+    return ""
+}
+
+fun main() -> i32 {
+    //LCMD_gen_var()
+    //LCMD_gen_var()
+    print(temp_0 + temp_1)   // 200
+    return 0
+}
+```
+
+**严格拦截**：在普通函数（如 `main`）里写 `uid_counter()` → 编译失败：
+
+`[ERROR] file:line:col - uid_counter() is only allowed in compile-time context`
+
+### `comptime { ... }` 怎么用
+
+和 `//LCMD_` 的分工：**LCMD 负责生成/注入代码**；**`comptime` 负责编译期跑逻辑、检查、否决**。块在前端执行一遍后整段剥掉——**零 LLVM、零机器码**。
+
+```l
+const ENABLE_EXPERIMENTAL = false   // 改成 true → 下面 assert 失败，整树编不过
+
+// 1) 编译期检查：失败则根本编不过
+comptime {
+    comptime_assert(ENABLE_EXPERIMENTAL == false,
+        "experimental build is locked; flip ENABLE_EXPERIMENTAL only intentionally")
+}
+
+// 2) 无条件否决（例如禁编某平台/某配置）
+comptime {
+    // compile_error("Build forbidden on this tree.")
+}
+
+// 3) 自省 + 编译期唯一 ID（同样只在 comptime / LCMD 合法）
+comptime {
+    id := uid_counter()
+    // 调试宏展开时看得到；进不了最终二进制
+    print("comptime in " + __FILE__ + " @" + __LINE__ + " uid=" + id)
+}
+
+fun main() -> i32 {
+    print("runtime: " + __FILE__ + ":" + __LINE__ + " in " + __FUNC__)
+    return 0
+}
+```
+
+**自省常量**（任意 L 表达式可用，含普通函数 / `comptime` / LCMD）：
+
+| 常量 | 类型 | 含义 |
+| --- | --- | --- |
+| `__FILE__` | `String` | 当前 Token 所在源文件（虚拟名如 `<eval>` 亦可） |
+| `__LINE__` | `i32` | 当前 Token 行号 |
+| `__FUNC__` | `String` | 当前函数名（`comptime` 块内为 `<comptime>`） |
+
+**`compile_error(msg)` / `comptime_assert(cond, msg)`** 只允许出现在 `comptime` / LCMD 上下文。失败时报：
+
+```text
+[ERROR] tests/cases/comptime_fail_test.l:2:5 - Compile-time error: Build forbidden: This is a forced compile error.
+```
+
+在 `main` 里写 `compile_error(...)` / `uid_counter()` → 同样被拒：`… is only allowed in compile-time context`。
+
+### 边界
+
+| 可以 | 不可以 |
+| --- | --- |
+| 返回常量、生成声明/方法字符串并注入 | 运行时 I/O、调外部 C DLL |
+| `comptime { ... }` 前端求值后剥离 | 把 comptime/LCMD 降到 LLVM IR |
+| `compile_error` / `comptime_assert` 否决非法配置 | 在普通运行时代码里调用它们 |
+| `uid_counter()` / `source_line()` 仅在编译期上下文 | 在 `main` 等运行时代码里调用 `uid_counter()` |
+| `gen-interface` 剥实现、只留 `pub` 签名 | 把私有/`extern`/LCMD 泄漏进 `.li` |
+| `l doc` 从 `pub` + `#`/`//` 注释出 Markdown | 把 `//LCMD_` 或私有实现写进文档 |
+
+---
+
+## 工程实践
+
+### 仓库分层
+
+| 目录 | 职责 |
+| --- | --- |
+| `compiler/` | C++ 前端 + LLVM Codegen |
+| `runtime/` | **纯 C** 系统调用（分配、线程、Socket、TLS、文件…） |
+| `stdlib/` | **纯 L** 业务与容器；C 绑定只出现在 `extern module` |
+| `tests/` | Ruby runner + `.l` 用例 |
+| `examples/` | 示例；总览见 `all_samples.l` |
+
+纪律：**Codegen 禁止硬编码** `l_print` / `l_alloc` 一类符号——一律由 `stdlib/memory.l`、`io.l` 等 `extern module` 声明，链接名保持原样。
+
+### 模块与包
+
+- 文件即模块：`import "foo.l"`；IR 符号扁平为 `@module_func`。  
+- 多文件：`l build -o app.exe a.l b.l …` 合成**一个** LLVM Module；`import` 有模块缓存，避免重复解析。  
+- 依赖：`l.toml` 的 `[dependencies]` → 扫 `vendor/<name>/`（`.li` + `lib*.a`）；环依赖直接报错。
+
+### 对外导出（C ABI）
+
+```l
+pub fun add_numbers(i32 a, i32 b) -> i32 { return a + b }
+
+pub fun counter_create(i32 v) -> ptr {
+    c := heap Counter(v)
+    return c as ptr          // 所有权交给外部；移出 auto-free
+}
+
+pub fun counter_destroy(ptr p) { l_free(p) }
+```
+
+```bash
+./l build --shared tests/cases/ffi_export.l -o libl_ffi.dll
+./l gen-interface stdlib/string.l -o string.li
+./l doc stdlib/string.l -o string.md
+```
+
+`Class as ptr` / `ptr as Class` 是零成本 bitcast。跨语言回调函数必须 `CallingConv::C`。
+
+**`l doc`**：扫 AST 里的 `pub fun` / `pub class` / `pub interface`，把签名写成 Markdown；声明正上方的 `#` / `//` 注释当作说明（`//LCMD_` 忽略）。适合给 stdlib 或对外 API 出一页可读文档，和 `gen-interface`（给机器看的 `.li`）成对。
+
+### 错误与空值纪律
+
+- API 查找 → `Optional<T>`（`Map.get` 等）  
+- 可恢复失败 → `Result<T,E>` + `?` 早归  
+- 禁止隐式 null；配置缺失用 `Optional`，类型不对用 `Result`，不要静默默认值掩盖错误
+
+### 并发与测试习惯
+
+- 共享可变状态：`sync { ... }`；锁次数可用 runtime 计数校验（不只看最终数值）。  
+- 全量：**111 条**自动化用例 — `ruby tests/run_tests.rb`（Lexer→AST→可执行/JIT，含拒绝用例）。  
+- 性能：`benchmarks/`，固定 `-O3`，**不**并进上述套件。  
+- 探索：`l repl` / `l eval`（ORC JIT，不落临时 exe）。
+
+### 内存习惯速查
+
+| 场景 | 做法 |
+| --- | --- |
+| 普通堆对象 | `heap T(...)`，靠 auto-free 或 `defer l_free` |
+| 返回给 FFI | `as ptr` 前确保移出 auto-free，并提供 `destroy` |
+| 短生命周期批量分配 | `arena`；返回值要拷出池外 |
+| 查泄漏 | `l_get_alloc_count()` |
+
+---
+
+## 其它核心能力（速览）
+
+**编译型** — 整条链路是 Lexer → 类型检查 → LLVM IR → 机器码；`repl`/`eval` 也是 JIT 编译，不是逐行解释。
+
+**强类型** — 形参、字段、返回值均有类型；`:=` 只是推断，推断结果仍是静态类型。泛型必须带约束（`<T: Interface>`），单态化生成专用机器码。`i32 < i64 < f64` 可提升，`String`/类与数字之间禁止隐式混算；`i64` 赋值不会默默截成 `i32`。
+
+**内存** — `heap` / `defer` / 作用域 `l_free`；临时串与容器递归清理；Arena 整块释放。
+
+**对象** — 类是纯数据；`Array<IReader>` 存胖指针；`r as Point` → `Optional`（比 TypeID）。
+
+**并发** — `spawn` = OS 线程；写 `!` 必须 `sync`；原子 API 可经 `&` 豁免检查。
+
+**错误** — 无异常表；`Result` + `?` 冲刷 defer 后早归。
+
+**双模式** — 同为编译产物：AOT（`build`/`run`/`--shared`）与 JIT（`repl`/`eval`）。
+
+```l
+count! := 0
+count! = count + 1
+arr := [1, 2, 3]
+arr.each { |x| print(x) }
+```
+
+---
+
+## 架构
+
+```
+.l ──► Lexer/ASI ──► Parser/AST ──► 语义（单态化 / 逃逸 / 竞争 / LCMD）
+                                      │
+                                      ▼
+                               LLVM IR ──► AOT | ORC JIT
+                                      ▲
+              stdlib/*.l (纯 L)  +  runtime/*.c (纯 C ABI)
+```
+
+```bash
+ruby tests/run_tests.rb    # 111 automated tests — must stay green
+```
+
+---
+
+## 快速开始
+
+**依赖**：CMake 3.20+ · LLVM 22.1.0 · C++17
+
+```powershell
+. .\tools\bin\use-llvm-env.ps1   # Windows：VS + LLVM
+```
+
+```bash
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+cmake --build . --config Release
+
+./l run tests/cases/hello_world.l
+./l build --shared tests/cases/ffi_export.l -o libl_ffi.dll
+./l gen-interface stdlib/string.l -o string.li
+./l doc stdlib/string.l -o string.md
+./l repl
+```
+
+---
+
+少写一行废话，就少一分心智负担。**111 tests green.** Built with LLVM, discipline, and AI pair-programming.
+
+---
+
+## 版权声明
+
+**Copyright (c) 2026 DFTan. All rights reserved.**  
+版权所有 · 保留一切权利。开源许可证尚未确定（**License TBD**）。
+
+未经书面授权，不得复制、修改、分发或商用。完整条款见 [`COPYRIGHT`](COPYRIGHT)。

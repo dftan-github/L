@@ -21,7 +21,10 @@ enum class TokenType {
   // Literals & names
   Identifier,
   IntLiteral,
+  FloatLiteral,
   StringLiteral,
+  // `//LCMD_cmd(args)` — lexeme is `cmd(args)` (everything after LCMD_).
+  LcmdDirective,
 
   // Keywords
   KwConst,
@@ -33,16 +36,24 @@ enum class TokenType {
   KwClass,
   KwIf,
   KwElse,
+  KwMatch,
+  KwAs,
   KwWhile,
   KwFor,
   KwIn,
   KwTrue,
   KwFalse,
   KwHeap,
+  KwArena,
   KwDefer,
   KwSync,
+  KwSpawn,
+  KwComptime,
   KwImport,
   KwPub,
+  KwStatic,
+  KwExtern,
+  KwModule,
 
   // Built-in types
   TyI32,
@@ -55,20 +66,30 @@ enum class TokenType {
 
   // Punctuation / operators
   Bang,          // !
+  Question,      // ?  (Result error propagation)
   Equal,         // =
   EqEq,          // ==
   NotEq,         // !=
   ColonAssign,   // :=
   Arrow,         // ->
+  FatArrow,      // =>
   Colon,         // :
   Semicolon,     // ;
   Comma,         // ,
   Dot,           // .
+  DotDot,        // ..
   Plus,          // +
   Minus,         // -
   Star,          // *
   Slash,         // /
+  PlusEqual,     // +=
+  MinusEqual,    // -=
+  StarEqual,     // *=
+  SlashEqual,    // /=
+  PlusPlus,      // ++
+  MinusMinus,    // --
   AmpAmp,        // &&
+  Amp,           // &
   Pipe,          // |
   PipePipe,      // ||
   LParen,        // (

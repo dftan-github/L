@@ -19,10 +19,17 @@ bool Lexer::asiTrigger(ast::TokenType type) {
   switch (type) {
     case ast::TokenType::Identifier:
     case ast::TokenType::IntLiteral:
+    case ast::TokenType::FloatLiteral:
     case ast::TokenType::StringLiteral:
+    case ast::TokenType::KwTrue:   // `return true` / `return false`
+    case ast::TokenType::KwFalse:
     case ast::TokenType::RParen:
     case ast::TokenType::RBrace:
+    case ast::TokenType::RBracket:  // `arr := [1, 2, 3]` / `return data_[i]`
     case ast::TokenType::Bang:
+    case ast::TokenType::Question:  // `safe_div(...)?`
+    case ast::TokenType::PlusPlus:    // `a!++` / statement form
+    case ast::TokenType::MinusMinus:  // `a!--`
     // Type tokens end interface method signatures: `fun f() -> i32`
     case ast::TokenType::TyI32:
     case ast::TokenType::TyI64:
@@ -96,6 +103,10 @@ ast::Token Lexer::next() {
 }
 
 ast::Token Lexer::lexTokenAtCursor() {
+  if (atLcmdDirective()) {
+    return lexLcmdDirective();
+  }
+
   const char c = peek();
   if (c == '"') {
     return lexString();
@@ -176,8 +187,17 @@ void Lexer::skipWhitespaceAndComments(bool& saw_newline) {
   }
 }
 
+bool Lexer::atLcmdDirective() const {
+  // //LCMD_
+  return peek() == '/' && peek(1) == '/' && peek(2) == 'L' && peek(3) == 'C' &&
+         peek(4) == 'M' && peek(5) == 'D' && peek(6) == '_';
+}
+
 bool Lexer::trySkipLineComment() {
   if (peek() == '/' && peek(1) == '/') {
+    if (atLcmdDirective()) {
+      return false;  // leave for lexLcmdDirective
+    }
     advance();
     advance();
     while (!atEnd() && peek() != '\n') {
@@ -185,7 +205,31 @@ bool Lexer::trySkipLineComment() {
     }
     return true;
   }
+  // `# …` line comments (doc / scripting style); scraped by `l doc`.
+  if (peek() == '#') {
+    advance();
+    while (!atEnd() && peek() != '\n') {
+      advance();
+    }
+    return true;
+  }
   return false;
+}
+
+ast::Token Lexer::lexLcmdDirective() {
+  const ast::SourceLocation loc = location();
+  // Consume `//LCMD_`
+  advanceBytes(7);
+  std::string body;
+  while (!atEnd() && peek() != '\n') {
+    body.push_back(peek());
+    advance();
+  }
+  // Trim trailing CR / spaces.
+  while (!body.empty() && (body.back() == '\r' || body.back() == ' ' || body.back() == '\t')) {
+    body.pop_back();
+  }
+  return makeToken(ast::TokenType::LcmdDirective, std::move(body), loc);
 }
 
 bool Lexer::trySkipBlockComment() {
@@ -306,6 +350,12 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "else") {
     return ast::TokenType::KwElse;
   }
+  if (text == "match") {
+    return ast::TokenType::KwMatch;
+  }
+  if (text == "as") {
+    return ast::TokenType::KwAs;
+  }
   if (text == "while") {
     return ast::TokenType::KwWhile;
   }
@@ -324,17 +374,35 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "heap") {
     return ast::TokenType::KwHeap;
   }
+  if (text == "arena") {
+    return ast::TokenType::KwArena;
+  }
   if (text == "defer") {
     return ast::TokenType::KwDefer;
   }
   if (text == "sync") {
     return ast::TokenType::KwSync;
   }
+  if (text == "comptime") {
+    return ast::TokenType::KwComptime;
+  }
+  if (text == "spawn") {
+    return ast::TokenType::KwSpawn;
+  }
   if (text == "import") {
     return ast::TokenType::KwImport;
   }
   if (text == "pub") {
     return ast::TokenType::KwPub;
+  }
+  if (text == "static") {
+    return ast::TokenType::KwStatic;
+  }
+  if (text == "extern") {
+    return ast::TokenType::KwExtern;
+  }
+  if (text == "module") {
+    return ast::TokenType::KwModule;
   }
   if (text == "i32") {
     return ast::TokenType::TyI32;
@@ -373,7 +441,15 @@ ast::Token Lexer::lexIdentifierOrKeyword() {
   }
 
   const std::string text(source_.substr(begin, index_ - begin));
-  return makeToken(keywordOrType(text), text, start);
+  const ast::TokenType ty = keywordOrType(text);
+  // Rule 70/73: identifiers must not end with `_` (physical fields are compiler-hidden).
+  // Bare `_` remains valid (match wildcard). Compile-time context macros are exceptions.
+  if (ty == ast::TokenType::Identifier && text.size() > 1 && text.back() == '_') {
+    if (text != "__FILE__" && text != "__FUNC__" && text != "__LINE__") {
+      return makeToken(ast::TokenType::Invalid, text, start);
+    }
+  }
+  return makeToken(ty, text, start);
 }
 
 ast::Token Lexer::lexNumber() {
@@ -382,6 +458,16 @@ ast::Token Lexer::lexNumber() {
   while (!atEnd() && std::isdigit(static_cast<unsigned char>(peek()))) {
     advance();
   }
+  // Float: digits '.' digits  (e.g. 3.14)
+  if (!atEnd() && peek() == '.' &&
+      std::isdigit(static_cast<unsigned char>(peek(1)))) {
+    advance();  // '.'
+    while (!atEnd() && std::isdigit(static_cast<unsigned char>(peek()))) {
+      advance();
+    }
+    const std::string text(source_.substr(begin, index_ - begin));
+    return makeToken(ast::TokenType::FloatLiteral, text, start);
+  }
   const std::string text(source_.substr(begin, index_ - begin));
   return makeToken(ast::TokenType::IntLiteral, text, start);
 }
@@ -389,19 +475,43 @@ ast::Token Lexer::lexNumber() {
 ast::Token Lexer::lexString() {
   const ast::SourceLocation start = location();
   advance();  // opening "
-  const std::size_t begin = index_;
+  std::string text;
+  text.reserve(32);
   while (!atEnd() && peek() != '"') {
     if (peek() == '\\' && peek(1) != '\0') {
+      advance();  // consume '\'
+      const char esc = peek();
       advance();
-      advance();
+      switch (esc) {
+        case 'n':
+          text.push_back('\n');
+          break;
+        case 'r':
+          text.push_back('\r');
+          break;
+        case 't':
+          text.push_back('\t');
+          break;
+        case '"':
+          text.push_back('"');
+          break;
+        case '\\':
+          text.push_back('\\');
+          break;
+        default:
+          // Keep unknown escapes as raw `\<c>` so interpolation can still see `\{`.
+          text.push_back('\\');
+          text.push_back(esc);
+          break;
+      }
       continue;
     }
     if (peek() == '\n') {
-      break;
+      break;  // unclosed string
     }
+    text.push_back(peek());
     advance();
   }
-  const std::string text(source_.substr(begin, index_ - begin));
   if (!atEnd() && peek() == '"') {
     advance();
   }
@@ -422,6 +532,11 @@ ast::Token Lexer::lexPunctuation() {
     advance();
     advance();
     return makeToken(ast::TokenType::Arrow, "->", start);
+  }
+  if (c == '=' && n == '>') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::FatArrow, "=>", start);
   }
   if (c == '=' && n == '=') {
     advance();
@@ -448,16 +563,57 @@ ast::Token Lexer::lexPunctuation() {
     advance();
     return makeToken(ast::TokenType::AmpAmp, "&&", start);
   }
+  if (c == '&') {
+    advance();
+    return makeToken(ast::TokenType::Amp, "&", start);
+  }
   if (c == '|' && n == '|') {
     advance();
     advance();
     return makeToken(ast::TokenType::PipePipe, "||", start);
+  }
+  if (c == '+' && n == '+') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::PlusPlus, "++", start);
+  }
+  if (c == '-' && n == '-') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::MinusMinus, "--", start);
+  }
+  if (c == '+' && n == '=') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::PlusEqual, "+=", start);
+  }
+  if (c == '-' && n == '=') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::MinusEqual, "-=", start);
+  }
+  if (c == '*' && n == '=') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::StarEqual, "*=", start);
+  }
+  if (c == '/' && n == '=') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::SlashEqual, "/=", start);
+  }
+  if (c == '.' && n == '.') {
+    advance();
+    advance();
+    return makeToken(ast::TokenType::DotDot, "..", start);
   }
 
   advance();
   switch (c) {
     case '!':
       return makeToken(ast::TokenType::Bang, "!", start);
+    case '?':
+      return makeToken(ast::TokenType::Question, "?", start);
     case '=':
       return makeToken(ast::TokenType::Equal, "=", start);
     case ':':

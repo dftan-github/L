@@ -1,0 +1,6 @@
+[package]
+name = "pkg_cycle"
+version = "0.1.0"
+
+[dependencies]
+pkg_a = "1.0"

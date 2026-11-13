@@ -1,0 +1,1 @@
+pub fun add(i32 a, i32 b) -> i32

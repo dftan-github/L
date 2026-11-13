@@ -1,25 +1,40 @@
 // Dynamic array — Layer 2 stdlib in L, heap via Layer 1 C runtime.
 pub class Array<T> {
-    ptr data_
-    i32 length_
-    i32 capacity_
+    ptr data
+    i32 length
+    i32 capacity
 
     fun push(T item) {
-        if length_ >= capacity_ {
-            i32 new_cap = capacity_ * 2
+        if length >= capacity {
+            i32 new_cap = capacity * 2
             if new_cap == 0 {
                 new_cap = 4
             }
-            ptr new_data = l_realloc(data_, new_cap * sizeof(T))
-            data_ = new_data
-            capacity_ = new_cap
+            ptr new_data = l_realloc(data, new_cap * sizeof(T))
+            data = new_data
+            capacity = new_cap
         }
-        data_[length_] = item
-        length_ = length_ + 1
+        data[length] = item
+        length = length + 1
     }
 
     fun get(i32 index) -> T {
-        // ASI does not trigger after ']'; keep explicit ';'
-        return data_[index];
+        return data[index]
+    }
+
+    pub fun set(i32 index, T item) {
+        data[index] = item
+    }
+
+    pub fun len() -> i32 {
+        return length
+    }
+
+    pub fun each(fun(T) action) {
+        i32 i = 0
+        while i < length {
+            action(get(i))
+            i = i + 1
+        }
     }
 }

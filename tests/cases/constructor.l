@@ -1,10 +1,10 @@
 class User {
-    i32 age_
+    i32 age
     fun init(i32 a) {
-        age_ = a + 10
+        age = a + 10
     }
     pub fun get_age() -> i32 {
-        return age_
+        return age
     }
 }
 
