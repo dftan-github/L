@@ -1,9 +1,11 @@
 #!/bin/sh
 # L language compiler — pre-commit hook.
 #
-# Runs the full Ruby test suite before every commit. The runner is incremental
-# (MD5 fingerprints in tests/.test_cache.json), so an unchanged tree finishes in
-# well under a second; only tests whose dependencies actually changed re-run.
+# Two gates, both must pass:
+#   1. Rule-anchor guard (tools/check_rule_refs.rb) — always runs, never cached.
+#   2. Full Ruby test suite — incremental (MD5 fingerprints in
+#      tests/.test_cache.json), so an unchanged tree finishes in well under a
+#      second; only tests whose dependencies actually changed re-run.
 #
 # Install (one line, run from the repo root):
 #   sh tools/install-hooks.sh
@@ -29,6 +31,19 @@ compiler="build/clang-debug/compiler/l.exe"
 if [ ! -f "$compiler" ] && [ ! -f "build/clang-debug/compiler/l" ]; then
     echo "[pre-commit] ERROR: compiler not built ($compiler)." >&2
     echo "[pre-commit] Build it first, or commit with --no-verify." >&2
+    exit 1
+fi
+
+# Rule-anchor guard runs UNCONDITIONALLY, never through the incremental cache.
+# The suite skips unchanged tests, so a rule file edit could slip past
+# test_rule_refs_consistent! when its dependency graph misses it. This check is
+# cheap (well under a second) and must always see the file as committed.
+echo "[pre-commit] Checking rule anchors..."
+if ! ruby tools/check_rule_refs.rb; then
+    echo "" >&2
+    echo "[pre-commit] Rule anchors inconsistent — commit aborted." >&2
+    echo "[pre-commit] Every '## N. Title' heading needs an <!-- id:xxx --> anchor." >&2
+    echo "[pre-commit] Fix it, or bypass with: git commit --no-verify" >&2
     exit 1
 fi
 
