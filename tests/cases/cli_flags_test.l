@@ -3,7 +3,7 @@ fun main() -> i32 {
 
     // Locals: method chaining on temporaries is not supported yet.
     ver_opt := flags.get("version")
-    ver := ver_opt.unwrap_or("false")
+    ver := ver_opt ?? "false"
     if ver == "true" {
         print("L Language v1.0.0")
     }

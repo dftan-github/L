@@ -7,10 +7,10 @@ fun main() -> i32 {
         t := tokens.get(i)
         if t.is_i32() {
             opt := t.as_i32()
-            print(opt.unwrap_or(0))
+            print(opt ?? 0)
         } else {
             opts := t.as_string()
-            s := opts.unwrap_or(String(""))
+            s := opts ?? String("")
             print(s)
         }
         i! = i + 1

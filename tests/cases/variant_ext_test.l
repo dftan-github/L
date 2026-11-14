@@ -4,11 +4,11 @@ fun main() -> i32 {
 
     if v1.is_f64() {
         opt_f := v1.as_f64()
-        print(opt_f.unwrap_or(0.0))
+        print(opt_f ?? 0.0)
     }
     if v2.is_bool() {
         opt_b := v2.as_bool()
-        print(opt_b.unwrap_or(false))
+        print(opt_b ?? false)
     }
 
     // Wrong-tag check

@@ -70,6 +70,9 @@ private:
   bool interfaceHasMethod(const std::string& iface_name, const std::string& method) const;
   // Best-effort type of an expression for generic constraint checks.
   std::string inferExprType(const ast::Expr& expr) const;
+  // Static return type of `recv_ty.method` (instance / static / single delegate).
+  std::string methodReturnTypeOn(const std::string& recv_ty,
+                                 const std::string& method) const;
   void checkGenericCallConstraints(const ast::CallExpr& call);
   void checkConstrainedMethodCall(const ast::MethodCallExpr& call);
 

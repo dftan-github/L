@@ -6,8 +6,11 @@
 # must reference the stable anchor id (<!-- id:delegate -->) rather than "rule 97".
 #
 # This script fails (exit 1) when:
-#   1. a "## N. Title" heading has no <!-- id:xxx --> anchor right below it
-#   2. an anchor id is duplicated
+#   1. a numbered heading ("## 99. Title" / "## 999.1 Title") has no
+#      <!-- id:xxx --> anchor right below it — anchors are mandatory for every
+#      numbered section, whether or not any code references it
+#   2. a "## <digit>..." heading is not even recognized as a numbered section
+#   3. an anchor id is duplicated
 #   3. section numbers are not unique
 #   4. code references an anchor id (see --list) that is not declared in the rules file
 #   5. code still contains a numeric reference like "rule 97" / "Rule 97"
@@ -28,7 +31,11 @@ CODE_GLOBS = %w[
 ].freeze
 
 ANCHOR_RE = /^<!-- id:([a-z0-9][a-z0-9-]*) -->$/
-HEADING_RE = /^## (\d+)\. (.+)$/
+# Section numbers may be flat (99), multi-level (999.1) or suffixed (12a).
+# Every "## <number>..." heading MUST be followed by an anchor line: an
+# unparsed heading would otherwise be skipped silently and its anchor never
+# verified (that is exactly how `## 999.1` slipped through).
+HEADING_RE = /^## (\d+(?:\.\d+)*[a-z]?)\.?\s+(.+)$/
 REF_RE = /\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]/
 NUMERIC_RE = /\b[Rr]ules?\s+\d+\b/
 
@@ -48,15 +55,24 @@ unless RULES.file?
 end
 
 lines = RULES.read.force_encoding("UTF-8").split("\n", -1)
-anchors = {}      # id => section number
+anchors = {}      # id => section number (string)
 sections = {}     # number => id
 table = []
+number_headings = 0
 
 lines.each_with_index do |line, i|
+  # Any "## <something starting with a digit>" is a numbered section and MUST
+  # carry an anchor. Fail loudly instead of skipping unparsed shapes.
+  if (line =~ /^##\s+\d/) && (HEADING_RE.match(line).nil?)
+    errors << "line #{i + 1}: unrecognized numbered heading (expected '## <number>. <title>'): #{line.strip}"
+    next
+  end
+
   heading = HEADING_RE.match(line)
   next unless heading
 
-  num = heading[1].to_i
+  number_headings += 1
+  num = heading[1]
   title = heading[2].strip
   anchor_line = lines[i + 1].to_s
   match = ANCHOR_RE.match(anchor_line.strip)
@@ -77,6 +93,7 @@ end
 
 # Section numbers must not repeat; gaps are reported separately (informational).
 errors << "no sections found in #{RULES.basename}" if sections.empty?
+errors << "every numbered heading lost its anchor (0 verified)" if number_headings.positive? && sections.empty?
 
 CODE_GLOBS.flat_map { |g| Dir.glob(ROOT.join(g).to_s) }.uniq.sort.each do |file|
   rel = Pathname.new(file).relative_path_from(ROOT).to_s.tr("\\", "/")
@@ -111,7 +128,12 @@ CODE_GLOBS.flat_map { |g| Dir.glob(ROOT.join(g).to_s) }.uniq.sort.each do |file|
 end
 
 if ARGV.include?("--list")
-  table.sort_by(&:first).each { |num, id, title| puts format("%4d  %-28s %s", num, id, title) }
+  sort_key = lambda do |(num, _id, _title)|
+    parts = num.scan(/\d+/).map(&:to_i)
+    parts.fill(0, parts.size...3)
+    parts
+  end
+  table.sort_by(&sort_key).each { |num, id, title| puts format("%7s  %-28s %s", num, id, title) }
   puts
 end
 

@@ -1,4 +1,4 @@
-//这里面包含114个例子
+﻿//这里面包含114个例子
 
 //------------------------------------------------
 // examples/config_parser.l
@@ -616,7 +616,7 @@ fun main() -> i32 {
 
     // Locals: method chaining on temporaries is not supported yet.
     ver_opt := flags.get("version")
-    ver := ver_opt.unwrap_or("false")
+    ver := ver_opt ?? "false"
     if ver == "true" {
         print("L Language v1.0.0")
     }
@@ -764,31 +764,31 @@ fun main() -> i32 {
     cfg := parse_config(src)
 
     h := cfg.get("host")
-    print(h.unwrap_or(String("")))
+    print(h ?? String(""))
 
     p := cfg.get("port")
-    print(p.unwrap_or(String("")))
+    print(p ?? String(""))
 
     n := cfg.get("name")
-    print(n.unwrap_or(String("")))
+    print(n ?? String(""))
 
     // First '=' only: value keeps remaining equals
     e := cfg.get("expr")
-    print(e.unwrap_or(String("")))
+    print(e ?? String(""))
 
     // //fake = still_stored → not a # comment, so key "//fake" is stored
     fake := cfg.get("//fake")
-    print(fake.unwrap_or(String("")))
+    print(fake ?? String(""))
 
     // Malformed / space-only / # comments must not invent keys
     bad := cfg.get("this_is_a_bad_line")
-    print(bad.unwrap_or(String("skipped")))
+    print(bad ?? String("skipped"))
 
     slash := cfg.get("// not_a_hash_comment")
-    print(slash.unwrap_or(String("skipped")))
+    print(slash ?? String("skipped"))
 
     missing := cfg.get("Database")
-    print(missing.unwrap_or(String("ok")))
+    print(missing ?? String("ok"))
 
     return 0
 }
@@ -1714,10 +1714,10 @@ fun main() -> i32 {
         t := tokens.get(i)
         if t.is_i32() {
             opt := t.as_i32()
-            print(opt.unwrap_or(0))
+            print(opt ?? 0)
         } else {
             opts := t.as_string()
-            s := opts.unwrap_or(String(""))
+            s := opts ?? String("")
             print(s)
         }
         i! = i + 1
@@ -1787,10 +1787,10 @@ fun main() -> i32 {
     m.put("three", 3)
 
     v1 := m.get("two")
-    print(v1.unwrap_or(0))
+    print(v1 ?? 0)
 
     v2 := m.get("four")
-    print(v2.unwrap_or(99))
+    print(v2 ?? 99)
     return 0
 }
 
@@ -2129,10 +2129,10 @@ fun main() -> i32 {
 //------------------------------------------------
 fun main() -> i32 {
     opt1 := Optional<i32>(true, 42)
-    print(opt1.unwrap_or(0))
+    print(opt1 ?? 0)
 
     opt2 := Optional<i32>(false, 0)
-    print(opt2.unwrap_or(99))
+    print(opt2 ?? 99)
     return 0
 }
 
@@ -2709,11 +2709,11 @@ fun main() -> i32 {
 
     if v1.is_f64() {
         opt_f := v1.as_f64()
-        print(opt_f.unwrap_or(0.0))
+        print(opt_f ?? 0.0)
     }
     if v2.is_bool() {
         opt_b := v2.as_bool()
-        print(opt_b.unwrap_or(false))
+        print(opt_b ?? false)
     }
 
     // Wrong-tag check
@@ -2737,11 +2737,11 @@ fun main() -> i32 {
 
     // Extract matching tag
     x := v1.as_i32()
-    print(x.unwrap_or(0))
+    print(x ?? 0)
 
     // Extract mismatch → empty Optional
     y := v2.as_i32()
-    print(y.unwrap_or(99))
+    print(y ?? 99)
 
     return 0
 }

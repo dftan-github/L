@@ -1,4 +1,4 @@
-#include "semantic/semantic.hpp"
+﻿#include "semantic/semantic.hpp"
 
 namespace l::semantic {
 
@@ -992,9 +992,175 @@ std::string Analyzer::inferExprType(const ast::Expr& expr) const {
       }
       return fieldType(access.member);
     }
+    case ast::ExprKind::Call: {
+      const auto& call = static_cast<const ast::CallExpr&>(expr);
+      // Free functions / associated statics (`Variant.from_i32(...)`).
+      auto fit = free_funcs_.find(call.callee);
+      if (fit == free_funcs_.end() || !fit->second) {
+        return {};
+      }
+      return fit->second->return_type.empty() ? std::string("void")
+                                              : fit->second->return_type;
+    }
+    case ast::ExprKind::MethodCall: {
+      const auto& call = static_cast<const ast::MethodCallExpr&>(expr);
+      if (!call.object) {
+        return {};
+      }
+      // Receiver type: bare identifier may be a class (static/assoc), else the
+      // expression's own static type (enables `a.b().c()` chains and `??` checks).
+      std::string recv_ty = inferExprType(*call.object);
+      if (recv_ty.empty() && call.object->kind() == ast::ExprKind::Identifier) {
+        const auto& oid = static_cast<const ast::IdentifierExpr&>(*call.object);
+        if (classes_.count(oid.name) != 0) {
+          recv_ty = oid.name;  // `Variant.from_i32` / ClassName.staticMethod
+        }
+      }
+      if (recv_ty.empty()) {
+        return {};
+      }
+      return methodReturnTypeOn(recv_ty, call.method);
+    }
+    case ast::ExprKind::Coalesce: {      const auto& co = static_cast<const ast::CoalesceExpr&>(expr);
+      if (co.left) {
+        const std::string lt = inferExprType(*co.left);
+        const std::string prefix = "Optional<";
+        if (lt.rfind(prefix, 0) == 0 && !lt.empty() && lt.back() == '>') {
+          return lt.substr(prefix.size(), lt.size() - prefix.size() - 1);
+        }
+      }
+      return co.right ? inferExprType(*co.right) : std::string{};
+    }
     default:
       return {};
   }
+}
+
+// Static return type of `recv_ty.method`, mirroring Codegen::methodReturnTypeOn:
+// instance methods first (with generic substitution), then unambiguous delegate
+// promotion. Keeps `??` type checks consistent with what codegen will emit.
+std::string Analyzer::methodReturnTypeOn(const std::string& recv_ty,
+                                         const std::string& method) const {
+  if (recv_ty.empty()) {
+    return {};
+  }
+  const ast::ClassDeclStmt* cls = nullptr;
+  auto cit = classes_.find(recv_ty);
+  if (cit != classes_.end() && cit->second) {
+    cls = cit->second;
+  } else if (!recv_ty.empty() && recv_ty.back() == '>') {
+    // Generic instantiation not registered yet (`Map<i32>`): fall back to the
+    // template declaration and substitute its parameters.
+    const size_t lt_pos = recv_ty.find('<');
+    if (lt_pos != std::string::npos) {
+      auto tit = classes_.find(recv_ty.substr(0, lt_pos));
+      if (tit != classes_.end() && tit->second) {
+        cls = tit->second;
+      }
+    }
+  }
+  if (!cls) {
+    return {};
+  }
+
+  // Generic substitution table for this instantiation (Map<i32> → V = i32).
+  std::vector<std::pair<std::string, std::string>> subst;
+  if (!recv_ty.empty() && recv_ty.back() == '>') {
+    const size_t lt_pos = recv_ty.find('<');
+    if (lt_pos != std::string::npos) {
+      std::string inner = recv_ty.substr(lt_pos + 1, recv_ty.size() - lt_pos - 2);
+      std::vector<std::string> args;
+      int depth = 0;
+      std::string cur;
+      for (char c : inner) {
+        if (c == '<') {
+          ++depth;
+        } else if (c == '>') {
+          --depth;
+        } else if (c == ',' && depth == 0) {
+          args.push_back(cur);
+          cur.clear();
+          continue;
+        }
+        cur.push_back(c);
+      }
+      if (!cur.empty()) {
+        args.push_back(cur);
+      }
+      for (size_t i = 0; i < cls->generics.size() && i < args.size(); ++i) {
+        subst.emplace_back(cls->generics[i].name, args[i]);
+      }
+    }
+  }
+  auto substitute = [&](std::string ty) -> std::string {
+    for (const auto& kv : subst) {
+      size_t pos = 0;
+      while ((pos = ty.find(kv.first, pos)) != std::string::npos) {
+        const bool left_ok = pos == 0 || !std::isalnum(static_cast<unsigned char>(ty[pos - 1]));
+        const size_t end = pos + kv.first.size();
+        const bool right_ok = end >= ty.size() ||
+                              !std::isalnum(static_cast<unsigned char>(ty[end]));
+        if (left_ok && right_ok) {
+          ty.replace(pos, kv.first.size(), kv.second);
+          pos += kv.second.size();
+        } else {
+          pos += kv.first.size();
+        }
+      }
+    }
+    return ty;
+  };
+
+  for (const auto& m : cls->methods) {
+    if (m && m->name == method && !m->is_static) {
+      return substitute(m->return_type.empty() ? std::string("void") : m->return_type);
+    }
+  }
+  // Static methods are reachable through a class-name receiver (`Variant.from_i32`).
+  for (const auto& m : cls->methods) {
+    if (m && m->name == method && m->is_static) {
+      return substitute(m->return_type.empty() ? std::string("void") : m->return_type);
+    }
+  }
+  // Associated free function (`Variant.from_i32`, [variant]): a module-level
+  // function whose name matches and whose return type is this class.
+  {
+    auto fit = free_funcs_.find(method);
+    if (fit != free_funcs_.end() && fit->second) {
+      const std::string rt = fit->second->return_type;
+      if (rt == recv_ty) {
+        return rt;
+      }
+    }
+  }
+  // [delegate]: unambiguous promotion only (ambiguity is diagnosed at emit time).
+  const ast::ClassDeclStmt* hit = nullptr;
+  for (const auto& f : cls->fields) {
+    if (!f || !f->is_delegate) {
+      continue;
+    }
+    auto eit = classes_.find(f->type_name);
+    if (eit == classes_.end() || !eit->second) {
+      continue;
+    }
+    for (const auto& m : eit->second->methods) {
+      if (m && m->name == method) {
+        if (hit && hit != eit->second) {
+          return {};  // ambiguous: let codegen report the real error
+        }
+        hit = eit->second;
+        break;
+      }
+    }
+  }
+  if (hit) {
+    for (const auto& m : hit->methods) {
+      if (m && m->name == method) {
+        return m->return_type.empty() ? std::string("void") : m->return_type;
+      }
+    }
+  }
+  return {};
 }
 
 void Analyzer::checkGenericCallConstraints(const ast::CallExpr& call) {

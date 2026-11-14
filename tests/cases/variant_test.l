@@ -9,11 +9,11 @@ fun main() -> i32 {
 
     // Extract matching tag
     x := v1.as_i32()
-    print(x.unwrap_or(0))
+    print(x ?? 0)
 
     // Extract mismatch → empty Optional
     y := v2.as_i32()
-    print(y.unwrap_or(99))
+    print(y ?? 99)
 
     return 0
 }
