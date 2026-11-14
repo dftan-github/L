@@ -732,6 +732,23 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
   }
 }
 
+// A class may embed at most one delegate of a given type. Two `delegate Engine`
+// fields would make `obj.start()` ambiguous in a way explicit disambiguation
+// (`obj.Engine.start()`) cannot resolve, since both embed under the same name.
+// Report on every extra occurrence, pointing at the offending declaration.
+void Analyzer::checkDelegateFields(const ast::ClassDeclStmt& cls) {
+  std::unordered_set<std::string> seen;
+  for (const auto& field : cls.fields) {
+    if (!field || !field->is_delegate) {
+      continue;
+    }
+    if (!seen.insert(field->type_name).second) {
+      error(field->loc, "Multiple delegates of the same type '" + field->type_name +
+                            "' are forbidden. Use a named field instead.");
+    }
+  }
+}
+
 bool Analyzer::mergePartialClasses(ast::Module& module) {
   std::unordered_map<std::string, std::vector<std::size_t>> partial_idxs;
   std::unordered_map<std::string, std::size_t> solid_idxs;
@@ -772,10 +789,15 @@ bool Analyzer::mergePartialClasses(ast::Module& module) {
     std::unordered_set<std::string> field_names;
     std::unordered_set<std::string> method_names;
     std::unordered_set<std::string> iface_names;
+    // Delegate types already embedded by this class (primary part first).
+    std::unordered_set<std::string> delegate_types;
 
     for (const auto& field : primary.fields) {
       if (field) {
         field_names.insert(field->name);
+        if (field->is_delegate) {
+          delegate_types.insert(field->type_name);
+        }
       }
     }
     for (const auto& method : primary.methods) {
@@ -811,10 +833,23 @@ bool Analyzer::mergePartialClasses(ast::Module& module) {
           continue;
         }
         if (!field_names.insert(field->name).second) {
-          error(field->loc, "duplicate field '" + field->name + "' in partial class '" +
-                                name + "'");
+          // Two `delegate Engine` declarations across partial parts: the field
+          // names collide because a delegate's name IS its type. Report the
+          // dedicated diagnostic instead of a generic duplicate-field error.
+          bool duplicate_delegate =
+              field->is_delegate && delegate_types.insert(field->type_name).second == false;
+          if (duplicate_delegate) {
+            error(field->loc, "Multiple delegates of the same type '" + field->type_name +
+                                  "' are forbidden. Use a named field instead.");
+          } else {
+            error(field->loc, "duplicate field '" + field->name + "' in partial class '" +
+                                  name + "'");
+          }
           ok = false;
           continue;
+        }
+        if (field->is_delegate) {
+          delegate_types.insert(field->type_name);
         }
         primary.fields.push_back(std::move(field));
       }
@@ -1172,6 +1207,13 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
 
   const std::size_t errors_before = diags.errorCount();
   (void)mergePartialClasses(module);
+  // After merging, every class is a single ClassDeclStmt, so a uniform scan also
+  // catches duplicates that were spread across partial parts ([delegate]).
+  for (const ast::StmtPtr& stmt : module.stmts) {
+    if (stmt && stmt->kind() == ast::StmtKind::ClassDecl) {
+      checkDelegateFields(static_cast<const ast::ClassDeclStmt&>(*stmt));
+    }
+  }
   injectAutoCloneMethods(module);
   injectAutoToStringMethods(module);
   for (const std::string& m : module.imported_modules) {

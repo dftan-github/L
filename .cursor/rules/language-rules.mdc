@@ -640,6 +640,7 @@ alwaysApply: true
 - **Method Promotion**: When `obj.method()` is called, if `method` is not found in the class's own methods, the compiler MUST search the methods of all `delegate` fields.
 - **Conflict Resolution**: If an outer class does not define a method, but MULTIPLE delegated fields define a method with the same name, the compiler MUST throw an ambiguity error. Developers MUST use explicit syntax `obj.EmbeddedType.method()` to resolve it.
 - **Hidden This**: For an embedded method call, the implicit `this` pointer MUST be the GEP address of the delegated field.
+- **One Delegate Per Type (CRITICAL)**: A class MUST NOT embed TWO OR MORE delegates of the SAME type (e.g. two `delegate Engine`). Because a delegate's field name IS its type name, `obj.Engine.method()` cannot disambiguate them. This MUST be a fatal compile error at the offending declaration: `[ERROR] file:line:col - Multiple delegates of the same type 'Engine' are forbidden. Use a named field instead.` The check MUST also run after `partial class` merging, so two parts each declaring `delegate Engine` are rejected. Use a named field (`Engine helper_a`, `Engine helper_b`) when two instances are genuinely needed.
 
 ## 98. Raw Pointer Operations
 <!-- id:raw-pointer -->
@@ -655,6 +656,7 @@ alwaysApply: true
 - **No Implicit Type Matching**: Passing a class to an interface parameter is ONLY allowed if the class explicitly declared the interface.
 
 ## 100. Testing Execution Boundary (CRITICAL)
+<!-- id:testing-boundary -->
 - **No Unprompted Test Execution**: The AI MUST NOT execute `ruby tests/run_tests.rb` or any compilation test suites on its own. 
 - **Human-Driven Testing**: The human operator is exclusively responsible for running the full test suite and verifying logs. The AI should only make code changes and provide static analysis.
 - **Filtered Execution Exception**: ONLY when explicitly requested by the human (e.g., "Please run the filter test to verify"), should the AI execute a specific `--filter` command.

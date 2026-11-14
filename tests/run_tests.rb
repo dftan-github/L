@@ -31,6 +31,8 @@ CLASS_BASIC = ROOT.join("tests", "cases", "class_basic.l")
 DELEGATE_TEST = ROOT.join("tests", "cases", "delegate_test.l")
 DELEGATE_CONFLICT_TEST = ROOT.join("tests", "cases", "delegate_conflict_test.l")
 DELEGATE_CONFLICT_BAD = ROOT.join("tests", "cases", "delegate_conflict_bad.l")
+DELEGATE_SAME_TYPE_BAD = ROOT.join("tests", "cases", "delegate_same_type_bad.l")
+DELEGATE_SAME_TYPE_PARTIAL_BAD = ROOT.join("tests", "cases", "delegate_same_type_partial_bad.l")
 STATIC_METHOD_TEST = ROOT.join("tests", "cases", "static_method_test.l")
 STATIC_METHOD_BAD = ROOT.join("tests", "cases", "static_method_bad.l")
 INTERFACE_TEST = ROOT.join("tests", "cases", "interface_test.l")
@@ -842,6 +844,43 @@ def test_delegate_conflict_bad_rejected!
     "expected Ambiguous method diagnostic, got:\n#{combined}"
   )
   puts "  OK delegate_conflict_bad rejected (Ambiguous method 'start')"
+end
+
+def test_delegate_same_type_bad_rejected!
+  assert!(File.exist?(DELEGATE_SAME_TYPE_BAD),
+          "delegate_same_type_bad not found: #{DELEGATE_SAME_TYPE_BAD}")
+  stdout, stderr, status = run_compiler("--emit-llvm", *with_runtime(DELEGATE_SAME_TYPE_BAD))
+  assert!(!status.success?, "delegate_same_type_bad.l should fail to compile")
+  combined = "#{stdout}\n#{stderr}"
+  assert!(
+    combined.include?(
+      "Multiple delegates of the same type 'Engine' are forbidden. " \
+      "Use a named field instead."
+    ),
+    "expected same-type delegate diagnostic, got:\n#{combined}"
+  )
+  assert!(
+    combined.match?(/:\d+:\d+ - Multiple delegates/),
+    "expected [file:line:col] prefix in diagnostic, got:\n#{combined}"
+  )
+  puts "  OK delegate_same_type_bad rejected (duplicate delegate type)"
+end
+
+def test_delegate_same_type_partial_bad_rejected!
+  assert!(File.exist?(DELEGATE_SAME_TYPE_PARTIAL_BAD),
+          "delegate_same_type_partial_bad not found: #{DELEGATE_SAME_TYPE_PARTIAL_BAD}")
+  stdout, stderr, status =
+    run_compiler("--emit-llvm", *with_runtime(DELEGATE_SAME_TYPE_PARTIAL_BAD))
+  assert!(!status.success?, "delegate_same_type_partial_bad.l should fail to compile")
+  combined = "#{stdout}\n#{stderr}"
+  assert!(
+    combined.include?(
+      "Multiple delegates of the same type 'Engine' are forbidden. " \
+      "Use a named field instead."
+    ),
+    "expected same-type delegate diagnostic after partial merge, got:\n#{combined}"
+  )
+  puts "  OK delegate_same_type_partial_bad rejected (duplicate across partial parts)"
 end
 
 def test_static_method_e2e!
@@ -3355,6 +3394,8 @@ def main
     test_delegate_e2e!
     test_delegate_conflict_e2e!
     test_delegate_conflict_bad_rejected!
+    test_delegate_same_type_bad_rejected!
+    test_delegate_same_type_partial_bad_rejected!
     test_static_method_e2e!
     test_static_method_bad_rejected!
     test_interface_e2e!

@@ -23,6 +23,8 @@ private:
   void error(const ast::SourceLocation& loc, const std::string& message);
   // Merge `partial class` parts with the same name into one ClassDeclStmt.
   bool mergePartialClasses(ast::Module& module);
+  // Reject a class that delegates the same type twice ([delegate]).
+  void checkDelegateFields(const ast::ClassDeclStmt& cls);
   // Inject `pub fun clone() -> Self` when the class does not define clone.
   void injectAutoCloneMethods(ast::Module& module);
   // Inject `pub fun to_string() -> String` when the class does not define to_string.
