@@ -572,6 +572,20 @@ std::string Codegen::methodReturnTypeOn(const std::string& recv_ty,
   if (recv_ty.empty()) {
     return {};
   }
+  // Interface receivers: the signature lives on the interface declaration, not
+  // on any concrete class. This is the single source of truth for interface
+  // method typing — `exprTypeOf` and every other caller go through here.
+  if (isInterfaceType(recv_ty)) {
+    auto iit = interfaces_.find(recv_ty);
+    if (iit == interfaces_.end()) {
+      return {};
+    }
+    auto mit = iit->second.methods.find(method);
+    if (mit == iit->second.methods.end() || !mit->second) {
+      return {};
+    }
+    return resolveTypeName(mit->second->return_type);
+  }
   const ClassInfo* info = findClass(recv_ty);
   if (!info || !info->ast) {
     return {};
@@ -798,21 +812,8 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
         }
         return {};
       }
-      const ClassInfo* info = findClass(lit->second);
-      if (info && info->ast) {
-        return methodReturnTypeOn(lit->second, call.method);
-      }
-      // Interface-typed local: method signature comes from the interface decl.
-      if (isInterfaceType(lit->second)) {
-        auto iit = interfaces_.find(lit->second);
-        if (iit != interfaces_.end()) {
-          auto mit = iit->second.methods.find(call.method);
-          if (mit != iit->second.methods.end() && mit->second) {
-            return resolveTypeName(mit->second->return_type);
-          }
-        }
-      }
-      return {};
+      // Interfaces resolve via methodReturnTypeOn's interface branch.
+      return methodReturnTypeOn(lit->second, call.method);
     }
     case ast::ExprKind::Cast: {
       const auto& cast = static_cast<const ast::CastExpr&>(expr);
@@ -6232,6 +6233,76 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
     }
     if (!recv_ty.empty()) {
       ensureTypeAvailable(recv_ty);
+    }
+    // Interface receiver produced by an expression, e.g.
+    // `arr.get(i).on_start()` / `opt.unwrap().name()`. Dispatch through the
+    // fat pointer's vtable (same layout as the identifier receiver path).
+    if (isInterfaceType(recv_ty)) {
+      const InterfaceInfo* iface = findInterface(recv_ty);
+      if (!iface) {
+        error(call.loc, "unknown interface: " + recv_ty);
+        return nullptr;
+      }
+      auto mit = iface->method_index.find(call.method);
+      if (mit == iface->method_index.end()) {
+        error(call.loc, "unknown interface method " + recv_ty + "." + call.method);
+        return nullptr;
+      }
+      const ast::FuncDeclStmt* sig = iface->methods.at(call.method);
+      if (!sig) {
+        error(call.loc, "interface method signature missing for " + call.method);
+        return nullptr;
+      }
+
+      llvm::Value* fat = emitExpr(*call.object);
+      if (!fat) {
+        return nullptr;
+      }
+      if (fat->getType() != fatPtrTy()) {
+        error(call.loc, "interface receiver did not produce a fat pointer");
+        return nullptr;
+      }
+      llvm::Value* data = builder_.CreateExtractValue(fat, 0, "iface.data");
+      llvm::Value* vtable = builder_.CreateExtractValue(fat, 1, "iface.vtable");
+
+      llvm::ArrayType* arr_ty = vtableArrayTy(*iface);
+      llvm::Value* slot_ptr = builder_.CreateInBoundsGEP(
+          arr_ty, vtable,
+          {llvm::ConstantInt::get(i32Ty(), 0), llvm::ConstantInt::get(i32Ty(), mit->second)},
+          "chained.vtable.slot");
+      llvm::Value* fn_ptr = builder_.CreateLoad(ptrTy(), slot_ptr, "chained.fnptr");
+
+      std::vector<llvm::Type*> param_tys{ptrTy()};
+      for (const ast::Param& p : sig->params) {
+        param_tys.push_back(abiTypeForParam(p.type_name));
+      }
+      llvm::Type* ret_ty = typeFromName(sig->return_type);
+      auto* fty = llvm::FunctionType::get(ret_ty, param_tys, false);
+
+      std::vector<llvm::Value*> call_args{data};
+      unsigned ai = 1;
+      for (size_t i = 0; i < call.args.size(); ++i) {
+        if (!call.args[i].value) {
+          return nullptr;
+        }
+        if (!call.args[i].name.empty()) {
+          error(call.loc, "keyword arguments not supported on interface dispatch yet");
+          return nullptr;
+        }
+        llvm::Type* expected = ai < param_tys.size() ? param_tys[ai] : nullptr;
+        llvm::Value* v = emitValueForParam(*call.args[i].value, expected,
+                                           resolveTypeName(sig->params[i].type_name));
+        if (!v) {
+          return nullptr;
+        }
+        ++ai;
+        call_args.push_back(v);
+      }
+      if (ret_ty->isVoidTy()) {
+        builder_.CreateCall(fty, fn_ptr, call_args);
+        return llvm::ConstantInt::get(i32Ty(), 0);
+      }
+      return builder_.CreateCall(fty, fn_ptr, call_args, "chained.call");
     }
     if (!isClassType(recv_ty)) {
       error("method call object must be a class or interface value");

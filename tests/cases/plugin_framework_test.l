@@ -1,11 +1,12 @@
-// `this` keyword + for-in over a member field.
+// Chained calls on interface values + `this` keyword + for-in over a field.
 // Covers: this.field / this.method() / delegate promotion via this.set,
 // `for p in this.plugins`, `for p in obj.plugins`, empty array, and
-// `this` rejected inside a static method.
+// chained dispatch `plugins.get(i).method()` (void, i32, and String returns).
 
 interface IPlugin {
     fun on_start()
     fun get_name() -> String
+    fun id() -> i32
 }
 
 class LoggerPlugin : IPlugin {
@@ -19,6 +20,10 @@ class LoggerPlugin : IPlugin {
     fun get_name() -> String {
         return String("logger")
     }
+
+    fun id() -> i32 {
+        return 1
+    }
 }
 
 class AuthPlugin : IPlugin {
@@ -31,6 +36,10 @@ class AuthPlugin : IPlugin {
 
     fun get_name() -> String {
         return String("auth")
+    }
+
+    fun id() -> i32 {
+        return 2
     }
 }
 
@@ -64,10 +73,17 @@ class App {
         }
     }
 
-    pub fun plugin_names() {
-        for p in this.plugins {
-            print(p.get_name())
-        }
+    // ---- chained dispatch: no temp variable, straight off the element ----
+    pub fun start_one(i32 i) {
+        this.plugins.get(i).on_start()
+    }
+
+    pub fun name_at(i32 i) -> String {
+        return this.plugins.get(i).get_name()
+    }
+
+    pub fun id_at(i32 i) -> i32 {
+        return this.plugins.get(i).id()
     }
 
     pub fun version() -> String {
@@ -79,7 +95,7 @@ class App {
 fun main() -> i32 {
     app := App()
 
-    // Edge 1: empty array — looping over a field with zero elements must be a no-op.
+    // Edge 1: empty array — looping over a field with zero elements is a no-op.
     app.start_all()
     print(app.counter_value())
 
@@ -89,7 +105,12 @@ fun main() -> i32 {
     print(app.version())
 
     app.start_all()
-    app.plugin_names()
+    print(app.name_at(0))
+    print(app.name_at(1))
+    print(app.id_at(1))
+
+    // Chained void method directly on the array element.
+    app.start_one(0)
 
     // for-in over a field through a non-`this` receiver.
     for p in app.plugins {

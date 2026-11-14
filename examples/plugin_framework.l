@@ -1,7 +1,8 @@
 // A minimal plugin framework written purely in L.
 // Demonstrates interfaces, explicit implementation (no duck typing),
-// Array<IPlugin> polymorphism, `this`-based instance access, and
-// for-in over a member field (`this.plugins` / `app.plugins`).
+// Array<IPlugin> polymorphism, `this`-based instance access,
+// for-in over a member field, and chained calls on interface values
+// (`plugins.get(i).on_start()`).
 
 interface IPlugin {
     fun on_start()
@@ -40,7 +41,6 @@ class App {
 
     fun init() {
         plugins = Array<IPlugin>()
-        // `this.set` resolves through the delegated CPropertys.
         this.set("app_version", Variant.from_string(String("0.1.0")))
     }
 
@@ -54,13 +54,17 @@ class App {
         }
     }
 
-    pub fun plugin_count() -> i32 {
-        return this.plugins.len()
+    // Chained dispatch straight off the array element — no temp variable.
+    pub fun start_one(i32 i) {
+        this.plugins.get(i).on_start()
     }
 
-    pub fun plugin_name_at(i32 i) -> String {
-        IPlugin p = this.plugins.get(i)
-        return p.get_name()
+    pub fun name_at(i32 i) -> String {
+        return this.plugins.get(i).get_name()
+    }
+
+    pub fun plugin_count() -> i32 {
+        return this.plugins.len()
     }
 
     pub fun version() -> String {
@@ -80,7 +84,10 @@ fun main() -> i32 {
 
     app.start_all()
 
-    // Iterating a field through an arbitrary receiver (not `this`).
+    // Chained: element -> method call, both void and String-returning.
+    app.start_one(0)
+    print(app.name_at(1))
+
     for p in app.plugins {
         print(p.get_name())
     }

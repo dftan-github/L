@@ -42,6 +42,7 @@ BREAK_CONTINUE_TEST = ROOT.join("tests", "cases", "break_continue_test.l")
 BREAK_OUTSIDE_LOOP_BAD = ROOT.join("tests", "cases", "break_outside_loop_bad.l")
 PLUGIN_FRAMEWORK_TEST = ROOT.join("tests", "cases", "plugin_framework_test.l")
 THIS_IN_STATIC_BAD = ROOT.join("tests", "cases", "this_in_static_bad.l")
+CHAINED_CALL_TEST = ROOT.join("tests", "cases", "chained_call_test.l")
 SYNC_TRY_RELEASE = ROOT.join("tests", "cases", "sync_try_release.l")
 DELEGATE_OPTIONAL_TEST = ROOT.join("tests", "cases", "delegate_optional_test.l")
 DELEGATE_PRIVATE_BAD = ROOT.join("tests", "cases", "delegate_private_bad.l")
@@ -2868,9 +2869,30 @@ def test_plugin_framework_e2e!
              "0.1.0\n" \
              "[start] logger ready\n[start] auth ready\n" \
              "logger\nauth\n" \
+             "2\n" \
+             "[start] logger ready\n" \
              "logger\nauth\n"
   assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
-  puts "  OK plugin framework e2e (interface array + this + field for-in + delegate config)"
+  puts "  OK plugin framework e2e (interface array + this + field for-in + chained calls)"
+end
+
+def test_chained_call_e2e!
+  assert!(File.exist?(CHAINED_CALL_TEST), "chained_call_test not found: #{CHAINED_CALL_TEST}")
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, CHAINED_CALL_TEST)
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("chained_call_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?, "compile chained_call_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "chained_call_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "9\n10\n" \
+             "square\nrect\n" \
+             "touch square\ntouch rect\n" \
+             "6\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+  puts "  OK chained calls on interface elements (i32 / String / void / 3-level)"
 end
 
 def test_this_in_static_rejected!
@@ -3725,6 +3747,7 @@ def main
     test_break_outside_loop_rejected!
     test_plugin_framework_e2e!
     test_this_in_static_rejected!
+    test_chained_call_e2e!
     test_delegate_optional_e2e!
     test_delegate_private_bad_rejected!
     test_sync_try_release!
