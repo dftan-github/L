@@ -156,18 +156,9 @@ class App {
     // segments below walk that virtual tree without materializing nodes.
     // ------------------------------------------------------------------
 
-    // Write one leaf: `put("db.pool.max", 16)`.
+    // Write one leaf. Alias for `set` with a path-shaped name.
     pub fun put(String path, Variant value) {
         this.set(path, value)
-    }
-
-    // Read one leaf with a typed default: `i32 n = this.int_at("db.pool.max", 8)`.
-    pub fun int_at(String path, i32 fallback) -> i32 {
-        return this.get(path) ?? fallback
-    }
-
-    pub fun text_at(String path, String fallback) -> String {
-        return this.get(path) ?? fallback
     }
 
     // Read a whole subtree as its own flat property bag (keys keep the full path).
@@ -207,7 +198,7 @@ class App {
                     offset = 0
                 }
                 rest := key.slice(offset, key.length() - offset)
-                dot := rest.index_of(String("."))
+                dot := rest.index_of(".")
                 // First segment only; `dot < 0` means this key is the leaf itself.
                 seg_len := rest.length()
                 if dot >= 0 {
@@ -318,18 +309,23 @@ fun main() -> i32 {
     // ---- Tree-shaped properties over dotted paths -------------------------
     print(String("-- config tree --"))
 
-    // Write leaves; three levels deep under `db`.
-    app.put("db.host", "localhost")
-    app.put("db.port", 5432)
-    app.put("db.pool.max", 16)
-    app.put("db.pool.idle", 4)
-    app.put("http.timeout", 30)
-    app.put("http.retries", 3)
+    // `set` / `get` are promoted onto App by `delegate CPropertys`. A primitive or
+    // String passed to the `Variant` formal is boxed automatically.
+    app.set("db.host", "localhost")
+    app.set("db.port", 5432)
+    app.set("db.pool.max", 16)
+    app.set("db.pool.idle", 4)
+    app.set("http.timeout", 30)
+    app.set("http.retries", 3)
 
-    // Typed reads with defaults (a missing path yields the fallback).
-    print(app.text_at("db.host", String("none")))
-    print(app.int_at("db.pool.max", 0))
-    print(app.int_at("db.pool.missing", 8))
+    // Writing the same path again replaces the leaf.
+    app.set("http.timeout", 60)
+
+    // `get` returns Optional<Variant>; `??` unwraps it and also unpacks the
+    // Variant into the fallback's type, so `?.as_*()` is not needed here.
+    print(app.get("db.host") ?? "none")
+    print(app.get("db.pool.max") ?? 0)
+    print(app.get("db.pool.missing") ?? 8)
 
     // Direct children of a subtree, one level only.
     print(app.children("db").len())
@@ -340,10 +336,10 @@ fun main() -> i32 {
     print(pool.len())
 
     // An empty prefix selects the whole tree.
-    print(app.subtree(String("")).len())
+    print(app.subtree("").len())
 
     // Recursive dump of the whole tree.
-    app.dump(String(""))
+    app.dump("")
     return 0
 }
 
@@ -375,7 +371,7 @@ localhost
   db.pool.idle = 4
   http/
   http.retries = 3
-  http.timeout = 30
+  http.timeout = 60
   app_version = 0.1.0
 
 //*/

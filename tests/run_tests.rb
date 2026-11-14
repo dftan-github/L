@@ -3697,7 +3697,7 @@ def test_cli_run_plugin_framework_e2e!
              "  db.pool.idle = 4\n" \
              "  http/\n" \
              "  http.retries = 3\n" \
-             "  http.timeout = 30\n" \
+             "  http.timeout = 60\n" \
              "  app_version = 0.1.0\n"
   assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
   puts "  OK l run plugin_framework.l (one-file DX, no explicit stdlib args)"
