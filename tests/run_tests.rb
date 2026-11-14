@@ -74,6 +74,7 @@ COALESCE_BOXING_TEST = ROOT.join("tests", "cases", "coalesce_boxing_test.l")
 VARIANT_UNBOX_RETURN_TEST = ROOT.join("tests", "cases", "variant_unbox_return_test.l")
 COMMENT_POLLUTION_TEST = ROOT.join("tests", "cases", "comment_pollution_test.l")
 OPTIONAL_UNWRAP_CHAIN_TEST = ROOT.join("tests", "cases", "optional_unwrap_chain_test.l")
+OPTIONAL_IFACE_CHAIN_TEST = ROOT.join("tests", "cases", "optional_iface_chain.l")
 CAST_TEST = ROOT.join("tests", "cases", "cast_test.l")
 DOWNCAST_TEST = ROOT.join("tests", "cases", "downcast_test.l")
 PARTIAL_TEST = ROOT.join("tests", "cases", "partial_test.l")
@@ -2160,6 +2161,37 @@ def test_optional_unwrap_chain_e2e!
   puts "  OK optional_unwrap_chain_test e2e (unwrap().method() on class + interface)"
 end
 
+def test_optional_iface_chain_e2e!
+  assert!(File.exist?(OPTIONAL_IFACE_CHAIN_TEST),
+          "optional_iface_chain not found: #{OPTIONAL_IFACE_CHAIN_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("optional_iface_chain.exe")
+  FileUtils.rm_f(exe)
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_ARRAY, STDLIB_MAP,
+                       OPTIONAL_IFACE_CHAIN_TEST)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile optional_iface_chain failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "optional_iface_chain.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "optional_iface_chain.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "[start] logger\n[start] auth\nlogger\nauth\nlogger\nauth\n" \
+             "[start] logger\nauth\n[start] auth\nauth\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # Every chain must dispatch dynamically through the vtable, never statically.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm optional_iface_chain failed\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("chained.fnptr"),
+          "expected vtable dispatch for chained interface receivers")
+
+  puts "  OK optional_iface_chain e2e (Optional<IPlugin>.unwrap().method() via vtable)"
+end
+
 def test_cast_e2e!
   assert!(File.exist?(CAST_TEST), "cast_test case not found: #{CAST_TEST}")
   assert!(File.exist?(STDLIB_OPTIONAL), "stdlib optional not found: #{STDLIB_OPTIONAL}")
@@ -3953,6 +3985,7 @@ def main
     test_variant_unbox_return_e2e!
     test_comment_pollution_e2e!
     test_optional_unwrap_chain_e2e!
+    test_optional_iface_chain_e2e!
     test_cast_e2e!
     test_downcast_e2e!
     test_partial_e2e!
