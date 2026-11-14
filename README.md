@@ -4,7 +4,7 @@
 
 把仪式感、样板和记忆负担扔给编译器；你只写**业务真正需要的那几行**。  
 L 是一门 **编译型、静态强类型** 的系统语言（LLVM 22）：短得像脚本，快得像 C，类型与安全在编译期钉死——**不是解释器，不是动态类型猜谜**。  
-当前主线由 **`ruby tests/run_tests.rb` 的 117 条自动化用例**端到端兜底（Lexer / AST / Codegen / 并发 / FFI / 元编程 / `l doc` …）。
+当前主线由 **`ruby tests/run_tests.rb` 的 123 条自动化用例**端到端兜底（Lexer / AST / Codegen / 并发 / FFI / 元编程 / `l doc` …）。
 
 ### 心智负担怎么被拿掉
 
@@ -421,7 +421,7 @@ pub fun counter_destroy(ptr p) { l_free(p) }
 ### 并发与测试习惯
 
 - 共享可变状态：`sync { ... }`；锁次数可用 runtime 计数校验（不只看最终数值）。  
-- 全量：**117 条**自动化用例 — `ruby tests/run_tests.rb`（Lexer→AST→可执行/JIT，含拒绝用例）。  
+- 全量：**123 条**自动化用例 — `ruby tests/run_tests.rb`（Lexer→AST→可执行/JIT，含拒绝用例）。  
 - 性能：`benchmarks/`，固定 `-O3`，**不**并进上述套件。  
 - 探索：`l repl` / `l eval`（ORC JIT，不落临时 exe）。
 
@@ -473,7 +473,7 @@ arr.each { |x| print(x) }
 ```
 
 ```bash
-ruby tests/run_tests.rb    # 117 automated tests — must stay green
+ruby tests/run_tests.rb    # 123 automated tests — must stay green
 ```
 
 ---
@@ -500,7 +500,7 @@ cmake --build . --config Release
 
 ---
 
-少写一行废话，就少一分心智负担。**117 tests green.** Built with LLVM, discipline, and AI pair-programming.
+少写一行废话，就少一分心智负担。**123 tests green.** Built with LLVM, discipline, and AI pair-programming.
 
 ---
 

@@ -616,6 +616,10 @@ ast::Token Lexer::lexPunctuation() {
     case '!':
       return makeToken(ast::TokenType::Bang, "!", start);
     case '?':
+      if (n == '?') {
+        advance();
+        return makeToken(ast::TokenType::QuestionQuestion, "??", start);
+      }
       return makeToken(ast::TokenType::Question, "?", start);
     case '=':
       return makeToken(ast::TokenType::Equal, "=", start);

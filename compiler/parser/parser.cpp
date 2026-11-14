@@ -337,7 +337,15 @@ ast::ExprPtr Parser::parseExpression(int min_precedence) {
     binary->op = op_tok.lexeme;
     binary->left = std::move(left);
     binary->right = std::move(right);
-    left = std::move(binary);
+    if (op_tok.type == ast::TokenType::QuestionQuestion) {
+      auto coalesce = std::make_unique<ast::CoalesceExpr>();
+      coalesce->loc = op_tok.loc;
+      coalesce->left = std::move(binary->left);
+      coalesce->right = std::move(binary->right);
+      left = std::move(coalesce);
+    } else {
+      left = std::move(binary);
+    }
   }
 
   return left;
@@ -614,6 +622,8 @@ bool Parser::maybeConsumeStmtSemicolon() {
 
 int Parser::infixPrecedence(ast::TokenType type) {
   switch (type) {
+    case ast::TokenType::QuestionQuestion:  // `opt ?? fallback` binds loosest
+      return 0;
     case ast::TokenType::PipePipe:
       return 1;
     case ast::TokenType::AmpAmp:

@@ -113,6 +113,9 @@ private:
   bool rejectReadonlyMutation(const ast::Expr& target, const ast::SourceLocation& loc);
   // Best-effort expression type for operator lowering / := inference.
   std::string exprTypeOf(const ast::Expr& expr) const;
+  // Static return type of `recv_ty.method` (instance + single delegate promotion).
+  std::string methodReturnTypeOn(const std::string& recv_ty,
+                                 const std::string& method) const;
   bool isStringOperand(const ast::Expr& expr) const;
   // `+` that should lower to String concat (literals / String / i32 coercion).
   bool isStringConcatBinary(const ast::BinaryExpr& bin) const;
@@ -303,8 +306,9 @@ private:
   std::unique_ptr<llvm::Module> module_;
   llvm::IRBuilder<> builder_;
   std::unordered_map<std::string, llvm::AllocaInst*> named_values_;
-  std::unordered_map<std::string, std::string> local_types_;
-  // Compile-time `const` — inlined, no GlobalVariable.
+  std::unordered_map<std::string, std::string> local_types_;  // Compile-time `const` — inlined, no GlobalVariable.
+  // Unique suffix for `??` temporaries.
+  std::size_t coalesce_tmp_counter_ = 0;
   std::unordered_map<std::string, llvm::Constant*> const_values_;
   std::unordered_map<std::string, std::string> const_types_;
   // `constd` / mutable module globals.

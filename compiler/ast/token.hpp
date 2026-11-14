@@ -68,6 +68,7 @@ enum class TokenType {
   // Punctuation / operators
   Bang,          // !
   Question,      // ?  (Result error propagation)
+  QuestionQuestion,  // ?? (Optional null-coalescing)
   Equal,         // =
   EqEq,          // ==
   NotEq,         // !=

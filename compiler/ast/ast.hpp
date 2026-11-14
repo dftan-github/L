@@ -18,6 +18,7 @@ enum class ExprKind {
   StringLiteral,
   Identifier,
   Binary,
+  Coalesce,  // left ?? right — Optional unwrap with fallback
   Call,
   MemberAccess,
   MethodCall,
@@ -111,6 +112,15 @@ struct BinaryExpr : Expr {
   ExprPtr left;
   ExprPtr right;
   ExprKind kind() const override { return ExprKind::Binary; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
+// `left ?? right` — if `left` (Optional<T>) is some, yield its value; otherwise
+// evaluate and yield `right` (T). Desugared by Codegen into a presence branch.
+struct CoalesceExpr : Expr {
+  ExprPtr left;
+  ExprPtr right;
+  ExprKind kind() const override { return ExprKind::Coalesce; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
 

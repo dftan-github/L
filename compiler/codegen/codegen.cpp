@@ -565,8 +565,50 @@ bool Codegen::isArenaOwnedClassExpr(const ast::Expr& expr) const {
   return call.method == "new_string" || call.method == "new";
 }
 
-std::string Codegen::exprTypeOf(const ast::Expr& expr) const {
-  switch (expr.kind()) {
+// Static return type of `recv_ty.method` (instance methods + single delegate
+// promotion). Used by chained-call type inference in exprTypeOf.
+std::string Codegen::methodReturnTypeOn(const std::string& recv_ty,
+                                        const std::string& method) const {
+  if (recv_ty.empty()) {
+    return {};
+  }
+  const ClassInfo* info = findClass(recv_ty);
+  if (!info || !info->ast) {
+    return {};
+  }
+  for (const auto& m : info->ast->methods) {
+    if (m && m->name == method) {
+      return instantiateMemberType(m->return_type, *info);
+    }
+  }
+  // [delegate]: unambiguous delegate promotion for typing.
+  std::vector<const ClassInfo*> delegate_hits;
+  for (const auto& field : info->ast->fields) {
+    if (!field || !field->is_delegate || !isClassType(field->type_name)) {
+      continue;
+    }
+    const ClassInfo* emb = findClass(field->type_name);
+    if (!emb || !emb->ast) {
+      continue;
+    }
+    for (const auto& m : emb->ast->methods) {
+      if (m && m->name == method) {
+        delegate_hits.push_back(emb);
+        break;
+      }
+    }
+  }
+  if (delegate_hits.size() == 1) {
+    for (const auto& m : delegate_hits[0]->ast->methods) {
+      if (m && m->name == method) {
+        return instantiateMemberType(m->return_type, *delegate_hits[0]);
+      }
+    }
+  }
+  return {};
+}
+
+std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kind()) {
     case ast::ExprKind::IntLiteral:
       return "i32";
     case ast::ExprKind::FloatLiteral:
@@ -615,6 +657,19 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {
         }
       }
       return {};
+    }
+    case ast::ExprKind::Coalesce: {
+      const auto& co = static_cast<const ast::CoalesceExpr&>(expr);
+      // `Optional<T> ?? T` yields T: prefer the declared payload of the left
+      // side; fall back to the right operand when the left is not an Optional.
+      if (co.left) {
+        const std::string lt = exprTypeOf(*co.left);
+        const std::string prefix = "Optional<";
+        if (lt.rfind(prefix, 0) == 0 && lt.back() == '>') {
+          return lt.substr(prefix.size(), lt.size() - prefix.size() - 1);
+        }
+      }
+      return co.right ? exprTypeOf(*co.right) : std::string{};
     }
     case ast::ExprKind::Binary: {
       const auto& bin = static_cast<const ast::BinaryExpr&>(expr);
@@ -675,8 +730,18 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {
     }
     case ast::ExprKind::MethodCall: {
       const auto& call = static_cast<const ast::MethodCallExpr&>(expr);
-      if (!call.object || call.object->kind() != ast::ExprKind::Identifier) {
+      if (!call.object) {
         return {};
+      }
+      // Receiver type: a bare identifier may name a class (static/assoc call),
+      // otherwise take the expression's own static type. Chained calls such as
+      // `v.as_string().unwrap()` resolve through the inner MethodCall.
+      if (call.object->kind() != ast::ExprKind::Identifier) {
+        const std::string recv_ty = exprTypeOf(*call.object);
+        if (recv_ty.empty()) {
+          return {};
+        }
+        return methodReturnTypeOn(recv_ty, call.method);
       }
       const auto& oid = static_cast<const ast::IdentifierExpr&>(*call.object);
       auto lit = local_types_.find(oid.name);
@@ -717,36 +782,7 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {
       if (!info || !info->ast) {
         return {};
       }
-      for (const auto& m : info->ast->methods) {
-        if (m && m->name == call.method) {
-          return instantiateMemberType(m->return_type, *info);
-        }
-      }
-      // [delegate]: unambiguous delegate promotion for typing (ambiguity errors at emit).
-      std::vector<const ClassInfo*> delegate_hits;
-      for (const auto& field : info->ast->fields) {
-        if (!field || !field->is_delegate || !isClassType(field->type_name)) {
-          continue;
-        }
-        const ClassInfo* emb = findClass(field->type_name);
-        if (!emb || !emb->ast) {
-          continue;
-        }
-        for (const auto& m : emb->ast->methods) {
-          if (m && m->name == call.method) {
-            delegate_hits.push_back(emb);
-            break;
-          }
-        }
-      }
-      if (delegate_hits.size() == 1) {
-        for (const auto& m : delegate_hits[0]->ast->methods) {
-          if (m && m->name == call.method) {
-            return instantiateMemberType(m->return_type, *delegate_hits[0]);
-          }
-        }
-      }
-      return {};
+      return methodReturnTypeOn(lit->second, call.method);
     }
     case ast::ExprKind::Cast: {
       const auto& cast = static_cast<const ast::CastExpr&>(expr);
@@ -1673,6 +1709,13 @@ bool Codegen::emitClassStruct(const ast::ClassDeclStmt& decl) {
       return false;
     }
     const std::string fty_name = field->type_name;
+    // A field may name a generic instantiation (`Map<Variant>`) nobody has
+    // materialized yet — materialize it so the field embeds the real struct.
+    if (fty_name.find('<') != std::string::npos && !isClassType(fty_name)) {
+      if (!ensureTypeAvailable(fty_name)) {
+        return false;
+      }
+    }
     if (isClassType(fty_name)) {
       if (!ensureTypeAvailable(fty_name)) {
         return false;
@@ -2152,26 +2195,8 @@ bool Codegen::emit(const ast::Module& module) {
     }
   }
 
-  for (const ast::StmtPtr& stmt : module.stmts) {
-    if (!stmt || stmt->kind() != ast::StmtKind::ClassDecl) {
-      continue;
-    }
-    const auto& cls = static_cast<const ast::ClassDeclStmt&>(*stmt);
-    if (!cls.generics.empty()) {
-      if (generic_class_templates_.count(cls.name) != 0) {
-        error("redefinition of generic class: " + cls.name);
-        return false;
-      }
-      generic_class_templates_[cls.name] = &cls;
-      continue;
-    }
-    if (!emitClassStruct(cls)) {
-      return false;
-    }
-  }
-
-  // extern module before method decls: specializing Array/Map during declareClassMethods
-  // may emit bodies that call l_alloc / l_realloc / ...
+  // extern module FIRST: class structs may embed generic instantiations
+  // (`Map<Variant>` field), and their specialized bodies call l_alloc / l_realloc.
   for (const ast::StmtPtr& stmt : module.stmts) {
     if (!stmt || stmt->kind() != ast::StmtKind::ExternModule) {
       continue;
@@ -2187,11 +2212,62 @@ bool Codegen::emit(const ast::Module& module) {
     }
   }
 
+  // Register generic templates before anything specializes them.
   for (const ast::StmtPtr& stmt : module.stmts) {
     if (!stmt || stmt->kind() != ast::StmtKind::ClassDecl) {
       continue;
     }
     const auto& cls = static_cast<const ast::ClassDeclStmt&>(*stmt);
+    if (cls.generics.empty()) {
+      continue;
+    }
+    if (generic_class_templates_.count(cls.name) != 0) {
+      error("redefinition of generic class: " + cls.name);
+      return false;
+    }
+    generic_class_templates_[cls.name] = &cls;
+  }
+
+  // `String` is a dependency of nearly every stdlib module, so its struct +
+  // methods go first. Only then can generic instantiations that use it
+  // (`Map<Variant>` → `keys()`) emit method bodies cleanly.
+  for (const ast::StmtPtr& stmt : module.stmts) {
+    if (!stmt || stmt->kind() != ast::StmtKind::ClassDecl) {
+      continue;
+    }
+    const auto& cls = static_cast<const ast::ClassDeclStmt&>(*stmt);
+    if (cls.name != "String" || !cls.generics.empty()) {
+      continue;
+    }
+    if (!emitClassStruct(cls) || !declareClassMethods(cls) || !buildVtables(cls)) {
+      return false;
+    }
+  }
+
+  for (const ast::StmtPtr& stmt : module.stmts) {
+    if (!stmt || stmt->kind() != ast::StmtKind::ClassDecl) {
+      continue;
+    }
+    const auto& cls = static_cast<const ast::ClassDeclStmt&>(*stmt);
+    if (!cls.generics.empty()) {
+      continue;  // template registered above
+    }
+    if (cls.name == "String") {
+      continue;  // struct + methods already emitted above
+    }
+    if (!emitClassStruct(cls)) {
+      return false;
+    }
+  }
+
+  for (const ast::StmtPtr& stmt : module.stmts) {
+    if (!stmt || stmt->kind() != ast::StmtKind::ClassDecl) {
+      continue;
+    }
+    const auto& cls = static_cast<const ast::ClassDeclStmt&>(*stmt);
+    if (cls.name == "String" && cls.generics.empty()) {
+      continue;  // already declared above
+    }
     if (!declareClassMethods(cls) || !buildVtables(cls)) {
       return false;
     }
@@ -2906,10 +2982,62 @@ bool Codegen::initClassAtPtr(llvm::Value* base, const ClassInfo& info,
     builder_.CreateStore(zero, gep);
   }
 
+  // [delegate]: embedded fields are anonymous class instances; construct each
+  // one before the user's init runs so promoted method calls find a live object.
+  if (info.ast) {
+    for (size_t i = 0; i < info.ast->fields.size() && i < info.field_types.size(); ++i) {
+      const auto& f = info.ast->fields[i];
+      if (!f || !f->is_delegate) {
+        continue;
+      }
+      const std::string& fty_name = info.field_types[i];
+      if (fty_name.empty() || !isClassType(fty_name)) {
+        continue;
+      }
+      ensureTypeAvailable(fty_name);
+      const ClassInfo* finfo = findClass(fty_name);
+      if (!finfo || !finfo->type) {
+        continue;
+      }
+      llvm::Value* slot =
+          builder_.CreateStructGEP(info.type, base, static_cast<unsigned>(i), "delegate.slot");
+      llvm::Type* slot_ty = info.type->getElementType(i);
+      // Inline struct field: initialize in place. Pointer field: heap-allocate.
+      llvm::Value* emb = slot;
+      if (slot_ty && slot_ty->isPointerTy()) {
+        ensureDataLayout();
+        llvm::Function* alloc_fn = requireExtern("l_alloc");
+        if (!alloc_fn) {
+          continue;
+        }
+        const uint64_t bytes = module_->getDataLayout().getTypeAllocSize(finfo->type);
+        llvm::Value* sz = llvm::ConstantInt::get(i64Ty(), bytes, false);
+        llvm::Value* raw = builder_.CreateCall(alloc_fn, {sz}, fty_name + ".delegate");
+        emb = builder_.CreateBitCast(raw, ptrTy(), fty_name + ".delegate.ptr");
+        builder_.CreateStore(emb, slot);
+      }
+      builder_.CreateStore(llvm::Constant::getNullValue(finfo->type), emb);
+      auto emb_init = finfo->methods.find("init");
+      if (emb_init != finfo->methods.end() && emb_init->second &&
+          emb_init->second->arg_size() == 1) {
+        builder_.CreateCall(emb_init->second, {emb});
+      }
+    }
+  }
+
   // Preferred path: custom constructor `fun init(...)` with implicit this*.
   auto init_it = info.methods.find("init");
   if (init_it != info.methods.end()) {
     llvm::Function* init_fn = init_it->second;
+    const ast::FuncDeclStmt* init_ast = nullptr;
+    if (info.ast) {
+      for (const auto& m : info.ast->methods) {
+        if (m && m->name == "init") {
+          init_ast = m.get();
+          break;
+        }
+      }
+    }
     if (init_fn->arg_size() != neu.args.size() + 1) {
       error("argument count mismatch calling " + neu.class_name + ".init");
       return false;
@@ -2926,8 +3054,13 @@ bool Codegen::initClassAtPtr(llvm::Value* base, const ClassInfo& info,
         error("keyword arguments not supported in constructors yet");
         return false;
       }
-      llvm::Type* expected = init_fn->getFunctionType()->getParamType(ai++);
-      llvm::Value* v = emitValueForParam(*arg.value, expected, "");
+      llvm::Type* expected = init_fn->getFunctionType()->getParamType(ai);
+      std::string expected_name;
+      if (init_ast && ai - 1 < init_ast->params.size()) {
+        expected_name = resolveTypeName(init_ast->params[ai - 1].type_name);
+      }
+      ++ai;
+      llvm::Value* v = emitValueForParam(*arg.value, expected, expected_name);
       if (!v) {
         return false;
       }
@@ -3122,6 +3255,12 @@ void Codegen::collectSpawnCaptures(const ast::Expr& expr, std::vector<std::strin
       if (named_values_.count(id.name) != 0 && seen.insert(id.name).second) {
         out.push_back(id.name);
       }
+      break;
+    }
+    case ast::ExprKind::Coalesce: {
+      const auto& co = static_cast<const ast::CoalesceExpr&>(expr);
+      if (co.left) collectSpawnCaptures(*co.left, out, seen, body_locals);
+      if (co.right) collectSpawnCaptures(*co.right, out, seen, body_locals);
       break;
     }
     case ast::ExprKind::Binary: {
@@ -5016,7 +5155,28 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
     } else if (auto* gv = llvm::dyn_cast<llvm::GlobalVariable>(ptr)) {
       dest_ty = gv->getValueType();
     }
-    if (dest_ty && dest_ty->isIntegerTy(64) && v->getType()->isIntegerTy()) {
+    if (!dest_ty && assign.target->kind() == ast::ExprKind::Identifier) {
+      // Field slot: `props = Map<Variant>()` where the field is an inline struct.
+      // Only inline struct slots need value stores; pointer slots keep the ptr.
+      if (!current_class_.empty()) {
+        const auto& tid = static_cast<const ast::IdentifierExpr&>(*assign.target);
+        if (const ClassInfo* owner = findClass(current_class_)) {
+          auto fit = owner->field_index.find(physicalFieldName(tid.name));
+          if (fit != owner->field_index.end()) {
+            dest_ty = owner->type->getElementType(fit->second);
+          }
+        }
+      }
+    }
+    if (dest_ty && dest_ty->isStructTy() && v->getType() == dest_ty->getPointerTo()) {
+      // Inline struct field/element: ABI passes classes by pointer; store by value.
+      // Only deref when the value really points at that struct (not a raw cstr).
+      v = builder_.CreateLoad(dest_ty, v, "store.struct.copy");
+    } else if (dest_ty && dest_ty->isStructTy() && v->getType()->isPointerTy()) {
+      // Raw pointer into a struct slot: bitcast then load.
+      llvm::Value* casted = builder_.CreateBitCast(v, dest_ty->getPointerTo(), "store.cast");
+      v = builder_.CreateLoad(dest_ty, casted, "store.struct.copy");
+    } else if (dest_ty && dest_ty->isIntegerTy(64) && v->getType()->isIntegerTy()) {
       v = builder_.CreateIntCast(v, i64Ty(), /*isSigned=*/true, "store.i64");
     } else if (dest_ty && dest_ty->isDoubleTy()) {
       if (v->getType()->isIntegerTy()) {
@@ -6109,6 +6269,102 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
   auto lit = local_types_.find(id.name);
   auto vit = named_values_.find(id.name);
 
+  // Instance field receiver: `this.field.method(...)`. Fields are not locals, so
+  // resolve them against the enclosing class before falling through to the
+  // class-name / static / free-function path below.
+  if ((lit == local_types_.end() || vit == named_values_.end()) &&
+      !current_class_.empty() && current_this_ && !current_method_is_static_) {
+    const ClassInfo* owner = findClass(current_class_);
+    if (owner) {
+      auto fit = owner->field_index.find(physicalFieldName(id.name));
+      if (fit != owner->field_index.end()) {
+        const size_t fi = fit->second;
+        std::string field_ty;
+        if (fi < owner->field_types.size()) {
+          field_ty = resolveTypeName(owner->field_types[fi]);
+        }
+        if (!field_ty.empty() && isClassType(field_ty)) {
+          const ClassInfo* finfo = findClass(field_ty);
+          llvm::Function* target = nullptr;
+          const ClassInfo* callee_info = finfo;
+          if (finfo) {
+            auto own = finfo->methods.find(call.method);
+            if (own != finfo->methods.end()) {
+              target = own->second;
+            }
+          }
+          if (target) {
+            llvm::Value* field_ptr =
+                builder_.CreateStructGEP(owner->type, current_this_, fi, id.name + ".slot");
+            // Pointer-typed field slots hold the instance address; inline struct
+            // fields are already addressed by the GEP.
+            llvm::Type* slot_ty = owner->type->getElementType(fi);
+            if (slot_ty->isPointerTy()) {
+              field_ptr =
+                  builder_.CreateLoad(slot_ty, field_ptr, id.name + ".self");
+            }
+            const ast::FuncDeclStmt* method_ast = nullptr;
+            if (callee_info->ast) {
+              for (const auto& m : callee_info->ast->methods) {
+                if (m && m->name == call.method) {
+                  method_ast = m.get();
+                  break;
+                }
+              }
+            }
+            std::vector<const ast::Expr*> ordered;
+            if (method_ast) {
+              if (!resolveCallArgs(*method_ast, call.args, ordered)) {
+                return nullptr;
+              }
+            } else {
+              for (const ast::CallArg& a : call.args) {
+                if (!a.value) {
+                  return nullptr;
+                }
+                ordered.push_back(a.value.get());
+              }
+            }
+            const bool is_static = method_ast && method_ast->is_static;
+            std::vector<llvm::Value*> call_args;
+            unsigned ai = 0;
+            if (!is_static) {
+              call_args.push_back(field_ptr);
+              ai = 1;
+            }
+            for (const ast::Expr* arg : ordered) {
+              llvm::Type* expected =
+                  target->getFunctionType()->getParamType(ai);
+              std::string expected_name;
+              const size_t param_i =
+                  is_static ? static_cast<size_t>(ai) : static_cast<size_t>(ai - 1);
+              if (method_ast && param_i < method_ast->params.size()) {
+                expected_name =
+                    instantiateMemberType(method_ast->params[param_i].type_name,
+                                          *callee_info);
+              }
+              llvm::Value* v = emitValueForParam(*arg, expected, expected_name);
+              if (!v) {
+                return nullptr;
+              }
+              call_args.push_back(v);
+              ++ai;
+            }
+            if (target->arg_size() != call_args.size()) {
+              error("argument count mismatch calling " + field_ty + "." + call.method);
+              return nullptr;
+            }
+            if (target->getReturnType()->isVoidTy()) {
+              builder_.CreateCall(target, call_args);
+              return llvm::ConstantInt::get(i32Ty(), 0);
+            }
+            return builder_.CreateCall(target, call_args, "field.mcall");
+          }
+        }
+      }
+    }
+  }
+
   // ClassName.staticMethod / free assoc (`Variant.from_i32`) / package `math_lib.add`.
   if (lit == local_types_.end() || vit == named_values_.end()) {
     const bool is_class = ensureTypeAvailable(id.name) && isClassType(id.name);
@@ -6960,11 +7216,189 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       }
       return tmp;
     }
+    case ast::ExprKind::Coalesce: {
+      // `opt ?? fallback` — evaluate `opt` ONCE into a temporary, branch on
+      // `is_some()`, then select `unwrap()` or the fallback. The temporary is
+      // registered as a local so method dispatch can take its address.
+      const auto& co = static_cast<const ast::CoalesceExpr&>(expr);
+      if (!co.left || !co.right) {
+        error("?? requires both operands");
+        return nullptr;
+      }
+
+      const std::string left_ty = exprTypeOf(*co.left);
+      if (left_ty.rfind("Optional<", 0) != 0) {
+        error("left operand of '??' must be Optional<T>, got '" + left_ty + "'");
+        return nullptr;
+      }
+      if (!ensureTypeAvailable(left_ty)) {
+        return nullptr;
+      }
+      const ClassInfo* opt_info = findClass(left_ty);
+      if (!opt_info || !opt_info->type) {
+        error("unknown Optional type in '??': " + left_ty);
+        return nullptr;
+      }
+
+      llvm::Value* opt = emitExpr(*co.left);
+      if (!opt) {
+        return nullptr;
+      }
+      // Class values travel as pointers to their storage; normalize to a value.
+      if (opt->getType()->isPointerTy()) {
+        opt = builder_.CreateLoad(opt_info->type, opt, "coal.opt");
+      }
+      if (opt->getType() != opt_info->type) {
+        error("'??' left operand has unexpected representation in " + left_ty);
+        return nullptr;
+      }
+      // Materialize the Optional once; the temp name identifies the alloca.
+      const std::string tmp_name = "__coalesce_" + std::to_string(coalesce_tmp_counter_++);
+      llvm::Function* cur_fn = builder_.GetInsertBlock()->getParent();
+      llvm::AllocaInst* tmp_slot = createEntryAlloca(cur_fn, opt_info->type, tmp_name);
+      builder_.CreateStore(opt, tmp_slot);
+      local_types_[tmp_name] = left_ty;
+      named_values_[tmp_name] = tmp_slot;
+
+      // Presence test: Optional.is_some()
+      auto make_opt_ref = [&]() {
+        auto id = std::make_unique<ast::IdentifierExpr>();
+        id->loc = co.left->loc;
+        id->name = tmp_name;
+        return id;
+      };
+      ast::MethodCallExpr is_some_call;
+      is_some_call.loc = co.loc;
+      is_some_call.object = make_opt_ref();
+      is_some_call.method = "is_some";
+      llvm::Value* has = emitMethodCall(is_some_call);
+      if (!has) {
+        named_values_.erase(tmp_name);
+        local_types_.erase(tmp_name);
+        return nullptr;
+      }
+
+      llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+      llvm::BasicBlock* some_bb = llvm::BasicBlock::Create(globalContext(), "coal.some", fn);
+      llvm::BasicBlock* none_bb = llvm::BasicBlock::Create(globalContext(), "coal.none", fn);
+      llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(globalContext(), "coal.merge", fn);
+
+      builder_.CreateCondBr(toI1(has), some_bb, none_bb);
+
+      // Payload type T of Optional<T>. Class values travel as POINTERS in this
+      // backend, so the canonical arm representation is a pointer for classes
+      // and a scalar for primitives.
+      std::string payload_ty = left_ty.substr(std::string("Optional<").size());
+      if (!payload_ty.empty() && payload_ty.back() == '>') {
+        payload_ty.pop_back();
+      }
+      const bool payload_is_class =
+          payload_ty == "String" || isClassType(payload_ty);
+      llvm::Type* payload_llvm_ty = payload_is_class ? nullptr : typeFromName(payload_ty);
+      const ClassInfo* payload_info = payload_is_class ? findClass(payload_ty) : nullptr;
+
+      auto normalize_arm = [&](llvm::Value* v) -> llvm::Value* {
+        if (payload_is_class) {
+          if (v->getType()->isPointerTy()) {
+            return v;
+          }
+          if (payload_info && payload_info->type && v->getType() == payload_info->type) {
+            llvm::Function* cf = builder_.GetInsertBlock()->getParent();
+            llvm::AllocaInst* slot =
+                createEntryAlloca(cf, payload_info->type, "coal.cls");
+            builder_.CreateStore(v, slot);
+            return slot;
+          }
+          return v;
+        }
+        llvm::Type* want = payload_llvm_ty;
+        if (!want || !want->isSized()) {
+          return v;
+        }
+        if (v->getType() == want) {
+          return v;
+        }
+        if (v->getType()->isPointerTy()) {
+          // `ptr` literal (e.g. a string C buffer) is not a valid scalar payload.
+          return v;
+        }
+        if (v->getType()->isIntegerTy() && want->isIntegerTy()) {
+          return builder_.CreateIntCast(v, want, /*isSigned=*/true, "coal.cast");
+        }
+        if (v->getType()->isDoubleTy() && want->isFloatTy()) {
+          return builder_.CreateFPTrunc(v, want, "coal.cast");
+        }
+        if (v->getType()->isFloatTy() && want->isDoubleTy()) {
+          return builder_.CreateFPExt(v, want, "coal.cast");
+        }
+        if (v->getType()->isIntegerTy() && want->isFloatingPointTy()) {
+          return builder_.CreateSIToFP(v, want, "coal.cast");
+        }
+        if (v->getType()->isFloatingPointTy() && want->isIntegerTy()) {
+          return builder_.CreateFPToSI(v, want, "coal.cast");
+        }
+        return v;
+      };
+
+      // Some arm: unwrap() then normalize — inside `some_bb` so the PHI incoming
+      // dominates its own predecessor block.
+      builder_.SetInsertPoint(some_bb);
+      ast::MethodCallExpr unwrap_call;
+      unwrap_call.loc = co.loc;
+      unwrap_call.object = make_opt_ref();
+      unwrap_call.method = "unwrap";
+      llvm::Value* some_val = emitMethodCall(unwrap_call);
+      if (!some_val) {
+        named_values_.erase(tmp_name);
+        local_types_.erase(tmp_name);
+        return nullptr;
+      }
+      some_val = normalize_arm(some_val);
+      llvm::BasicBlock* some_end = builder_.GetInsertBlock();
+      builder_.CreateBr(merge_bb);
+
+      // None arm: the fallback expression.
+      builder_.SetInsertPoint(none_bb);
+      llvm::Value* none_val = nullptr;
+      if (payload_is_class && co.right->kind() == ast::ExprKind::StringLiteral) {
+        none_val = emitStringObjectPtr(*co.right);
+      } else {
+        none_val = emitExpr(*co.right);
+      }
+      if (!none_val) {
+        named_values_.erase(tmp_name);
+        local_types_.erase(tmp_name);
+        return nullptr;
+      }
+      none_val = normalize_arm(none_val);
+      llvm::BasicBlock* none_end = builder_.GetInsertBlock();
+      builder_.CreateBr(merge_bb);
+
+      builder_.SetInsertPoint(merge_bb);
+      if (some_val->getType() != none_val->getType()) {
+        std::string some_desc;
+        std::string none_desc;
+        llvm::raw_string_ostream so(some_desc);
+        llvm::raw_string_ostream no(none_desc);
+        some_val->getType()->print(so);
+        none_val->getType()->print(no);
+        error("'??' arms have mismatched types: some=" + so.str() + " none=" + no.str());
+        named_values_.erase(tmp_name);
+        local_types_.erase(tmp_name);
+        return nullptr;
+      }
+      llvm::PHINode* phi = builder_.CreatePHI(some_val->getType(), 2, "coalesce");
+      phi->addIncoming(some_val, some_end);
+      phi->addIncoming(none_val, none_end);
+
+      named_values_.erase(tmp_name);
+      local_types_.erase(tmp_name);
+      return phi;
+    }
     case ast::ExprKind::Binary: {
       const auto& bin = static_cast<const ast::BinaryExpr&>(expr);
 
-      if (bin.op == "&&" || bin.op == "||") {
-        llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+      if (bin.op == "&&" || bin.op == "||") {        llvm::Function* fn = builder_.GetInsertBlock()->getParent();
         llvm::Value* lhs = toI1(emitExpr(*bin.left));
         if (!lhs) {
           return nullptr;

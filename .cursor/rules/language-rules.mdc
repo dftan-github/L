@@ -661,6 +661,49 @@ alwaysApply: true
 - **Human-Driven Testing**: The human operator is exclusively responsible for running the full test suite and verifying logs. The AI should only make code changes and provide static analysis.
 - **Filtered Execution Exception**: ONLY when explicitly requested by the human (e.g., "Please run the filter test to verify"), should the AI execute a specific `--filter` command.
 
+## 101. Null-Coalescing Operator (`??`)
+<!-- id:coalesce -->
+- **Syntax**: `opt ?? fallback` → `CoalesceExpr { left, right }`. Lexed as `QuestionQuestion`; parsed at the **loosest** infix precedence (below `||`).
+- **Type Rule**: `left` MUST be `Optional<T>`; the whole expression yields `T`. A non-Optional left operand MUST be a compile error: `left operand of '??' must be Optional<T>, got '<type>'`.
+- **Single Evaluation**: The left operand MUST be evaluated **exactly once**, stored in a dedicated `??` temporary, never re-evaluated per branch.
+- **Codegen**: Branch on `left.is_some()`; the true arm calls `left.unwrap()`, the false arm evaluates `fallback`. Merge both arms with a PHI node.
+- **Class Payloads**: Class-typed payloads (`String`, user classes) stay in pointer form; primitives are unified via `sext`/`fpext`/`fptrunc` as needed.
+- **No Implicit Nulls**: `??` never produces a null pointer; it always selects a present value or the fallback expression.
+
+## 102. Mandatory Turn-by-Turn Diff Report
+<!-- id:diff-report -->
+- **End-of-Turn Reporting**: After completing ANY task involving code modification, the AI MUST end its response with a strict "Turn Change Report".
+- **Report Format**: 
+  === Turn Change Report ===
+  1. Core Logic: (One sentence summary)
+  2. Files Changed: 
+     - filename.cpp (+X -Y lines): Brief description of what was changed.
+  3. Test Status: (e.g., `--filter=xxx` passed, or NOT RUN)
+  4. Human Review Required: (Explicitly list any unrequested side-effects or risky changes, otherwise write "None")
+  =========================
+- **No Unprompted Commits**: DO NOT run `git add` or `git commit` unless explicitly instructed.
+
+## 103. Mandatory Fuzz & Edge Case Testing
+<!-- id:fuzz-edge -->
+- **Adversarial Testing**: For any new data structure or standard library module, the AI MUST not only write happy-path tests but also design adversarial tests.
+- **Required Test Categories**:
+  1. Empty / Null state (e.g., empty Map, empty Array).
+  2. Type mismatch or boundary overflow (e.g., reading `i32` as `String`, max/min integer).
+  3. Repeated operations (e.g., overwrite, double free).
+- **Self-Review**: The AI must explicitly state in its Turn Change Report which edge case was the hardest to cover.
+
+## 104. Anti-Overengineering (YAGNI)
+<!-- id:minimalism -->
+- **YAGNI (You Aren't Gonna Need It)**: Write the absolute minimum code required to satisfy the current prompt. 
+- **Zero Speculation**: Do NOT add features, abstractions, or error-handling that were not explicitly asked for.
+- **No Unrequested Files**: Do NOT create new files unless explicitly instructed.
+
+## 105. Prompt Tracking Protocol
+<!-- id:prompt-tracking -->
+- **Echo Prompt ID**: Every user prompt will begin with a tag like `[A042]`. You MUST extract this ID.
+- **Report Header**: Your `Turn Change Report` MUST start with this exact ID. For example: `=== [A042] Turn Change Report ===`
+- **Context Binding**: If a prompt does not have an ID (like casual chat), do not add one.
+
 
 ## 999. AI Collaboration Discipline (CRITICAL)
 <!-- id:ai-discipline -->

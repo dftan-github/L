@@ -67,6 +67,7 @@ const char* toString(TokenType type) {
     case TokenType::TyPtr: return "TyPtr";
     case TokenType::Bang: return "Bang";
     case TokenType::Question: return "Question";
+    case TokenType::QuestionQuestion: return "QuestionQuestion";
     case TokenType::Equal: return "Equal";
     case TokenType::EqEq: return "EqEq";
     case TokenType::NotEq: return "NotEq";
@@ -134,6 +135,13 @@ void IdentifierExpr::dump(std::ostream& out, int indent) const {
 void BinaryExpr::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "BinaryExpr " << op << '\n';
+  if (left) left->dump(out, indent + 1);
+  if (right) right->dump(out, indent + 1);
+}
+
+void CoalesceExpr::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "CoalesceExpr ??\n";
   if (left) left->dump(out, indent + 1);
   if (right) right->dump(out, indent + 1);
 }

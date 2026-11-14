@@ -52,6 +52,12 @@ void Analyzer::collectIdents(const ast::Expr& expr, std::vector<std::string>& or
       }
       break;
     }
+    case ast::ExprKind::Coalesce: {
+      const auto& co = static_cast<const ast::CoalesceExpr&>(expr);
+      if (co.left) collectIdents(*co.left, ordered, seen);
+      if (co.right) collectIdents(*co.right, ordered, seen);
+      break;
+    }
     case ast::ExprKind::Binary: {
       const auto& bin = static_cast<const ast::BinaryExpr&>(expr);
       if (bin.left) collectIdents(*bin.left, ordered, seen);
@@ -274,6 +280,19 @@ void Analyzer::checkExpr(ast::Expr& expr) {
         error(expr.loc, "undeclared identifier '" + id.name + "'");
       } else if (ty == kErrorType) {
         // Already poisoned — skip cascading diagnostics.
+      }
+      break;
+    }
+    case ast::ExprKind::Coalesce: {
+      auto& co = static_cast<ast::CoalesceExpr&>(expr);
+      if (co.left) checkExpr(*co.left);
+      if (co.right) checkExpr(*co.right);
+      // Type rule: left must be Optional<T>; right must be T ([coalesce]).
+      if (co.left && co.right) {
+        const std::string lt = inferExprType(*co.left);
+        if (!lt.empty() && lt.rfind("Optional<", 0) != 0) {
+          error(co.loc, "left operand of '??' must be Optional<T>, got '" + lt + "'");
+        }
       }
       break;
     }

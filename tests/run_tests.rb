@@ -33,6 +33,13 @@ DELEGATE_CONFLICT_TEST = ROOT.join("tests", "cases", "delegate_conflict_test.l")
 DELEGATE_CONFLICT_BAD = ROOT.join("tests", "cases", "delegate_conflict_bad.l")
 DELEGATE_SAME_TYPE_BAD = ROOT.join("tests", "cases", "delegate_same_type_bad.l")
 DELEGATE_SAME_TYPE_PARTIAL_BAD = ROOT.join("tests", "cases", "delegate_same_type_partial_bad.l")
+COALESCE_TEST = ROOT.join("tests", "cases", "coalesce_test.l")
+COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_bad.l")
+PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
+STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
+SYNC_TRY_RELEASE = ROOT.join("tests", "cases", "sync_try_release.l")
+DELEGATE_OPTIONAL_TEST = ROOT.join("tests", "cases", "delegate_optional_test.l")
+DELEGATE_PRIVATE_BAD = ROOT.join("tests", "cases", "delegate_private_bad.l")
 STATIC_METHOD_TEST = ROOT.join("tests", "cases", "static_method_test.l")
 STATIC_METHOD_BAD = ROOT.join("tests", "cases", "static_method_bad.l")
 INTERFACE_TEST = ROOT.join("tests", "cases", "interface_test.l")
@@ -2687,6 +2694,134 @@ def test_optional_e2e!
   puts "  OK optional_test e2e"
 end
 
+def test_coalesce_e2e!
+  assert!(File.exist?(COALESCE_TEST), "coalesce_test case not found: #{COALESCE_TEST}")
+
+  ir, ir_err, ir_st =
+    run_compiler("--emit-llvm", *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, COALESCE_TEST))
+  assert!(ir_st.success?, "emit-llvm coalesce_test failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  # `??` must lower to a real branch with a phi merge, not a masked select.
+  assert!(ir.include?("coal.some"), "IR missing coal.some block\n#{ir}")
+  assert!(ir.include?("coal.none"), "IR missing coal.none block\n#{ir}")
+  assert!(ir.include?("coalesce"), "IR missing coalesce phi\n#{ir}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("coalesce_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status =
+    run_compiler("-o", exe.to_s, *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, COALESCE_TEST))
+  assert!(status.success?, "compile coalesce_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "coalesce_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "coalesce_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(
+    normalized == "42\n7\nguest\nadmin\n",
+    "expected \"42\\n7\\nguest\\nadmin\\n\", got #{normalized.inspect}"
+  )
+
+  puts "  OK coalesce e2e (opt ?? fallback, empty → default, some → payload)"
+end
+
+def test_coalesce_non_optional_bad!
+  assert!(File.exist?(COALESCE_NON_OPTIONAL_BAD), "case not found: #{COALESCE_NON_OPTIONAL_BAD}")
+
+  out, err, st =
+    run_compiler("-o", OUT_DIR.join("coalesce_bad.exe").to_s,
+                 *with_runtime(STDLIB_OPTIONAL, COALESCE_NON_OPTIONAL_BAD))
+  combined = "#{out}\n#{err}"
+  assert!(!st.success?, "expected '??' on non-Optional to fail, but it compiled\n#{combined}")
+  assert!(
+    combined.include?("left operand of '??' must be Optional<T>"),
+    "expected Optional<T> diagnostic, got:\n#{combined}"
+  )
+
+  puts "  OK coalesce rejects non-Optional left operand"
+end
+
+def test_properties_e2e!
+  assert!(File.exist?(PROPERTIES_TEST), "properties_test case not found: #{PROPERTIES_TEST}")
+  assert!(File.exist?(STDLIB_PROPERTIES), "stdlib properties not found: #{STDLIB_PROPERTIES}")
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
+                       STDLIB_PROPERTIES, PROPERTIES_TEST)
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("properties_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?, "compile properties_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "properties_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "properties_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "empty\nadmin\nunknown\nroot\n20\ntwenty\n0\n" \
+             "string-not-i32\nstring-as-i32-empty\nabsent-is-empty\n" \
+             "3\n0\nfalse\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # The delegate bag must be a live embedded instance, not a null pointer.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm properties_test failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("%CPropertys = type { %Map_Variant }"),
+          "IR missing embedded Map<Variant> in CPropertys\n#{ir}")
+
+  puts "  OK properties e2e (set/get via Variant + ?? defaults + 9 edge cases)"
+end
+
+def test_delegate_optional_e2e!
+  assert!(File.exist?(DELEGATE_OPTIONAL_TEST),
+          "delegate_optional_test not found: #{DELEGATE_OPTIONAL_TEST}")
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, DELEGATE_OPTIONAL_TEST)
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("delegate_optional_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile delegate_optional_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "delegate_optional_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "anonymous\nAlice\nAlice\nAlice\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+  puts "  OK delegate promotes Optional-returning methods (chain + ??)"
+end
+
+def test_delegate_private_bad_rejected!
+  assert!(File.exist?(DELEGATE_PRIVATE_BAD),
+          "delegate_private_bad not found: #{DELEGATE_PRIVATE_BAD}")
+  stdout, stderr, status = run_compiler("--emit-llvm", *with_runtime(DELEGATE_PRIVATE_BAD))
+  assert!(!status.success?, "delegate_private_bad should fail to compile\n#{stdout}\n#{stderr}")
+  combined = "#{stdout}\n#{stderr}"
+  assert!(combined.match?(/\[ERROR\] .+delegate_private_bad\.l:\d+:\d+ - .*unknown property 'token'/m),
+          "missing located [ERROR] private-field diagnostic, got:\n#{combined}")
+  puts "  OK delegate does not leak private fields"
+end
+
+def test_sync_try_release!
+  assert!(File.exist?(SYNC_TRY_RELEASE), "sync_try_release not found: #{SYNC_TRY_RELEASE}")
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_RESULT, SYNC_TRY_RELEASE)
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("sync_try_release.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile sync_try_release failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "sync_try_release.exe exited #{st.exitstatus} (possible deadlock)\n#{err}\n#{out}")
+  lines = out.gsub("\r\n", "\n").split("\n")
+  expected = %w[6 boom 2 2 6 6] + ["recovered"]
+  assert!(lines == expected, "expected #{expected.inspect}, got #{lines.inspect}")
+  # Non-negotiable: every lock acquired inside sync was released on the ? path.
+  assert!(lines[2] == lines[3], "single-thread lock/unlock mismatch: #{lines[2]}/#{lines[3]}")
+  assert!(lines[4] == lines[5], "multi-thread lock/unlock mismatch: #{lines[4]}/#{lines[5]}")
+  puts "  OK `?` inside sync releases the lock (no deadlock, lock==unlock)"
+end
+
 def test_result_e2e!
   assert!(File.exist?(RESULT_TEST), "result_test case not found: #{RESULT_TEST}")
   assert!(File.exist?(STDLIB_RESULT), "stdlib result not found: #{STDLIB_RESULT}")
@@ -3471,6 +3606,12 @@ def main
     test_for_in_e2e!
     test_generic_inference_e2e!
     test_optional_e2e!
+    test_coalesce_e2e!
+    test_coalesce_non_optional_bad!
+    test_properties_e2e!
+    test_delegate_optional_e2e!
+    test_delegate_private_bad_rejected!
+    test_sync_try_release!
     test_result_e2e!
     test_try_operator_e2e!
     test_lifecycle_e2e!
