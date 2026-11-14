@@ -46,6 +46,7 @@ const char* toString(TokenType type) {
     case TokenType::KwIn: return "KwIn";
     case TokenType::KwBreak: return "KwBreak";
     case TokenType::KwContinue: return "KwContinue";
+    case TokenType::KwThis: return "KwThis";
     case TokenType::KwTrue: return "KwTrue";
     case TokenType::KwFalse: return "KwFalse";
     case TokenType::KwHeap: return "KwHeap";
@@ -170,6 +171,11 @@ void MemberAccessExpr::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "MemberAccessExpr ." << member << '\n';
   if (object) object->dump(out, indent + 1);
+}
+
+void ThisExpr::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "ThisExpr\n";
 }
 
 void MethodCallExpr::dump(std::ostream& out, int indent) const {

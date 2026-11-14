@@ -38,6 +38,7 @@ STDLIB = {
   result: ROOT.join("stdlib", "result.l"),
   map: ROOT.join("stdlib", "map.l"),
   variant: ROOT.join("stdlib", "variant.l"),
+  properties: ROOT.join("stdlib", "properties.l"),
   file: ROOT.join("stdlib", "file.l"),
   fs: ROOT.join("stdlib", "fs.l"),
   env: ROOT.join("stdlib", "env.l"),
@@ -48,7 +49,7 @@ STDLIB = {
 }.freeze
 
 # Emit order matters: Array before String; Optional before Map/Variant/File; Result before fs/process.
-STDLIB_ORDER = %i[memory io thread array string optional result map variant file fs env cli time regex process].freeze
+STDLIB_ORDER = %i[memory io thread array string optional result map variant file fs env cli time regex process properties].freeze
 
 RUNTIME_KEYS = %i[memory io thread].freeze
 
@@ -128,6 +129,9 @@ def detect_stdlib(text)
   need[:result] = true if text.match?(/\?\s*(?:;|\n|\)|\}|,)/)
   need[:map] = true if text.match?(/\bMap\b/)
   need[:variant] = true if text.match?(/\bVariant\b|from_i32\b|as_i32\b|is_i32\b/)
+  # CPropertys is the Variant-backed property bag (stdlib/properties.l) and is
+  # usually pulled in through `delegate CPropertys` rather than by name.
+  need[:properties] = true if text.match?(/\bCPropertys\b/) || need[:variant]
   need[:file] = true if text.match?(/\bFile\b|read_all\b|write_all\b|l_file_open\b|l_file_read\b|l_file_write\b/)
   need[:fs] = true if text.match?(/\bfile_exists\b|\bcreate_dir\b|\bremove_file\b|\bremove_dir\b|l_file_exists\b|l_create_dir\b|l_remove_file\b|l_remove_dir\b/)
   need[:env] = true if text.match?(/\bget_args\b|\bget_env\b|l_get_arg\b|l_get_env\b/)
@@ -136,7 +140,7 @@ def detect_stdlib(text)
   need[:regex] = true if text.match?(/\bcontains_pattern\b|l_regex_match\b/)
   need[:process] = true if text.match?(/\brun_command\b|l_run_command\b/)
   # Map/Variant/File/Env usually need String + Optional.
-  if need[:map] || need[:variant] || need[:file] || need[:env]
+  if need[:map] || need[:variant] || need[:properties] || need[:file] || need[:env]
     need[:string] = true
     need[:array] = true
     need[:optional] = true
@@ -177,12 +181,17 @@ else
     die!("unknown stdlib module: #{k}") unless STDLIB.key?(k)
     needed[k] = true
     # Keep dependency chain coherent when user forces a module.
-    if %i[string result map variant].include?(k)
+    if %i[string result map variant properties].include?(k)
       needed[:array] = true
     end
-    if %i[map variant].include?(k)
+    if %i[map variant properties].include?(k)
       needed[:string] = true
       needed[:optional] = true
+    end
+    # properties.l embeds Map<Variant>, so both must come along in emit order.
+    if k == :properties
+      needed[:map] = true
+      needed[:variant] = true
     end
     if k == :result
       needed[:string] = true

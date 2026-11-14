@@ -371,6 +371,9 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "continue") {
     return ast::TokenType::KwContinue;
   }
+  if (text == "this") {
+    return ast::TokenType::KwThis;
+  }
   if (text == "true") {
     return ast::TokenType::KwTrue;
   }

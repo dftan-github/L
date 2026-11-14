@@ -619,6 +619,8 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
       return "ptr";
     case ast::ExprKind::New:
       return static_cast<const ast::NewExpr&>(expr).class_name;
+    case ast::ExprKind::This:
+      return current_class_;
     case ast::ExprKind::Heap: {
       const auto& heap = static_cast<const ast::HeapExpr&>(expr);
       if (heap.inner) {
@@ -745,6 +747,24 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
       }
       const auto& oid = static_cast<const ast::IdentifierExpr&>(*call.object);
       auto lit = local_types_.find(oid.name);
+      // ---------------------------------------------------------------
+      // [field receiver] `field.method(...)` inside a method body: fields are
+      // not locals, so look the name up in the enclosing class before giving
+      // up. Without this, `x := this.map.get(k)` infers `i32` (the fallback in
+      // inferTypeFromExpr) and any later `opt.is_some()` fails codegen.
+      // ---------------------------------------------------------------
+      if (lit == local_types_.end() && !current_class_.empty()) {
+        const ClassInfo* owner = findClass(current_class_);
+        if (owner) {
+          auto fit = owner->field_index.find(physicalFieldName(oid.name));
+          if (fit != owner->field_index.end() && fit->second < owner->field_types.size()) {
+            const std::string field_ty = resolveTypeName(owner->field_types[fit->second]);
+            if (!field_ty.empty()) {
+              return methodReturnTypeOn(field_ty, call.method);
+            }
+          }
+        }
+      }
       // ClassName.staticMethod / Variant.from_i32 (free assoc) return types.
       if (lit == local_types_.end()) {
         if (isClassType(oid.name) ||
@@ -779,10 +799,20 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
         return {};
       }
       const ClassInfo* info = findClass(lit->second);
-      if (!info || !info->ast) {
-        return {};
+      if (info && info->ast) {
+        return methodReturnTypeOn(lit->second, call.method);
       }
-      return methodReturnTypeOn(lit->second, call.method);
+      // Interface-typed local: method signature comes from the interface decl.
+      if (isInterfaceType(lit->second)) {
+        auto iit = interfaces_.find(lit->second);
+        if (iit != interfaces_.end()) {
+          auto mit = iit->second.methods.find(call.method);
+          if (mit != iit->second.methods.end() && mit->second) {
+            return resolveTypeName(mit->second->return_type);
+          }
+        }
+      }
+      return {};
     }
     case ast::ExprKind::Cast: {
       const auto& cast = static_cast<const ast::CastExpr&>(expr);
@@ -4602,6 +4632,23 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
       }
     }
 
+    // Already an interface value produced by an expression, e.g.
+    // `IPlugin p = arr.get(i)` or `p := arr.get(i)`. The call yields the fat
+    // pointer directly, so it can be stored without any boxing.
+    if (decl.init->kind() == ast::ExprKind::Call ||
+        decl.init->kind() == ast::ExprKind::MethodCall ||
+        decl.init->kind() == ast::ExprKind::Index) {
+      llvm::Value* fat = emitExpr(*decl.init);
+      if (!fat) {
+        return false;
+      }
+      if (fat->getType() == fatPtrTy()) {
+        builder_.CreateStore(fat, alloca);
+        return true;
+      }
+      // Not a fat pointer after all — fall through to class boxing.
+    }
+
     // Auto-box: IReader iface = p;  or  IReader r = Point(42);
     // NewExpr is heap-escaped so the fat pointer may outlive the statement (e.g. Array).
     std::string class_ty;
@@ -5612,20 +5659,33 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
       return emitForInRange(stmt, bin);
     }
   }
-  if (stmt.iterable->kind() != ast::ExprKind::Identifier) {
-    error("for-in iterable must be a local Array or lo..hi range");
+  // Iterable may be a local (`arr`) or a member access (`this.plugins`, `obj.plugins`).
+  std::string arr_ty;
+  if (stmt.iterable->kind() == ast::ExprKind::Identifier) {
+    const auto& arr_id = static_cast<const ast::IdentifierExpr&>(*stmt.iterable);
+    auto lit = local_types_.find(arr_id.name);
+    if (lit == local_types_.end()) {
+      error("unknown iterable in for-in: " + arr_id.name);
+      return false;
+    }
+    arr_ty = lit->second;
+  } else if (stmt.iterable->kind() == ast::ExprKind::MemberAccess) {
+    arr_ty = exprTypeOf(*stmt.iterable);
+    if (arr_ty.empty()) {
+      arr_ty = inferTypeFromExpr(*stmt.iterable);
+    }
+    if (arr_ty.empty()) {
+      error("cannot infer type of for-in iterable");
+      return false;
+    }
+  } else {
+    error("for-in iterable must be a local Array, a field, or a lo..hi range");
     return false;
   }
-  const auto& arr_id = static_cast<const ast::IdentifierExpr&>(*stmt.iterable);
-  auto lit = local_types_.find(arr_id.name);
-  if (lit == local_types_.end()) {
-    error("unknown iterable in for-in: " + arr_id.name);
-    return false;
-  }
-  ensureTypeAvailable(lit->second);
-  const ClassInfo* info = findClass(lit->second);
+  ensureTypeAvailable(arr_ty);
+  const ClassInfo* info = findClass(arr_ty);
   if (!info || info->type_args.empty() || info->template_name != "Array") {
-    error("for-in requires Array<T>, got " + lit->second);
+    error("for-in requires Array<T>, got " + arr_ty);
     return false;
   }
   auto len_fit = info->field_index.find("length_");
@@ -5658,7 +5718,7 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
 
   branchTo(cond_bb);
   builder_.SetInsertPoint(cond_bb);
-  llvm::Value* arr_ptr = classObjectPtr(arr_id.name);
+  llvm::Value* arr_ptr = classValuePtr(*stmt.iterable, arr_ty);
   if (!arr_ptr) {
     return false;
   }
@@ -5671,7 +5731,7 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
 
   builder_.SetInsertPoint(body_bb);
   // Refresh arr/idx for body (SSA across blocks).
-  arr_ptr = classObjectPtr(arr_id.name);
+  arr_ptr = classValuePtr(*stmt.iterable, arr_ty);
   idx = builder_.CreateLoad(i32Ty(), idx_slot, "for.i.body");
   llvm::Value* elem = builder_.CreateCall(get_it->second, {arr_ptr, idx}, "for.elem");
   builder_.CreateStore(elem, item_slot);
@@ -6262,8 +6322,22 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
             error("argument count mismatch calling " + recv_ty + "." + call.method);
             return nullptr;
           }
-          llvm::Type* expected = callee_fn->getFunctionType()->getParamType(ai++);
-          llvm::Value* v = emitValueForParam(*arg, expected, "");
+          llvm::Type* expected = callee_fn->getFunctionType()->getParamType(ai);
+          std::string expected_name;
+          if (method_ast && ai - 1 < method_ast->params.size()) {
+            expected_name = method_ast->params[ai - 1].type_name;
+          }
+          if (expected_name.empty()) {
+            // No AST available (e.g. delegate promoted from an already-registered
+            // class): fall back to the argument's own inferred type so class
+            // formals still bind by reference.
+            expected_name = exprTypeOf(*arg);
+            if (expected_name.empty()) {
+              expected_name = inferTypeFromExpr(*arg);
+            }
+          }
+          ++ai;
+          llvm::Value* v = emitValueForParam(*arg, expected, expected_name);
           if (!v) {
             return nullptr;
           }
@@ -7058,6 +7132,17 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       const auto& lit = static_cast<const ast::BooleanLiteralExpr&>(expr);
       return lit.value ? llvm::ConstantInt::getTrue(globalContext())
                        : llvm::ConstantInt::getFalse(globalContext());
+    }
+    case ast::ExprKind::This: {
+      if (current_method_is_static_) {
+        error(expr.loc, "cannot use 'this' inside a static method");
+        return nullptr;
+      }
+      if (!current_this_) {
+        error(expr.loc, "'this' is only valid inside an instance method");
+        return nullptr;
+      }
+      return current_this_;
     }
     case ast::ExprKind::Identifier: {
       const auto& id = static_cast<const ast::IdentifierExpr&>(expr);

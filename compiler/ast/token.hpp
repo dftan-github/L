@@ -43,6 +43,7 @@ enum class TokenType {
   KwIn,
   KwBreak,
   KwContinue,
+  KwThis,
   KwTrue,
   KwFalse,
   KwHeap,

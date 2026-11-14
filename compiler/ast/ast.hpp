@@ -21,6 +21,7 @@ enum class ExprKind {
   Coalesce,  // left ?? right — Optional unwrap with fallback
   Call,
   MemberAccess,
+  This,
   MethodCall,
   New,
   Heap,
@@ -145,6 +146,12 @@ struct MemberAccessExpr : Expr {
   ExprPtr object;
   std::string member;
   ExprKind kind() const override { return ExprKind::MemberAccess; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
+// `this` — the implicit receiver of an instance method.
+struct ThisExpr : Expr {
+  ExprKind kind() const override { return ExprKind::This; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
 

@@ -40,6 +40,8 @@ STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
 HTTP_PARSE_TEST = ROOT.join("tests", "cases", "http_parse_test.l")
 BREAK_CONTINUE_TEST = ROOT.join("tests", "cases", "break_continue_test.l")
 BREAK_OUTSIDE_LOOP_BAD = ROOT.join("tests", "cases", "break_outside_loop_bad.l")
+PLUGIN_FRAMEWORK_TEST = ROOT.join("tests", "cases", "plugin_framework_test.l")
+THIS_IN_STATIC_BAD = ROOT.join("tests", "cases", "this_in_static_bad.l")
 SYNC_TRY_RELEASE = ROOT.join("tests", "cases", "sync_try_release.l")
 DELEGATE_OPTIONAL_TEST = ROOT.join("tests", "cases", "delegate_optional_test.l")
 DELEGATE_PRIVATE_BAD = ROOT.join("tests", "cases", "delegate_private_bad.l")
@@ -2848,6 +2850,40 @@ def test_break_outside_loop_rejected!
   puts "  OK break outside loop rejected"
 end
 
+def test_plugin_framework_e2e!
+  assert!(File.exist?(PLUGIN_FRAMEWORK_TEST),
+          "plugin_framework_test not found: #{PLUGIN_FRAMEWORK_TEST}")
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP,
+                       STDLIB_VARIANT, STDLIB_PROPERTIES, PLUGIN_FRAMEWORK_TEST)
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("plugin_framework_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?, "compile plugin_framework_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "plugin_framework_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "0\n" \
+             "2\n" \
+             "0.1.0\n" \
+             "[start] logger ready\n[start] auth ready\n" \
+             "logger\nauth\n" \
+             "logger\nauth\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+  puts "  OK plugin framework e2e (interface array + this + field for-in + delegate config)"
+end
+
+def test_this_in_static_rejected!
+  assert!(File.exist?(THIS_IN_STATIC_BAD), "this_in_static_bad not found: #{THIS_IN_STATIC_BAD}")
+  files = with_runtime(THIS_IN_STATIC_BAD)
+  stdout, stderr, status = run_compiler("--emit-llvm", *files)
+  assert!(!status.success?, "'this' inside a static method must not compile")
+  combined = (stdout || "") + (stderr || "")
+  assert!(combined.include?("cannot use 'this' inside a static method"),
+          "missing static-this diagnostic\n#{combined}")
+  puts "  OK 'this' inside static method rejected"
+end
+
 def test_delegate_optional_e2e!
   assert!(File.exist?(DELEGATE_OPTIONAL_TEST),
           "delegate_optional_test not found: #{DELEGATE_OPTIONAL_TEST}")
@@ -3687,6 +3723,8 @@ def main
     test_http_parse_e2e!
     test_break_continue_e2e!
     test_break_outside_loop_rejected!
+    test_plugin_framework_e2e!
+    test_this_in_static_rejected!
     test_delegate_optional_e2e!
     test_delegate_private_bad_rejected!
     test_sync_try_release!

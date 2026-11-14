@@ -250,6 +250,7 @@ ast::StmtPtr Parser::parseStatement() {
       check(ast::TokenType::TyString) || check(ast::TokenType::LParen) ||
       check(ast::TokenType::LBracket) || check(ast::TokenType::KwTrue) ||
       check(ast::TokenType::KwFalse) || check(ast::TokenType::KwHeap) ||
+      check(ast::TokenType::KwThis) ||
       check(ast::TokenType::KwArena) || check(ast::TokenType::PlusPlus) ||
       check(ast::TokenType::MinusMinus) ||
       // Relative-init: `.baud = …` inside `obj { ... }`.
@@ -839,6 +840,13 @@ ast::ExprPtr Parser::parsePrimaryExpression() {
     }
     access->member = field.lexeme;
     return parsePostfix(std::move(access));
+  }
+  if (check(ast::TokenType::KwThis)) {
+    ast::Token kw = peek();
+    advance();
+    auto expr = std::make_unique<ast::ThisExpr>();
+    expr->loc = kw.loc;
+    return parsePostfix(std::move(expr));
   }
   if (check(ast::TokenType::Pipe) || check(ast::TokenType::PipePipe)) {
     // `|| expr` is lexed as PipePipe (same glyph as logical-or); treat as empty-param lambda.
