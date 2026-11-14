@@ -82,6 +82,7 @@ const char* toString(TokenType type) {
     case TokenType::Comma: return "Comma";
     case TokenType::Dot: return "Dot";
     case TokenType::DotDot: return "DotDot";
+    case TokenType::QuestionDot: return "QuestionDot";
     case TokenType::Plus: return "Plus";
     case TokenType::Minus: return "Minus";
     case TokenType::Star: return "Star";

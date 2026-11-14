@@ -288,6 +288,8 @@ void Analyzer::checkExpr(ast::Expr& expr) {
       if (co.left) checkExpr(*co.left);
       if (co.right) checkExpr(*co.right);
       // Type rule: left must be Optional<T>; right must be T ([coalesce]).
+      // An unresolved left type (e.g. delegate-promoted `this.get(k)`) is left to
+      // codegen, which has the full method table and reports the precise error.
       if (co.left && co.right) {
         const std::string lt = inferExprType(*co.left);
         if (!lt.empty() && lt.rfind("Optional<", 0) != 0) {
@@ -1015,9 +1017,22 @@ std::string Analyzer::inferExprType(const ast::Expr& expr) const {
         if (classes_.count(oid.name) != 0) {
           recv_ty = oid.name;  // `Variant.from_i32` / ClassName.staticMethod
         }
-      }
-      if (recv_ty.empty()) {
+      }      if (recv_ty.empty()) {
         return {};
+      }
+      // `obj?.m()`: `?.` short-circuits only when the receiver is an Optional, in
+      // which case the method is resolved on the payload and the result is an
+      // `Optional<R>`. On a concrete receiver it is a plain call (see codegen).
+      if (call.is_safe && recv_ty.rfind("Optional<", 0) == 0 && recv_ty.back() == '>') {
+        const std::string payload = recv_ty.substr(9, recv_ty.size() - 10);
+        const std::string ret = methodReturnTypeOn(payload, call.method);
+        if (ret.empty()) {
+          return {};
+        }
+        if (ret.rfind("Optional<", 0) == 0) {
+          return ret;
+        }
+        return "Optional<" + ret + ">";
       }
       return methodReturnTypeOn(recv_ty, call.method);
     }

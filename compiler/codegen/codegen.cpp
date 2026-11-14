@@ -800,6 +800,36 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
     }
     case ast::ExprKind::MethodCall: {
       const auto& call = static_cast<const ast::MethodCallExpr&>(expr);
+      // `obj?.m(...)`: the method is resolved on the Optional's payload type, and
+      // the result is re-wrapped as `Optional<R>` (a method already returning an
+      // Optional keeps its own type, so chaining never nests Optionals).
+      const bool safe = call.is_safe;
+      auto stripOptional = [](const std::string& ty) -> std::string {
+        if (ty.rfind("Optional<", 0) == 0 && ty.size() > 10) {
+          return ty.substr(9, ty.size() - 10);
+        }
+        return ty;
+      };
+      auto resolveOn = [&](const std::string& recv) -> std::string {
+        if (recv.empty()) {
+          return {};
+        }
+        // `?.` only short-circuits on an Optional receiver; on a concrete value
+        // it degrades to a plain call and keeps the method's own return type.
+        const bool shortCircuit = safe && recv.rfind("Optional<", 0) == 0;
+        const std::string base = shortCircuit ? stripOptional(recv) : recv;
+        if (base.empty()) {
+          return {};
+        }
+        const std::string ret = methodReturnTypeOn(base, call.method);
+        if (ret.empty()) {
+          return {};
+        }
+        if (!shortCircuit) {
+          return ret;
+        }
+        return ret.rfind("Optional<", 0) == 0 ? ret : "Optional<" + ret + ">";
+      };
       // Bare method call `get(i)` inside a method body = implicit `this.get(i)`.
       if (!call.object) {
         if (current_class_.empty()) {
@@ -811,11 +841,7 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
       // otherwise take the expression's own static type. Chained calls such as
       // `v.as_string().unwrap()` resolve through the inner MethodCall.
       if (call.object->kind() != ast::ExprKind::Identifier) {
-        const std::string recv_ty = exprTypeOf(*call.object);
-        if (recv_ty.empty()) {
-          return {};
-        }
-        return methodReturnTypeOn(recv_ty, call.method);
+        return resolveOn(exprTypeOf(*call.object));
       }
       const auto& oid = static_cast<const ast::IdentifierExpr&>(*call.object);
       // `this.method(...)` inside a method body: resolve against the enclosing class.
@@ -835,9 +861,7 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
           auto fit = owner->field_index.find(physicalFieldName(oid.name));
           if (fit != owner->field_index.end() && fit->second < owner->field_types.size()) {
             const std::string field_ty = resolveTypeName(owner->field_types[fit->second]);
-            if (!field_ty.empty()) {
-              return methodReturnTypeOn(field_ty, call.method);
-            }
+            return resolveOn(field_ty);
           }
         }
       }
@@ -875,7 +899,7 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
         return {};
       }
       // Interfaces resolve via methodReturnTypeOn's interface branch.
-      return methodReturnTypeOn(lit->second, call.method);
+      return resolveOn(lit->second);
     }
     case ast::ExprKind::Cast: {
       const auto& cast = static_cast<const ast::CastExpr&>(expr);
@@ -1180,7 +1204,7 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
   }
 
   if (in_struct_pass_) {
-    // Bodies must wait: a referenced struct body (e.g. `%PropertyTree`) may still
+    // Bodies must wait: a referenced struct body (e.g. `%CPropertys`) may still
     // be opaque, and any GEP into this instance would fail verification.
     if (std::find(pending_generic_bodies_.begin(), pending_generic_bodies_.end(),
                   instance_name) == pending_generic_bodies_.end()) {
@@ -1836,7 +1860,7 @@ bool Codegen::emitClassStruct(const ast::ClassDeclStmt& decl) {
   info.ast = &decl;
 
   // Register the (still opaque) struct BEFORE walking fields. A self-recursive
-  // shape like `Map<String, PropertyTree>` inside `PropertyTree` would otherwise
+  // shape like `Map<String, CPropertys>` inside `CPropertys` would otherwise
   // recurse into specialization while this class is unknown, silently dropping
   // the module. LLVM structs are identified types, so a later `setBody` is fine
   // and the recursive reference stays a pointer-sized slot.
@@ -7020,17 +7044,181 @@ llvm::Value* Codegen::emitArenaMethod(const std::string& arena_name,
   return nullptr;
 }
 
-llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
-  if (!call.object) {
+// `obj?.m(args)` — safe call.
+//
+// Semantics: the receiver must be an `Optional<T>` (that is the only thing that
+// can be "absent" in L; there are no implicit nulls). The result is always an
+// `Optional<R>`:
+//   - empty receiver  -> empty Optional<R>, `m` is never entered
+//   - present receiver -> unwrap, call `m`, wrap the value in Optional<R>
+// Chained `a?.b()?.c()` therefore short-circuits the whole chain.
+llvm::Value* Codegen::emitSafeMethodCall(const ast::MethodCallExpr& call) {
+  std::string recv_ty = exprTypeOf(*call.object);
+  if (recv_ty.empty()) {
+    recv_ty = inferTypeFromExpr(*call.object);
+  }
+  if (recv_ty.empty()) {
+    error(call.loc, "cannot determine the receiver type of '?.' on '" + call.method + "'");
+    return nullptr;
+  }
+  if (recv_ty.rfind("Optional<", 0) != 0) {
+    // Not an Optional but a concrete value: `?.` degrades to a plain call, so a
+    // chain can mix `?.` and direct receivers without rewriting the whole path.
+    return emitMethodCall(call, call.object.get());
+  }
+  const std::string payload = recv_ty.substr(9, recv_ty.size() - 10);
+  if (!ensureTypeAvailable(payload)) {
+    error(call.loc, "cannot resolve Optional payload type '" + payload + "'");
+    return nullptr;
+  }
+  // Result type: Optional<R> where R is the method's declared return type.
+  std::string ret_ty_name = methodReturnTypeOn(payload, call.method);
+  if (ret_ty_name.empty()) {
+    error(call.loc, "unknown method '" + call.method + "' on '" + payload + "'");
+    return nullptr;
+  }
+  // Result type: `Optional<R>` for a plain R. When the method already returns an
+  // Optional it is FLATTENED — `a?.get_val()` is `Optional<Variant>`, not
+  // `Optional<Optional<Variant>>`, so `??` selects the payload directly.
+  const bool flatten = ret_ty_name.rfind("Optional<", 0) == 0;
+  const std::string out_ty = flatten ? ret_ty_name : "Optional<" + ret_ty_name + ">";
+  if (!ensureTypeAvailable(out_ty)) {
+    error(call.loc, "cannot specialize " + out_ty);
+    return nullptr;
+  }
+  const ClassInfo* opt_in = findClass(recv_ty);
+  const ClassInfo* opt_out = findClass(out_ty);
+  if (!opt_in || !opt_out) {
+    return nullptr;
+  }
+  auto has_it = opt_in->field_index.find("has_value_");
+  auto val_it = opt_in->field_index.find("value_");
+  auto ohas_it = opt_out->field_index.find("has_value_");
+  auto oval_it = opt_out->field_index.find("value_");
+  if (has_it == opt_in->field_index.end() || val_it == opt_in->field_index.end() ||
+      ohas_it == opt_out->field_index.end() || oval_it == opt_out->field_index.end()) {
+    error(call.loc, "Optional layout missing has_value_/value_");
+    return nullptr;
+  }
+
+  llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+  llvm::AllocaInst* out = createEntryAlloca(fn, opt_out->type, "safe.opt");
+  for (size_t i = 0; i < opt_out->field_types.size(); ++i) {
+    llvm::Type* fty = opt_out->type->getElementType(static_cast<unsigned>(i));
+    llvm::Value* gep =
+        builder_.CreateStructGEP(opt_out->type, out, static_cast<unsigned>(i), "safe.z");
+    builder_.CreateStore(llvm::Constant::getNullValue(fty), gep);
+  }
+
+  // Evaluate the receiver exactly once.
+  llvm::Value* recv = emitExpr(*call.object);
+  if (!recv) {
+    return nullptr;
+  }
+  if (recv->getType() == opt_in->type->getPointerTo()) {
+    recv = builder_.CreateLoad(opt_in->type, recv, "safe.recv");
+  }
+  llvm::Value* recv_has =
+      builder_.CreateExtractValue(recv, static_cast<unsigned>(has_it->second), "safe.has");
+
+  llvm::BasicBlock* some_bb = llvm::BasicBlock::Create(globalContext(), "safe.some", fn);
+  llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(globalContext(), "safe.merge", fn);
+  builder_.CreateCondBr(recv_has, some_bb, merge_bb);
+
+  builder_.SetInsertPoint(some_bb);
+  llvm::Value* inner =
+      builder_.CreateExtractValue(recv, static_cast<unsigned>(val_it->second), "safe.inner");
+  // Receiver payload may be a class (pointer handle) or a plain value.
+  llvm::Value* result = nullptr;
+  {
+    // Rebuild the call with the unwrapped payload bound to a hidden local so the
+    // normal method-call path (delegates, statics, property fallback) still applies.
+    const std::string hidden = "__safe_recv";
+    llvm::AllocaInst* slot = createEntryAlloca(fn, inner->getType(), hidden);
+    builder_.CreateStore(inner, slot);
+    const auto saved_local = local_types_.find(hidden);
+    const std::string saved_local_ty = (saved_local != local_types_.end()) ? saved_local->second : "";
+    auto saved_nv = named_values_.find(hidden);
+    llvm::AllocaInst* saved_nv_ptr = (saved_nv != named_values_.end())
+                                        ? llvm::dyn_cast<llvm::AllocaInst>(saved_nv->second)
+                                        : nullptr;
+
+    local_types_[hidden] = payload;
+    named_values_[hidden] = slot;
+
+    ast::IdentifierExpr ident;
+    ident.loc = call.loc;
+    ident.name = hidden;
+    result = emitMethodCall(call, &ident);
+
+    if (saved_local == local_types_.end()) {
+      local_types_.erase(hidden);
+    } else {
+      local_types_[hidden] = saved_local_ty;
+    }
+    if (saved_nv_ptr) {
+      named_values_[hidden] = saved_nv_ptr;
+    } else {
+      named_values_.erase(hidden);
+    }
+  }
+  if (!result) {
+    return nullptr;
+  }
+  if (flatten) {
+    // The method already returned the flattened `Optional<R>`: present receiver
+    // just forwards it (an empty one is the "none" answer too).
+    builder_.CreateStore(result, out);
+    builder_.CreateBr(merge_bb);
+    builder_.SetInsertPoint(merge_bb);
+    return out;
+  }
+  // Normalize to the output payload representation.
+  llvm::Value* out_val =
+      builder_.CreateStructGEP(opt_out->type, out, static_cast<unsigned>(oval_it->second),
+                               "safe.out.val");
+  llvm::Type* want = opt_out->type->getElementType(static_cast<unsigned>(oval_it->second));
+  if (result->getType() != want) {
+    if (result->getType()->isPointerTy() && want->isStructTy()) {
+      result = builder_.CreateLoad(want, result, "safe.load");
+    } else if (!result->getType()->isPointerTy() && want->isPointerTy()) {
+      // Value returned where a handle is expected (class payload): box on stack.
+      llvm::AllocaInst* tmp = createEntryAlloca(fn, result->getType(), "safe.box");
+      builder_.CreateStore(result, tmp);
+      result = tmp;
+      want = tmp->getType();
+    }
+  }
+  builder_.CreateStore(result, out_val);
+  llvm::Value* out_has =
+      builder_.CreateStructGEP(opt_out->type, out, static_cast<unsigned>(ohas_it->second),
+                               "safe.out.has");
+  builder_.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt1Ty(globalContext()), 1),
+                       out_has);
+  builder_.CreateBr(merge_bb);
+
+  builder_.SetInsertPoint(merge_bb);
+  return out;
+}
+
+llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
+                                     const ast::Expr* object_override) {
+  const ast::Expr* object = object_override ? object_override : call.object.get();
+  // `obj?.m(...)` — safe call. If the receiver is an empty `Optional<T>`, the
+  // whole chain yields an empty `Optional<R>` without ever touching the payload.
+  if (call.is_safe && !object_override && call.object) {
+    return emitSafeMethodCall(call);
+  }
+  if (!object) {
     error("method call missing object");
     return nullptr;
   }
 
   // MemberAccess / other receivers: e.g. `c.Engine.start()` (explicit delegate).
-  if (call.object->kind() != ast::ExprKind::Identifier) {
-    std::string recv_ty = exprTypeOf(*call.object);
+  if (object->kind() != ast::ExprKind::Identifier) {
+    std::string recv_ty = exprTypeOf(*object);
     if (recv_ty.empty()) {
-      recv_ty = inferTypeFromExpr(*call.object);
+      recv_ty = inferTypeFromExpr(*object);
     }
     if (!recv_ty.empty()) {
       ensureTypeAvailable(recv_ty);
@@ -7055,7 +7243,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
         return nullptr;
       }
 
-      llvm::Value* fat = emitExpr(*call.object);
+      llvm::Value* fat = emitExpr(*object);
       if (!fat) {
         return nullptr;
       }
@@ -7156,7 +7344,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
         return nullptr;
       }
       if (hits.size() == 1) {
-        llvm::Value* outer = classValuePtr(*call.object, recv_ty);
+        llvm::Value* outer = classValuePtr(*object, recv_ty);
         if (!outer) {
           return nullptr;
         }
@@ -7256,7 +7444,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
     std::vector<llvm::Value*> call_args;
     unsigned ai = 0;
     if (!is_static) {
-      llvm::Value* this_ptr = classValuePtr(*call.object, recv_ty);
+      llvm::Value* this_ptr = classValuePtr(*object, recv_ty);
       if (!this_ptr) {
         return nullptr;
       }
@@ -7289,7 +7477,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
     return builder_.CreateCall(callee_fn, call_args, is_static ? "static.call" : "mcall");
   }
 
-  const auto& id = static_cast<const ast::IdentifierExpr&>(*call.object);
+  const auto& id = static_cast<const ast::IdentifierExpr&>(*object);
   auto lit = local_types_.find(id.name);
   auto vit = named_values_.find(id.name);
 

@@ -258,10 +258,9 @@ void prependCoreStdlib(std::vector<l::module::SourceUnit>& units) {
   std::vector<l::module::SourceUnit> prefix;
   // Emission order matters: Array before String (String.split returns
   // Array<String>), Optional before Map/Variant (their lookups yield
-  // Optional<T>), Variant before CPropertys, Property bag last.
+  // Optional<T>), Variant before CPropertys (the tree embeds Variant values).
   for (const char* name : {"memory.l", "io.l", "thread.l", "array.l", "string.l",
-                           "optional.l", "map.l", "variant.l", "properties.l",
-                           "property_tree.l"}) {
+                           "optional.l", "map.l", "variant.l", "properties.l"}) {
     if (hasFilename(name)) {
       continue;
     }

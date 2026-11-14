@@ -704,6 +704,19 @@ alwaysApply: true
 - **Echo Prompt ID**: If the human prompt begins with a tag like `[A042]`, you MUST extract this ID and start your report with `=== [A042] Turn Change Report ===`.
 - **Manual Fallback**: If the human prompt does NOT contain a tag, you MUST still use the standard "Turn Change Report" format, and start it with `=== [MANUAL] Turn Change Report ===`. Never drop the report formatting just because the ID is missing.
 
+## 106. Test Execution Restriction (CRITICAL)
+<!-- id:test-exec-restriction -->
+- **No Auto Full Test**: The AI MUST NEVER execute the full test suite (`ruby tests/run_tests.rb --all`) on its own. 
+- **Human-Led Full Tests**: The human operator exclusively owns the full test execution. The AI's job is to write code and run only the targeted `--filter` tests related to the current change.
+- **Respect Incremental**: Always rely on the incremental cache (running `ruby tests/run_tests.rb` without `--all`). If a regression is suspected, report it to the human and let them run the full suite.
+
+## 107. Micro Heartbeat Protocol
+<!-- id:heartbeat-execution -->
+- **No Monologue**: Do NOT explain what you are doing.
+- **Micro Heartbeat**: During long tool executions (like compilations or tests), output ONLY a single character `.` every ~5 seconds to prove you are alive. Do NOT output sentences.
+- **Final Copyable Block**: The final `[TIER 1]` and `[TIER 2]` report MUST be wrapped inside ONE single ```text code block (per Rule 102) so the human can copy it.
+- **No Code Dumps**: Never print code you are inserting.
+
 
 ## 999. AI Collaboration Discipline (CRITICAL)
 <!-- id:ai-discipline -->

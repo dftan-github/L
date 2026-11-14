@@ -160,6 +160,9 @@ struct MethodCallExpr : Expr {
   ExprPtr object;
   std::string method;
   std::vector<CallArg> args;
+  // `obj?.m()` — safe call. When the receiver is an empty `Optional<T>`, the
+  // whole chain short-circuits to an empty `Optional<R>` instead of unwrapping.
+  bool is_safe = false;
   ExprKind kind() const override { return ExprKind::MethodCall; }
   void dump(std::ostream& out, int indent = 0) const override;
 };

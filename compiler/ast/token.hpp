@@ -72,6 +72,7 @@ enum class TokenType {
   Bang,          // !
   Question,      // ?  (Result error propagation)
   QuestionQuestion,  // ?? (Optional null-coalescing)
+  QuestionDot,   // ?. (safe call: empty Optional short-circuits the chain)
   Equal,         // =
   EqEq,          // ==
   NotEq,         // !=

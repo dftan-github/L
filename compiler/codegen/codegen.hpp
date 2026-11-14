@@ -304,7 +304,10 @@ private:
   llvm::GlobalVariable* ensureTypeId(ClassInfo& info);
   // VTable layout: [TypeID, method0, method1, ...] — length = 1 + method count.
   llvm::ArrayType* vtableArrayTy(const InterfaceInfo& iface);
-  llvm::Value* emitMethodCall(const ast::MethodCallExpr& call);
+  llvm::Value* emitMethodCall(const ast::MethodCallExpr& call,
+                              const ast::Expr* object_override = nullptr);
+  // `obj?.m(...)` — short-circuits to an empty Optional when the receiver is one.
+  llvm::Value* emitSafeMethodCall(const ast::MethodCallExpr& call);
 
   void error(const std::string& message);
   void error(const ast::SourceLocation& loc, const std::string& message);

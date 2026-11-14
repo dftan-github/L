@@ -1,11 +1,11 @@
-// Performance smoke: PropertyTree (recursive tree, lazy child Map, Variant values).
+// Performance smoke: CPropertys (recursive tree, lazy child Map, Variant values).
 
 fun bench_tree_build() -> i32 {
     // 20_000 nodes: 1 root + 20_000 children, each holding an i32 payload.
-    root := PropertyTree()
+    root := CPropertys()
     i! := 0
     while i < 20000 {
-        n := PropertyTree()
+        n := CPropertys()
         n.set_val(Variant.from_i32(i))
         root.add_child(String.from(i), n)
         i! += 1
@@ -15,10 +15,10 @@ fun bench_tree_build() -> i32 {
 
 fun bench_tree_lookup() -> i32 {
     // 1_000_000 hashed lookups over a 20_000-entry child map.
-    root := PropertyTree()
+    root := CPropertys()
     i! := 0
     while i < 20000 {
-        n := PropertyTree()
+        n := CPropertys()
         n.set_val(Variant.from_i32(i))
         root.add_child(String.from(i), n)
         i! += 1
@@ -37,11 +37,11 @@ fun bench_tree_lookup() -> i32 {
 
 fun bench_tree_deep() -> i32 {
     // 1_000-deep chain, then 1_000 full root-to-leaf walks (1_000_000 hops).
-    root := PropertyTree()
+    root := CPropertys()
     cur := root
     i! := 0
     while i < 1000 {
-        n := PropertyTree()
+        n := CPropertys()
         n.set_val(Variant.from_i32(i))
         cur.add_child("c", n)
         cur = n

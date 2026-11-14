@@ -24,7 +24,7 @@ STDLIB_ARRAY = ROOT.join("stdlib", "array.l")
 STDLIB_OPTIONAL = ROOT.join("stdlib", "optional.l")
 STDLIB_MAP = ROOT.join("stdlib", "map.l")
 STDLIB_VARIANT = ROOT.join("stdlib", "variant.l")
-STDLIB_PROPERTY_TREE = ROOT.join("stdlib", "property_tree.l")
+STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
 STDLIB_ENV = ROOT.join("stdlib", "env.l")
 
 def die!(msg)
@@ -66,11 +66,11 @@ normalized = out.to_s.gsub("\r\n", "\n")
 puts normalized
 puts format("wall_time_ms=%.3f", ms)
 
-# PropertyTree: recursive tree with a lazily created `Map<ptr>` child index.
+# CPropertys: recursive tree with a lazily created `Map<ptr>` child index.
 tree_exe = OUT_DIR.join("property_tree_bench.exe")
 puts "Compiling property_tree_bench.l with -O3 ..."
 compile_o3!([STDLIB_ARRAY, STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
-             STDLIB_PROPERTY_TREE, STDLIB_ENV, TREE_BENCH], tree_exe)
+             STDLIB_PROPERTIES, STDLIB_ENV, TREE_BENCH], tree_exe)
 
 %w[build lookup deep].each do |mode|
   puts "Running #{tree_exe} #{mode} ..."

@@ -526,13 +526,21 @@ ast::ExprPtr Parser::parseArrayLiteral() {
 
 ast::ExprPtr Parser::parsePostfix(ast::ExprPtr left) {
   while (left) {
-    if (match(ast::TokenType::Dot)) {
+    // `obj?.m()` / `obj?.field` — safe access. `?.` lexes as one token; the
+    // identifier that follows is peek(1) because QuestionDot is a single token.
+    const bool safe = check(ast::TokenType::QuestionDot) &&
+                      (peek(1).type == ast::TokenType::Identifier);
+    if (safe || match(ast::TokenType::Dot)) {
+      if (safe) {
+        advance();  // ?.
+      }
       ast::Token field = consume(ast::TokenType::Identifier, "expected name after '.'");
       if (check(ast::TokenType::LParen)) {
         auto call = std::make_unique<ast::MethodCallExpr>();
         call->loc = field.loc;
         call->object = std::move(left);
         call->method = field.lexeme;
+        call->is_safe = safe;
         call->args = parseArgList();
         attachTrailingBlockIfPresent(call->args);
         left = std::move(call);
@@ -544,6 +552,7 @@ ast::ExprPtr Parser::parsePostfix(ast::ExprPtr left) {
         call->loc = field.loc;
         call->object = std::move(left);
         call->method = field.lexeme;
+        call->is_safe = safe;
         attachTrailingBlockIfPresent(call->args);
         left = std::move(call);
         continue;
