@@ -39,7 +39,7 @@ typedef struct LThreadHandle {
 /* Process-wide lock backing `sync { ... }` across spawn threads. */
 static LMutex* g_sync_mutex = NULL;
 
-/* Atomic counters for global-mutex lock/unlock (rule 58 validation). */
+/* Atomic counters for global-mutex lock/unlock ([race-detection] validation). */
 static volatile int64_t g_lock_count = 0;
 static volatile int64_t g_unlock_count = 0;
 
@@ -258,7 +258,7 @@ void l_sleep_ms(int32_t ms) {
 #endif
 }
 
-/* Lock-free atomics for i32 (rule 65). Returns the new value after add. */
+/* Lock-free atomics for i32 ([atomics]). Returns the new value after add. */
 int32_t l_atomic_add_i32(int32_t* ptr, int32_t val) {
   if (ptr == NULL) {
     return 0;

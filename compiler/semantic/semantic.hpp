@@ -44,7 +44,7 @@ private:
 
   diag::DiagnosticEngine* diags_ = nullptr;
   bool in_sync_ = false;
-  // Data-race checks apply only inside `spawn { ... }` (rule 42).
+  // Data-race checks apply only inside `spawn { ... }` ([closure-integration]).
   bool in_spawn_ = false;
   std::unordered_set<std::string> mutable_vars_;
   // Scoped symbol tables (outer → inner). Value may be kErrorType.

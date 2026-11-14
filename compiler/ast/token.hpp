@@ -54,6 +54,7 @@ enum class TokenType {
   KwStatic,
   KwExtern,
   KwModule,
+  KwDelegate,
 
   // Built-in types
   TyI32,

@@ -253,7 +253,11 @@ std::string generateMarkdownDoc(const ast::Module& module, const std::string& so
             continue;
           }
           std::ostringstream fsig;
-          fsig << "pub " << field->type_name << ' ' << field->name;
+          if (field->is_delegate) {
+            fsig << "delegate " << field->type_name;
+          } else {
+            fsig << "pub " << field->type_name << ' ' << field->name;
+          }
           emitDocSection(md, fsig.str(), docsAbove(lines, field->loc.line));
         }
         for (const auto& method : cls.methods) {

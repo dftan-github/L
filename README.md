@@ -4,7 +4,7 @@
 
 把仪式感、样板和记忆负担扔给编译器；你只写**业务真正需要的那几行**。  
 L 是一门 **编译型、静态强类型** 的系统语言（LLVM 22）：短得像脚本，快得像 C，类型与安全在编译期钉死——**不是解释器，不是动态类型猜谜**。  
-当前主线由 **`ruby tests/run_tests.rb` 的 111 条自动化用例**端到端兜底（Lexer / AST / Codegen / 并发 / FFI / 元编程 / `l doc` …）。
+当前主线由 **`ruby tests/run_tests.rb` 的 115 条自动化用例**端到端兜底（Lexer / AST / Codegen / 并发 / FFI / 元编程 / `l doc` …）。
 
 ### 心智负担怎么被拿掉
 
@@ -149,6 +149,33 @@ app.rs232 {
 ```
 
 前端降成 `app.rs232.baud = 115200`，再走同一套属性优先级——适合强类型、零解析成本的配置文件。
+
+---
+
+## 隐式委托（delegate）
+
+内嵌一个组件，不必手写转发方法：`delegate TypeName` 声明一个**以类型名命名**的匿名字段，外层类自动获得它的全部方法。
+
+```l
+class Engine {
+    pub fun start() { print("Vroom!") }
+}
+
+class Car {
+    delegate Engine          // 匿名字段 engine_；不写 getter 也不写转发
+}
+
+fun main() -> i32 {
+    c := Car()
+    c.start()                // → Engine.start()，隐性 this 指向 car.engine_
+    return 0
+}
+```
+
+- **方法提升**：`c.start()` 在本类找不到时，依次查所有 `delegate` 字段的方法。
+- **冲突**：多个 delegate 提供同名方法 → **编译错误**，必须显式消歧：`c.Engine.start()` / `c.Motor.start()`。
+- **隐性 this**：提升调用传入的是内嵌字段的地址（GEP），不是外层对象——组件方法里的 `this` 指向自己。
+- 与「无继承」并不矛盾：这是**组合 + 语法转发**，内存布局仍是扁平结构体，没有任何 vptr。
 
 ---
 
@@ -310,7 +337,7 @@ fun main() -> i32 {
 | 常量 | 类型 | 含义 |
 | --- | --- | --- |
 | `__FILE__` | `String` | 当前 Token 所在源文件（虚拟名如 `<eval>` 亦可） |
-| `__LINE__` | `i32` | 当前 Token 行号 |
+| `__LINE__` | `i64` | 当前 Token 行号 |
 | `__FUNC__` | `String` | 当前函数名（`comptime` 块内为 `<comptime>`） |
 
 **`compile_error(msg)` / `comptime_assert(cond, msg)`** 只允许出现在 `comptime` / LCMD 上下文。失败时报：
@@ -328,7 +355,8 @@ fun main() -> i32 {
 | 返回常量、生成声明/方法字符串并注入 | 运行时 I/O、调外部 C DLL |
 | `comptime { ... }` 前端求值后剥离 | 把 comptime/LCMD 降到 LLVM IR |
 | `compile_error` / `comptime_assert` 否决非法配置 | 在普通运行时代码里调用它们 |
-| `uid_counter()` / `source_line()` 仅在编译期上下文 | 在 `main` 等运行时代码里调用 `uid_counter()` |
+| `uid_counter()` / `source_line()` / `source_column()` 仅在编译期上下文 | 在 `main` 等运行时代码里调用 `uid_counter()` |
+| handler 可写成 5 参 `(path, cmd, args, line, column)` | — |
 | `gen-interface` 剥实现、只留 `pub` 签名 | 把私有/`extern`/LCMD 泄漏进 `.li` |
 | `l doc` 从 `pub` + `#`/`//` 注释出 Markdown | 把 `//LCMD_` 或私有实现写进文档 |
 
@@ -386,7 +414,7 @@ pub fun counter_destroy(ptr p) { l_free(p) }
 ### 并发与测试习惯
 
 - 共享可变状态：`sync { ... }`；锁次数可用 runtime 计数校验（不只看最终数值）。  
-- 全量：**111 条**自动化用例 — `ruby tests/run_tests.rb`（Lexer→AST→可执行/JIT，含拒绝用例）。  
+- 全量：**115 条**自动化用例 — `ruby tests/run_tests.rb`（Lexer→AST→可执行/JIT，含拒绝用例）。  
 - 性能：`benchmarks/`，固定 `-O3`，**不**并进上述套件。  
 - 探索：`l repl` / `l eval`（ORC JIT，不落临时 exe）。
 
@@ -438,7 +466,7 @@ arr.each { |x| print(x) }
 ```
 
 ```bash
-ruby tests/run_tests.rb    # 111 automated tests — must stay green
+ruby tests/run_tests.rb    # 115 automated tests — must stay green
 ```
 
 ---
@@ -465,7 +493,7 @@ cmake --build . --config Release
 
 ---
 
-少写一行废话，就少一分心智负担。**111 tests green.** Built with LLVM, discipline, and AI pair-programming.
+少写一行废话，就少一分心智负担。**115 tests green.** Built with LLVM, discipline, and AI pair-programming.
 
 ---
 

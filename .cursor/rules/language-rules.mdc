@@ -6,65 +6,78 @@ alwaysApply: true
 # Language L Compiler - Cursor Rules & Constraints
 
 ## 1. Core Object Model
+<!-- id:object-model -->
 - **NO INHERITANCE**: Classes are pure data structures.
 - **Fat Pointers**: Use `{ data_ptr, vtable_ptr }` for interfaces.
 - **Implicit Nulls**: NEVER. Use `Optional<T>` for nullable values.
 
 ## 2. Parameter Passing Model
+<!-- id:param-passing -->
 - **Primitives** (`i32`, `f64`, `bool`, `ptr`): Pass by value.
 - **Classes/Structs**: Pass by reference (`T*`). NEVER deep-copy on function calls.
 - **Read-only constraint**: `fun foo(Box b)` passes `Box*` but MUST reject mutation. `fun foo(Box b!)` allows mutation.
 
 ## 3. Variable Declaration & Mutability
+<!-- id:var-decl -->
 - **No `let` / `var`**. 
 - **Inference**: `:=` for local variables only. E.g., `count := 0`.
 - **Mutability**: Default immutable. Use `!` suffix on LHS. E.g., `count! := 0`, `count! = 1`. Read uses NO `!`.
 - **Constants**: `const` (compile-time), `constd` (runtime locked).
 
 ## 4. Automatic Semicolon Insertion (ASI)
+<!-- id:asi -->
 - The Lexer auto-inserts `;` at `\n` if the previous token is Identifier, literal, `)`, `]`, `}`, or `!`.
 - Multi-statements on one line MUST use explicit `;`.
 - Note: ASI is suppressed after `}` when the next line starts a new statement (`}\nprint`), so trailing-block expr stmts may omit `;`.
 
 ## 5. Functions, Constructors & KW Args
+<!-- id:functions -->
 - **Functions**: `fun name(args) -> Type { ... }`.
 - **Constructors**: `init(this, args...)`. `NewExpr` allocates and calls `init`.
 - **Keyword Arguments**: `func(a, b, kw: val)`. Positionals MUST come first. Reorder to signature order in Codegen.
 
 ## 6. Syntax Sugar (AST Desugaring)
+<!-- id:sugar -->
 - **Property**: `obj.name` -> `obj.get_name()`. `obj.name = v` -> `obj.set_name(v)`. Real fields MUST use `name_`.
 - **Operator Overloading**: `+` on Strings desugars to `concat()`.
 - **Trailing Blocks**: `func(a) { |x| ... }` passes an anonymous `fun`.
 
 ## 7. Generics & Monomorphization
+<!-- id:generics -->
 - Use `<T: Interface>`. NO naked `<T>`.
 - Max nesting depth is 2. NO template specialization.
 - Name mangling: `func_i32_String`. Use `LinkOnceODR`.
 
 ## 8. Control Flow
+<!-- id:control-flow -->
 - **No C-style `for(;;)`**. Use `for item in arr { ... }` (desugars to index `while`).
 - `while condition { ... }`.
 - `if ... else ...`.
 
 ## 9. Memory Management
+<!-- id:memory -->
 - No GC.
 - Use `heap` for allocation.
 - Use `defer` for LIFO cleanup.
 
 ## 10. Concurrency
+<!-- id:concurrency -->
 - `sync { ... }` translates to Mutex lock/unlock.
 - **Zero Tolerance**: Accessing `!` variable in `spawn` outside `sync` MUST trigger a compile error.
 
 ## 11. Modules & C Interop
+<!-- id:modules -->
 - File-as-module. `import "xxx.l"`. Flatten namespace in IR: `@module_func`. `pub` for exports.
 - **C ABI Interop**: Use `extern module` syntax to call C functions. Linkage MUST be `ExternalLinkage`. Functions are linked by name exactly.
 
 ## 12. Compile-Time Execution (comptime)
+<!-- id:comptime -->
 - **Syntax**: `comptime { ... }`.
 - **Return Types**: Compile-time constants, AST nodes (dynamically injected), or code sequences.
 - **Strict Boundaries**: `comptime` MUST NOT perform runtime I/O or call external C DLLs.
 
 ## 13. Diagnostics & Error Recovery (CRITICAL)
+<!-- id:diagnostics -->
 - **NO Exceptions / exit()**: NEVER use `throw` or `exit(1)` for syntax/semantic errors.
 - **DiagnosticEngine**: Record ALL errors in a central engine to report as many as possible in one run.
 - **Panic Mode Recovery**: Parser MUST recover from errors by skipping to sync points (`;` or `}`) and continue parsing.
@@ -72,111 +85,134 @@ alwaysApply: true
 - **Formatted Errors**: ALL errors MUST use the format: `[ERROR] file:line:col - Message`.
 
 ## 14. LLVM Backend Rules
+<!-- id:llvm-backend -->
 - **LLVM 22.1.0**: Use `llvm::IRBuilder`, single global `LLVMContext`.
 - **SSA**: Use `alloca/load/store` and let `mem2reg` insert SSA phi nodes.
 
 ## 15. Engineering & Testing
+<!-- id:engineering -->
 - **Ruby Test Runner**: All automation test scripts MUST be written in Ruby (`tests/run_tests.rb`).
 - **Incremental Development**: Do NOT jump ahead. Wait for explicit instruction to implement new features.
 
 ## 16. Project Directory Structure
+<!-- id:dir-structure -->
 - `compiler/`: C++ Lexer, Parser, AST, Codegen.
 - `runtime/`: Pure C (`l_alloc`, `l_print`, etc.).
 - `stdlib/`: L language (`.l`).
 - `tests/`: Ruby scripts and `.l` cases.
 
 ## 17. External Interop & Stdlib (CRITICAL)
+<!-- id:extern-stdlib -->
 - **NO Hardcoded Externs**: NEVER hardcode C function declarations (like `l_print` or `l_alloc`) inside the C++ Codegen. All external C functions MUST be declared using the `extern module` syntax in L stdlib files.
 - **Linkage**: External functions MUST generate LLVM `Function` with `ExternalLinkage` and their exact original names.
 - **Stdlib Separation**: `stdlib/memory.l` and `stdlib/io.l` handle the raw C bindings. `runtime/` contains only pure C implementation.
 
 ## 18. Parser Callbacks & Directive Hooks
+<!-- id:parser-hooks -->
 - **Parser Hooks**: The Parser MUST support registering callbacks triggered at specific AST nodes.
 - **LCMD Directives**: The Lexer/Parser MUST recognize special comments starting with `//LCMD_` (e.g., `//LCMD_gen_route("User")`).
 - **Directive AST**: These directives MUST be parsed into a dedicated `DirectiveNode` containing the command name and its arguments, and trigger the registered `AstHook`s.
 
 ## 19. L-Native Compile-Time Directives (LCMD)
+<!-- id:lcmd -->
 - **L-Driven Hooks**: The `//LCMD_xxx` directives MUST be able to trigger compile-time execution of L-native functions (via a tree-walking interpreter at the frontend phase).
 - **Code Generation**: L-native callbacks can return a `String` representing L source code, which the compiler MUST parse and inject into the current AST seamlessly.
 - **Boundary**: L callbacks run strictly in the compiler's frontend. They must not perform runtime I/O.
 
 ## 20. Hash Map & Memory Layout
+<!-- id:map-layout -->
 - **Map Internals**: `Map<K, V>` MUST use contiguous memory allocation (open addressing) using `l_alloc`.
 - **Optional Returns**: Lookups (like `get`) MUST return `Optional<V>` to prevent implicit nulls.
 - **Nested Generics**: Codegen MUST support nested generic instantiations (e.g., `Map<i32>` returning `Optional<i32>`) and generate specialized LLVM Structs (`Map_i32`, `Optional_i32`).
 
 ## 21. Compile-Time Directives & AST Injection
+<!-- id:ast-injection -->
 - **LCMD Directive**: `//LCMD_xxx(args)` MUST be parsed into `DirectiveStmt` and trigger `AstHook`.
 - **Frontend Interpreter**: The compiler MUST have a tree-walking interpreter to execute `__compile_time_handler` during the frontend phase (NO LLVM JIT needed).
 - **AST Injection**: Strings returned from the handler MUST be re-parsed into AST nodes and injected seamlessly into the current scope.
 - **Zero Runtime Cost**: `comptime` and directive code must NEVER lower to LLVM IR. They exist strictly during compilation.
 
 ## 22. Hook Performance & On-Demand Triggering
+<!-- id:hook-performance -->
 - **No Blind Hooks**: The compiler MUST NOT trigger AST hooks for every node by default (to prevent compile-time explosion).
 - **Opt-in Mechanism**: Hooks for `ClassDeclStmt` or `FuncDeclStmt` MUST be explicitly enabled via directives (e.g., `//LCMD_enable_class_hook()`) or specific annotations.
 - **Fast Path**: If no hooks are registered or enabled, the parser MUST skip the interpreter entirely and run at maximum speed.
 
 ## 23. In-Memory Compilation (Source Buffers)
+<!-- id:in-memory-compile -->
 - **String Compilation Entry**: The compiler MUST expose a public API to compile from an in-memory string (Source Buffer), not just file paths.
 - **Virtual File Names**: In-memory sources MUST be assignable a virtual file name (e.g., `<stdin>` or `<eval>`) for use in `SourceLocation` and error reporting.
 - **No Temp Files**: The compiler MUST NOT write the in-memory source to temporary disk files during the compilation process.
 
 ## 24. Advanced Hook Context
+<!-- id:hook-context -->
 - **Contextual Params**: Hooks like `__on_class_parsed` MUST receive contextual parameters (e.g., `className`) as L-native `String`.
 - **Extensibility**: Future hooks MUST be able to pass AST metadata (like field counts or method names) as stringified arguments to L callbacks.
 - **Zero Overhead Guard**: All nodes without active hooks MUST bypass the interpreter entirely, keeping the `alloca/load/store` path untouched.
 
 ## 25. In-Memory Source & Error Reporting
+<!-- id:in-memory-diag -->
 - **Virtual Filenames**: For in-memory compilation, the compiler MUST use virtual filenames like `<stdin>` or `<eval>` in all `SourceLocation` instances.
 - **No Temp Files**: NEVER write in-memory sources to temporary disk files during the compilation process.
 - **Strict Diagnostics**: Error messages for in-memory compilation MUST format as `[ERROR] <eval>:line:col - Message`.
 
 ## 26. Lazy Evaluation (Explicit)
+<!-- id:lazy -->
 - **No Implicit Laziness**: Function arguments and variable initializations MUST be strictly evaluated (eager) by default to guarantee C-level performance and predictable side effects.
 - **Short-Circuiting**: `&&` and `||` MUST short-circuit via LLVM control flow blocks.
 - **`Lazy<T>` Type**: Laziness MUST be opted-in explicitly using the `Lazy<T>` generic type from the stdlib.
 - **Closure Execution**: `Lazy<T>::get()` MUST execute the provided closure exactly once and cache the result.
 
-## 27. REPL Environment
+## 27. REPL Environment (ORC JIT)
+<!-- id:repl -->
 - **REPL Entry**: The compiler MUST support a `--repl` flag that enters an interactive loop (`L> `).
 - **Expression Wrapping**: In REPL mode, if the user input does not contain `fun main`, the compiler MUST automatically wrap the input in `fun main() -> i32 { <input> return 0 }`.
 - **Error Recovery**: Any compilation error in REPL mode MUST print the diagnostic (`[ERROR] <repl>:...`) and continue the loop, without crashing the process.
-- **Temp Execution**: REPL execution can use a temporary executable (`repl_temp.exe`), which MUST be cleaned up (ignoring failure if locked).
+- **In-Memory Only**: REPL and `--eval` execution MUST go through LLVM ORC JIT (`LLJIT`). NEVER write `repl_temp.exe` or any temporary `.exe` for these modes.
+- **Testing Speed**: REPL tests in `run_tests.rb` MUST NOT spawn a `.exe` process per input line; JIT execution completes in-process to keep CI fast.
 
-## 28. REPL Performance & JIT Strategy
-- **Testing Speed**: REPL tests in `run_tests.rb` MUST NOT spawn a `.exe` process for every single line of input to avoid massive delays in CI.
-- **Phase 1 Execution**: Temporary `.exe` spawning via `system()` is acceptable for Phase 1, but the `repl_temp.exe` MUST be reused/overwritten rather than creating unique files per line.
-- **Future JIT**: In later phases, the REPL MUST transition to LLVM ORC JIT to eliminate disk I/O and linker overhead entirely.
+## 28. Eval Execution (ORC JIT)
+<!-- id:eval -->
+- **In-Memory Only**: `--eval '<code>'` and `eval` subcommand MUST use LLVM ORC JIT. NEVER generate temporary `.exe` files and NEVER shell out to a linker.
+- **JIT Symbol Resolution**: On Windows, `LLJIT` cannot resolve host process symbols reliably. The compiler MUST bind `l_runtime` symbols using `AbsoluteSymbols` so JIT code can call C functions (like `l_print`).
+- **Thread Safety**: Each JIT execution round MUST clone the module into a new `ThreadSafeContext` to isolate global state and prevent memory leaks across evaluations.
+- **Speed Target**: JIT execution MUST complete in milliseconds, eliminating disk I/O and external linking overhead.
 
 ## 29. Collection Literals & Trailing Blocks
+<!-- id:collections -->
 - **Array Literal Desugaring**: `[a, b, c]` MUST be desugared in the AST/Codegen phase to instantiation and `push` calls.
 - **Trailing Block Desugaring**: `obj.method { |args| ... }` MUST pass the block as an anonymous `fun` as the last argument.
 - **ASI with `]`**: The Lexer's ASI rule MUST insert a virtual `;` after `]` when a newline is encountered.
 - **Iterator Protocol**: Collections MUST provide an `each` method taking a closure `fun(T)` to allow clean iteration.
 
 ## 30. Pattern Matching (match)
+<!-- id:match -->
 - **Syntax**: `match expr { pat => { ... } ... }` → `MatchStmt` with literal/`_` arms.
 - **Patterns (phase 1)**: Int / String / Bool literals, and `_` wildcard. No enum/destructure yet.
 - **Single Evaluation**: The scrutinee expression MUST be evaluated exactly once.
 - **Codegen**: Desugar to if / else-if / else (`icmp` + `br`).
 
 ## 31. Auto-free Injection
+<!-- id:auto-free -->
 - **Track**: Locals initialized with `heap Class(...)` enter the current scope's auto-free list.
 - **Opt-out**: An explicit `defer l_free(name)` removes `name` from the list (no double free).
 - **Inject**: Before `ret` (and on block-scope exit), emit `l_free` for remaining auto-free locals after flushing `defer`s.
 
 ## 32. Safe Casts & Runtime Polymorphism (`as`)
+<!-- id:casts -->
 - **Syntax**: `val as Type` → `CastExpr`. `!expr` MUST desugar to `expr == false`.
 - **Class → class**: Pointer bitcast (no runtime check; no inheritance yet).
 - **Interface → class**: MUST compare the fat-pointer's `vtable_ptr` against the target class's vtable. The result MUST be `Optional<Type>` (never null).
 - **Chained Access**: Codegen MUST support chained field/method access on `Optional<Class>` (e.g., `opt.unwrap().field`).
 
 ## 33. Partial Classes
+<!-- id:partial-class -->
 - **Syntax**: `partial class Name { ... }` sets `ClassDeclStmt.is_partial`.
 - **Merge**: Before type-check/codegen, same-name partial parts MUST be merged into one `ClassDeclStmt` (fields + methods + interfaces).
 - **Conflicts**: Duplicate field or method names across parts MUST be a compile error. Mixing partial and non-partial for the same name MUST error.
 
 ## 34. Property Fallback Rule
+<!-- id:property -->
 - **Getter/Setter Fallback**: When accessing `u.id`:
   - First, look for `get_id()` / `set_id()` methods. If found, desugar to method calls.
   - If NOT found, fallback to looking for a real public field named `id_`. If found (and it is `pub`), desugar directly to `u.id_` (raw memory access via GEP).
@@ -184,15 +220,18 @@ alwaysApply: true
 - **Privacy**: Fallback to a field is ONLY allowed if the underlying field `id_` is marked `pub`. A private `id_` cannot be implicitly exposed via `u.id` without a `get_` method.
 
 ## 35. LCMD Hierarchical Context
+<!-- id:lcmd-context -->
 - **Context Path**: When triggering an LCMD or Hook callback, the compiler MUST pass the current hierarchical context path (e.g., `mod_name.ClassName.funcName`) to the L-side handler.
 - **AST Injection Scope**: If a directive injects AST nodes, those nodes MUST be injected into the scope corresponding to the context path (e.g., inside the current Class if the directive is inside a class body).
 
 ## 36. LCMD Context & ASI Boundaries
+<!-- id:lcmd-asi -->
 - **Contextual Path**: LCMD callbacks MUST receive the full hierarchical path (e.g., `ClassName.funcName`).
 - **Scoped Injection**: AST nodes returned by LCMD in a class body MUST be injected as members of that specific class.
 - **ASI in Injected Code**: When LCMD generates raw code strings, if statements are on the same line, explicit `;` MUST be used (because the Lexer ASI only triggers on `\n`).
 
 ## 37. Auto-Generated Clone (Deep Copy)
+<!-- id:clone -->
 - **Auto-Injection**: The compiler MUST automatically inject a `pub fun clone() -> Self` method into every class that does not explicitly define one.
 - **Clone Semantics**: `clone()` MUST allocate new memory and perform a deep copy of the object. 
 - **Field Copying**: 
@@ -202,11 +241,13 @@ alwaysApply: true
 - **Reference vs Value**: `b := a` is a reference copy. `b := a.clone()` is a deep value copy.
 
 ## 38. Clone Implementation Details (Phase 1)
+<!-- id:clone-phase1 -->
 - **Phase 1 Strategy**: For pure data classes (only primitives), `clone()` MUST use LLVM `memcpy` (or direct bitwise copy) for maximum performance.
 - **Complex Types (Future)**: When classes contain `String`, `Array`, or nested classes, the compiler MUST upgrade `clone()` to recursively call their `clone()` methods (deep copy). Do NOT use raw `memcpy` for pointers.
 - **Compiler Generated Flag**: Automatically injected `clone()` functions MUST be marked with `is_compiler_generated = true`.
 
 ## 39. Global Variables
+<!-- id:globals -->
 - **Scope**: Variables declared at the module top-level are Global Variables.
 - **LLVM Mapping**: Global variables MUST generate `llvm::GlobalVariable`. NEVER use stack `alloca` for them.
 - **Initialization**: Global variables MUST be initialized at compile-time with LLVM Constants (literals or `const` expressions).
@@ -214,6 +255,7 @@ alwaysApply: true
 - **Mutability & `:=`**: At the global scope, `:=` implies an immutable `constd` (runtime initialized, then locked). Mutable globals MUST use explicit type declarations (e.g., `i32 global_count = 0`).
 
 ## 40. Lambda Expressions & Function Types
+<!-- id:lambda -->
 - **Lambda Syntax**: `|args| expr` or `|args| { ... }` generates a `LambdaExpr`.
 - **Desugaring**: Lambdas without captures MUST be desugared into hidden global functions named `__lambda_N` and treated as raw function pointers.
 - **Type Inference**: `:=` MUST infer Lambda types as `fun(Args) -> Ret`.
@@ -221,16 +263,19 @@ alwaysApply: true
 - **Trailing Blocks**: Consistent with `each`, trailing blocks default to `fun(...) -> void` unless specified otherwise.
 
 ## 41. Capturing Lambdas (Phase 2)
+<!-- id:lambda-capture -->
 - **Context Struct**: Capturing lambdas MUST generate a hidden struct `__LambdaCtx_N` holding pointers to captured variables.
 - **Implicit Parameter**: The generated `__lambda_N` function MUST take the Context pointer (`i8*`) as its implicit first parameter.
 - **Local Invocation**: Calling a captured lambda locally MUST pass the associated Context pointer.
 - **Type System Restriction (CRITICAL)**: A capturing lambda CANNOT be passed as a raw `fun(...)` pointer. It must only be invoked directly or passed as an explicitly recognized closure object.
 
 ## 42. Closure Integration & Data Race Refinement
+<!-- id:closure-integration -->
 - **Array.each Desugaring (Phase 2)**: When `arr.each(|x| ...)` is called with an inline Lambda (trailing block), Codegen MUST NOT call the stdlib `each` method directly. Instead, it MUST inline-desugar it into an index-based `while` loop. (Do NOT implement fat-closure ABI yet).
 - **Data Race Scope**: The `sync` block requirement for mutable `!` variables ONLY applies to `spawn` (multi-threaded) blocks. Single-threaded closures modifying `!` variables MUST NOT trigger the data race error.
 
 ## 43. Increment & Decrement (`++` / `--`)
+<!-- id:inc-dec -->
 - **Syntax**: Support both Prefix (`++i`, `--i`) and Postfix (`i++`, `i--`).
 - **AST Desugaring**: 
   - Prefix: `++i` desugars to `i = i + 1`, and returns the **new** value.
@@ -239,29 +284,34 @@ alwaysApply: true
 - **Expression vs Statement**: Allow these to be used both as standalone statements and inside expressions.
 
 ## 44. Range Loops & Intermediate Auto-free
+<!-- id:range-loop -->
 - **Range Syntax**: `for i in a..b` MUST be desugared into a `while i < b` loop (half-open range, excluding `b`).
 - **Intermediate Auto-free**: Objects created as intermediate results (e.g., the result of `String + String`) MUST be tracked and auto-freed at the end of the current scope/statement if they are not returned or stored.
 - **Memory Counter**: The C runtime MUST expose `l_get_alloc_count()` for leak testing and debugging.
 
 ## 45. Multi-File Compilation & Linking
+<!-- id:multi-file -->
 - **CLI Input**: The compiler MUST accept multiple `.l` files via `-o output.exe file1.l file2.l ...`.
 - **Module Cache**: When processing `import`, the compiler MUST use a module cache to prevent re-parsing the same file multiple times (avoiding duplicate ASTs and symbol collisions).
 - **Single LLVM Module**: All parsed `.l` files MUST be merged into exactly ONE `llvm::Module` for Codegen.
 - **Linking Driver**: After generating the `.o` file, the compiler driver MUST invoke the system linker (Clang/GCC) to link the `.o` with `l_runtime.a` to produce the final executable.
 
 ## 46. Arena Allocation (Memory Pools)
+<!-- id:arena -->
 - **Arena Syntax**: `a := arena(size)` allocates a bump-allocator block.
 - **Allocation**: `a.new(Class)` or `a.alloc(size)` allocates inside the arena block (do NOT call standard `l_alloc`).
 - **Lifecycle**: When the arena variable goes out of scope, `l_arena_free()` MUST be called exactly once. Objects allocated inside the arena MUST NOT be added to the auto-free list (prevent double-free).
 - **Escape Analysis (Critical)**: Values returned from an arena scope MUST be safely copied to the standard heap (or stack), so they remain valid after `l_arena_free()` is called.
 
 ## 47. Template Strings (String Interpolation)
+<!-- id:string-interp -->
 - **Syntax**: `"Hello {name}!"` inside double quotes.
 - **AST Desugaring**: Parser MUST desugar the string into a `+` chain of `StringLiteral` and `Expr` nodes.
 - **Implicit Conversion**: If the evaluated expression is a primitive (`i32`, `f64`, `bool`), Codegen MUST automatically call runtime conversion functions (e.g., `l_int_to_str`) before concatenation.
 - **Fallback Rule**: If the `{...}` does not contain a valid expression (e.g., `//LCMD_` raw source code or unmatched braces), the Parser MUST fallback to treating it as a plain string literal (no interpolation).
 
 ## 48. Implicit Numeric Type Promotion
+<!-- id:numeric-promotion -->
 - **Hierarchy**: `i32` < `i64` < `f64`. 
 - **Promotion Rule**: In binary operations (`+`, `-`, `*`, `/`), if the operands have different numeric types, the narrower type MUST be promoted to match the wider type.
 - **LLVM Instructions**: Codegen MUST automatically insert `sext` (for `i32` to `i64`) and `sitofp` (for integer to `f64`) before generating the arithmetic instruction.
@@ -269,6 +319,7 @@ alwaysApply: true
 - **Inference Default**: `:=` integer literals default to `i32` unless explicitly typed as `i64`.
 
 ## 49. Destructuring Assignment (Class / Struct)
+<!-- id:destructure -->
 - **Syntax**: `(a, b) := expr` / `(a!, b!) := expr` — parentheses, ≥2 bindings, optional per-binding `!`, then `:=`.
 - **AST**: `DestructureDeclStmt` with `DestructureBinding{name, is_mutable}` list + RHS `init`.
 - **RHS**: Must be a class/struct value (Phase 1). No standalone Tuple type yet.
@@ -277,6 +328,7 @@ alwaysApply: true
 - **Mutability**: Default immutable bindings; `name!` marks that binding mutable (same `!` rules as `:=`).
 
 ## 50. Variant (Dynamic Tagged Value)
+<!-- id:variant -->
 - **Stdlib**: `stdlib/variant.l` — `class Variant { i32 type_tag_; ptr data_ }` (no GC).
 - **Tags**: `1 = i32`, `2 = String` (stores `c_str` pointer in a heap `ptr` cell).
 - **Factories**: Free functions `from_i32` / `from_string` returning `Variant`. Call site sugar: `Variant.from_i32(x)` / `Variant.from_string(s)`.
@@ -285,21 +337,25 @@ alwaysApply: true
 - **Heap cells**: Factories use `l_alloc` + `l_store_i32` / `l_store_ptr`; reads use `l_load_i32` / `l_load_ptr` from `stdlib/memory.l`.
 
 ## 51. Performance Benchmarks (Separate from Unit Tests)
+<!-- id:benchmarks -->
 - **Isolation**: Performance tests MUST live in `benchmarks/` and MUST NOT be run in `tests/run_tests.rb`.
 - **Compilation**: Benchmarks MUST always be compiled with `-O3`.
 - **Execution**: A separate Ruby script `benchmarks/run_bench.rb` MUST measure wall-clock time using `Process.clock_gettime`.
 - **Metric**: Measure execution time of heavy loops to verify zero-cost abstractions.
 
 ## 52. Type Preservation in Assignment & Inference
+<!-- id:type-preservation -->
 - **No Implicit Truncation**: When assigning an `i64` to a variable or field, Codegen MUST preserve the full 64-bit width. NEVER truncate to `i32` unless an explicit `as i32` cast is used.
 - **Inference from RHS**: When `:=` infers a type from an RHS that evaluates to `i64`, the resulting variable MUST be `i64`.
 
 ## 53. Result Type & Multi-Generic Monomorphization
+<!-- id:result-type -->
 - **No Exceptions**: L uses `Result<T, E>` for recoverable errors. Do NOT generate LLVM exception handling (`invoke`/`landingpad`).
 - **Multi-Generic Mangled Names**: Generic types with multiple parameters MUST mangle their names by joining type arguments (e.g., `Result<i32, String>` -> `Result_i32_String`).
 - **Result Layout**: `Result<T, E>` MUST be compiled into a flat LLVM struct: `{ i1, T, E }`, maintaining value semantics.
 
 ## 54. Try Operator (`?`) & Early Return
+<!-- id:try-operator -->
 - **Syntax & Desugaring**: `expr?` MUST evaluate `expr` (which returns a `Result`). 
 - **Control Flow**: Split into `SuccessBB` and `ErrBB`. 
 - **Err Branch**: In `ErrBB`, extract `err_val_`, construct the enclosing function's `Result` (with `is_ok = false`), flush the `defer` stack for the current scope, and generate `CreateRet`.
@@ -307,244 +363,305 @@ alwaysApply: true
 - **Type Check**: `?` is ONLY allowed inside functions returning `Result<T, E>`. The `E` type must strictly match.
 
 ## 55. OS-Level Concurrency Implementation
+<!-- id:os-concurrency -->
 - **Native Threading**: `spawn` MUST use native OS APIs (`CreateThread` on Windows, `pthread_create` on Unix). NEVER use C++ `std::thread`.
 - **Global Mutex**: `sync` currently maps to a global C runtime mutex (`l_mutex_global`). Future versions may transition to fine-grained locking.
 - **Cleanup on Sync**: Early returns inside a `sync` block MUST invoke `finishCleanups` to unlock the mutex.
 - **Phase 1 Join Strategy**: In Phase 1, `spawn` MUST implicitly call `l_thread_join` immediately after thread creation to ensure deterministic testing (until async runtime is built).
 
 ## 56. Lifecycle Hooks (__init / __deinit)
+<!-- id:lifecycle-hooks -->
 - **Module Hooks**: `fun __init()` and `fun __deinit()` MUST be treated as special module-level hooks, not ordinary functions.
 - **Hidden Wrappers**: Codegen MUST generate hidden `__l_global_init` and `__l_global_deinit` functions.
 - **Main Injection**: `__l_global_init` MUST be called at the very beginning of `main`. 
 - **Deinit Injection**: `__l_global_deinit` MUST be called before EVERY `return` instruction in `main`, including early returns from `?` and implicit void returns.
 
 ## 57. Auto-Generated `to_string()`
+<!-- id:to-string -->
 - **Auto-Injection**: If a class does not define `to_string()`, the compiler MUST inject `pub fun to_string() -> String`.
 - **Exclusions**: DO NOT inject into the `String` class itself, nor into generic template declarations. 
 - **Dependency Check**: If the `String` class is not imported or available in the current module, DO NOT inject `to_string()` (prevents circular dependencies and test failures).
 - **Format**: Outputs `ClassName { field1: val1, field2: val2 }`. Supported types: `i32`, `i64`, `bool`, `String`. Other objects default to `<Object>`.
 
 ## 58. Concurrency Validation (Race Detection)
+<!-- id:race-detection -->
 - **Validation Requirement**: Multi-threaded tests MUST NOT rely solely on the final output value to prove safety.
 - **Runtime Assertions**: The C runtime (`l_mutex_lock` / `l_mutex_unlock`) MUST be able to maintain an internal atomic counter (`lock_count`, `unlock_count`, `current_owners`).
 - **Phase 1 Validation Strategy**: Tests MUST verify `lock_count == unlock_count` and `lock_count == expected_operations` to prove that the mutex was actually engaged.
 - **Expected Result**: If 10 threads x 10,000 loops, `global_counter` MUST equal 100,000, AND the lock counter MUST equal 100,000.
 
 ## 59. Dynamic Library Export (`--shared`)
+<!-- id:shared-lib -->
 - **CLI Flag**: Support `--shared` to compile L code into a `.dll` (Windows) or `.so` (Linux).
 - **Symbol Export**: `pub fun` functions MUST be exported with `ExternalLinkage` and the OS-specific export attribute (e.g., `__declspec(dllexport)` on Windows).
 - **Runtime Linking**: The `l_runtime` (C runtime) MUST be statically linked into the shared library to make it self-contained.
 - **Calling Convention**: Exported functions MUST use standard C ABI to be accessible from Python (`ctypes`), Ruby (`Fiddle`), C/C++, etc.
 
 ## 60. Opaque Pointer FFI & Ownership Transfer
+<!-- id:ffi-ownership -->
 - **Zero-overhead Cast**: `Class as ptr` and `ptr as Class` MUST be compiled to a zero-cost LLVM `bitcast` (or no-op if types match). No runtime checks.
 - **Ownership Transfer (Critical)**: When a heap-allocated local object is cast to `ptr` and `return`ed, it MUST be removed from the auto-free list. The ownership is transferred to the external caller.
 - **External Deallocation**: The external language (e.g., Python/Ruby) is responsible for calling an exported `destroy` function to `l_free` the pointer.
 
-## 61. ORC JIT Execution (REPL & Eval)
-- **In-Memory Only**: `--repl` and `--eval` MUST use LLVM ORC JIT (`LLJIT`). NEVER generate temporary `.exe` files for these modes.
-- **JIT Symbol Resolution**: On Windows, `LLJIT` cannot resolve host process symbols reliably. The compiler MUST bind `l_runtime` symbols using `AbsoluteSymbols` to allow JIT-executed code to call C functions (like `l_print`).
-- **Thread Safety**: Each JIT execution round MUST clone the module into a new `ThreadSafeContext` to isolate global state and prevent memory leaks across evaluations.
-- **Speed Target**: JIT execution MUST complete in milliseconds, eliminating the overhead of disk I/O and external linking.
-
-## 62. Generic Constraints & Type Inference
+## 61. Generic Constraints & Type Inference
+<!-- id:generic-constraints -->
 - **Constraint Check**: When calling a generic function (e.g., `func<T: Interface>`), the frontend MUST verify that the deduced concrete type implements the required interface. If not, throw a compile error.
 - **Body Access**: Inside a generic function, methods can ONLY be called on `T` if `T` has a corresponding interface bound. Unbounded `T` cannot access arbitrary methods.
 - **Monomorphization**: Constraints do NOT alter codegen. Specialized functions (e.g., `func_ClassName`) are still generated based on `LinkOnceODR`.
 - **Type Inference**: `:=` MUST correctly infer class instance types from `NewExpr` (e.g., `p := Point(1)` infers `Point`, not `i32`).
 
-## 63. Dynamic Dispatch & VTable Generation
+## 62. Dynamic Dispatch & VTable Generation
+<!-- id:vtable -->
 - **Implicit Boxing**: Passing a concrete class instance to an interface parameter MUST automatically box it into a fat pointer `{ data_ptr, vtable_ptr }`.
 - **VTable Layout**: The `vtable` MUST be a global constant array of function pointers.
 - **Dynamic Call (No Static Binding)**: Calling an interface method (e.g., `r.read_value()`) MUST extract the function pointer via GEP on `vtable_ptr`, then `call` it. NEVER generate a direct static call to the concrete class method (`Point_read_value`).
 - **Implicit `this`**: The `data_ptr` from the fat pointer MUST be passed as the implicit first argument (`this`) to the dynamically called function.
 
-## 64. Virtual Table Layout & Downcasting
+## 63. Virtual Table Layout & Downcasting
+<!-- id:vtable-layout -->
 - **VTable Structure**: The `vtable` MUST start with a unique `TypeID` (i64 or ptr) at index 0. Method pointers start at index 1.
 - **Downcasting (`r as Point`)**: Interface downcasting MUST extract the `vtable_ptr`, load index 0 (`TypeID`), and `icmp eq` it with the target class's `TypeID`. 
 - **Safe Return**: The result MUST be `Optional<Point>`. If TypeID matches, return the data pointer; otherwise, return empty.
 - **Method Dispatch**: When calling methods via the fat pointer, ALWAYS add 1 to the method index (offset past the TypeID).
 
-## 65. Atomic Operations & Address-Of Operator
+## 64. Atomic Operations & Address-Of Operator
+<!-- id:atomics -->
 - **Address-Of (`&expr`)**: The `&` operator MUST return a `ptr` to a global or local variable's memory address.
 - **Atomic Runtime**: The C runtime MUST expose `l_atomic_add_i32`, `l_atomic_load_i32`, etc., using platform-native primitives (e.g., `InterlockedIncrement` or `__atomic_fetch_add`).
 - **Concurrency Exemption (CRITICAL)**: Passing the address of a mutable `!` variable to an atomic function (or `extern` C function) via `&` bypasses the compiler's `sync` data race check. This is allowed ONLY for known atomic/thread-safe functions.
 - **No Direct Atomic Writes**: Do not use `l_atomic_*` inside a `sync` block unless explicitly requested (avoiding double synchronization overhead).
 
-## 66. Multi-Type Print & Large Literal Handling
+## 65. Multi-Type Print & Large Literal Handling
+<!-- id:print-dispatch -->
 - **Print Dispatch**: Codegen MUST dispatch `print(x)` based on the LLVM type of `x` to the appropriate C runtime function (`l_print_i32`, `l_print_i64`, `l_print_f64`, `l_print_bool`, `l_print_str`). For custom classes, automatically call `to_string()` first.
 - **No Truncation (CRITICAL)**: Integer literals exceeding the `i32` range MUST be automatically parsed as `i64` constants. NEVER truncate them.
 - **Format Specifiers**: `f64` uses `%g` for clean output (stripping trailing zeros).
 
-## 67. Package Manager & Dependency Resolution
+## 66. Package Manager & Dependency Resolution
+<!-- id:package-manager -->
 - **Manifest**: Support parsing `[package]` and `[dependencies]` from `l.toml`.
 - **Vendor Lookup**: Automatically scan `vendor/<dep_name>/` for `<dep_name>.li` and `lib<dep_name>.a`.
 - **Build Integration**: Add `vendor/<dep_name>/` to the import path and pass `lib<dep_name>.a` to the system linker.
 - **Cycle Detection**: If circular dependencies exist across `l.toml` files (A -> B -> A), the compiler MUST halt and emit `[ERROR] Circular dependency detected between 'A' and 'B'`.
 
-## 68. Nested Relative Assignment (Config Syntax)
+## 67. Nested Relative Assignment (Config Syntax)
+<!-- id:config-syntax -->
 - **Syntax Desugaring**: `obj.field { .subfield = val }` MUST be desugared in the AST into `obj.field.subfield = val`.
 - **Property Fallback**: The desugared assignment MUST go through the standard Property Fallback rules (e.g., if no `set_subfield` exists, fall back to the physical `subfield_`).
 - **Error Reporting**: If the subfield does not exist on the target type, the compiler MUST throw `[ERROR] unknown property '...' on '...'`.
 - **Phase 1 Global Limitation**: Global variables currently only support primitive/constant initialization, not class instances (so `app := App()` must be local for now).
 
-## 69. Global Class Instances
+## 68. Global Class Instances
+<!-- id:global-class -->
 - **Zero-Initialization**: Global class instances MUST be emitted as zero-initialized `llvm::GlobalVariable` (via `ConstantAggregateZero`). Do NOT attempt to call constructors at global scope in LLVM.
 - **Deferred Initialization**: The actual constructor call (`Class_init`) for global instances MUST be deferred to the hidden `__l_global_init` function.
 - **Pending Initializations**: Codegen MUST maintain a `pending_global_class_inits_` list to track these instances and emit their `init` calls sequentially before `main` begins.
 
-## 70. Banned Trailing Underscores & Field Syntax
+## 69. Banned Trailing Underscores & Field Syntax
+<!-- id:no-trailing-underscore -->
 - **Syntax Ban**: User source code MUST NOT contain identifiers ending with `_`. Writing `u.age_` MUST trigger a compile error.
 - **Field Declaration**: Inside a class, `Type name` (without `fun` and without `()`) declares a physical field. DO NOT use `var`. The compiler MUST automatically append `_` under the hood (e.g., `age` -> `age_` in LLVM).
 - **Method Call**: `u.get_age()` (with parentheses) is a direct method call.
 
-## 71. Property Access Priority & Visibility
+## 70. Property Access Priority & Visibility
+<!-- id:property-visibility -->
 - **Access Resolution**: When encountering `u.age` (no parentheses):
   1. First, look for `get_age()` / `set_age()` methods. If found, desugar to method calls.
   2. If NO accessor exists, fallback to direct raw memory access (GEP + Load/Store) on the hidden physical field `age_`.
   3. Visibility Check: If falling back to the physical field, it MUST be marked `pub`. Otherwise, throw `[ERROR] Cannot access private field`.
 
-## 72. Cross-Language Callbacks (C ABI)
+## 71. Cross-Language Callbacks (C ABI)
+<!-- id:ffi-callback -->
 - **Function Pointer Passing**: Bare L function names MUST be allowed to decay to function pointers (`ptr` or `fun(...)`) when passed to `extern` C functions.
 - **Calling Convention (CRITICAL)**: All functions exposed to or invoked by external C modules MUST use `CallingConv::C`. NEVER use the default C++ calling convention.
 - **Type Safety**: The L compiler MUST check that the function signature matches the expected `fun(...)` parameter type.
 
-## 73. Identifier Boundary Exceptions
+## 72. Identifier Boundary Exceptions
+<!-- id:identifier-exceptions -->
 - **Length Check**: The "no trailing underscore" rule ONLY applies to identifiers with length > 1 (e.g., `age_`).
 - **Wildcard Exception**: A single `_` is explicitly ALLOWED and reserved as the catch-all wildcard in `match` statements.
 - **Physical Mapping Sync**: When identifiers are stripped of underscores (e.g., `age`), any runtime or stdlib indexing bases (like Map's `keys`, `values`, `occupied`) MUST be updated consistently to avoid raw string mismatches.
 
-## 74. Heterogeneous Containers & Boxing Escape
+## 73. Heterogeneous Containers & Boxing Escape
+<!-- id:iface-containers -->
 - **Array of Interfaces**: `Array<Interface>` MUST be monomorphized with the element type being the fat pointer struct `{ data_ptr, vtable_ptr }`.
 - **Fat Pointer Size**: `sizeof(T)` for interfaces MUST resolve to the size of the fat pointer (typically 16 bytes on x64) using LLVM's `DataLayout`.
 - **Boxing Escape (CRITICAL)**: When passing a newly instantiated class (`NewExpr`) into a context that stores the interface (e.g., `arr.push(Point(42))`), Codegen MUST heap-allocate the class instance (`l_alloc`) before boxing. NEVER pass a stack-allocated temporary as it will dangle.
 - **Dynamic Dispatch**: Accessing elements from `Array<Interface>` MUST extract the fat pointer and perform vtable dispatch.
 
-## 75. Array Memory Cleanup & Recursive Auto-free
+## 74. Array Memory Cleanup & Recursive Auto-free
+<!-- id:array-cleanup -->
 - **Array Owned Cleanup**: When an `Array` goes out of scope, the compiler MUST automatically inject:
   1. `l_free` on the underlying `data_` buffer.
   2. If the element type is an interface (`fat pointer`), iterate through the array and call `l_free` on each `data_ptr` (if the array owned them).
 - **Auto-free Registration**: Local arrays (`arr := Array<...>()`) MUST be registered in the auto-free list.
 - **Deep Cleanup**: Nested auto-free logic must handle arrays of heap objects safely without Double Free.
 
-## 76. Escape Analysis & Auto-Heap Promotion
+## 75. Escape Analysis & Auto-Heap Promotion
+<!-- id:closure-escape -->
 - **Closure Escape Detection**: If a capturing `LambdaExpr` is returned from its enclosing function, the compiler MUST perform escape analysis.
 - **Auto-Heap Promotion**: Escaping captured variables and their Context struct MUST be allocated on the heap via `l_alloc` instead of the stack. 
 - **Fat Closure ABI**: A returned closure MUST compile to a struct `{ fn_ptr, ctx_ptr }`. The caller must pass `ctx_ptr` as the first argument when invoking the closure.
 - **Deep Cleanup**: The owner of the escaped closure MUST eventually free both the Context struct and the promoted captured variables.
 
-## 77. Interface Extraction (`l gen-interface`)
+## 76. Interface Extraction (`l gen-interface`)
+<!-- id:gen-interface -->
 - **Extraction Rule**: Export ONLY `pub` classes, interfaces, and functions.
 - **Stripping Implementations**: Function/method bodies MUST be stripped (replaced with `;`). Private fields/methods, `extern`, `import`, and `LCMD/comptime` MUST be completely removed.
 - **Silent Dependencies**: The compiler MUST silently load necessary stdlib modules (like `array.l`) for type resolution, but they MUST NOT appear in the final `.li` output.
 - **Signature Syntax**: Signatures in `.li` MUST follow L's type-first syntax (`Type name`), NOT `name: Type`.
 
-## 78. Escaped Closures & Fat Closure ABI
+## 77. Escaped Closures & Fat Closure ABI
+<!-- id:fat-closure -->
 - **Escape Detection**: Returning a capturing `LambdaExpr` marks it as `escapes = true` and `returns_fat_closure = true`.
 - **Heap Promotion**: Escaping captured variables and their Context struct MUST be allocated via `l_alloc` on the heap. Non-escaping lambdas still use stack `alloca`.
 - **Fat ABI**: The return type of an escaped closure is a struct `{ fn_ptr, ctx_ptr }`. The caller MUST unpack this struct and pass `ctx_ptr` as the implicit first argument when calling.
 - **Type Inference for Closures**: `|| expr` MUST be lexed as `PipePipe` and parsed as a zero-argument lambda. A naked `fun()` defaults to returning `void`. If the lambda returns a value, it MUST be explicitly inferred or declared as `fun() -> i32`.
 
-## 79. Network Stack & Platform Differences
+## 78. Network Stack & Platform Differences
+<!-- id:network -->
 - **Native API**: Use native OS APIs (`Winsock2` on Windows, `sys/socket` on Unix). NEVER use external network libraries.
 - **Socket Type**: On Windows, socket handles are `SOCKET` (an opaque pointer/uintptr); on Unix they are standard `i32` file descriptors. Codegen MUST use the correct platform type or safely cast.
 - **Socket Functions**: `l_socket_create`, `l_socket_bind_listen`, `l_socket_accept`, `l_socket_connect`, `l_socket_send`, `l_socket_recv`, `l_socket_close`.
 - **Linking**: Windows links to `ws2_32`. CMake MUST automatically resolve this.
 
-## 80. String Escapes & File I/O
+## 79. String Escapes & File I/O
+<!-- id:string-escapes-file-io -->
 - **String Escapes**: The Lexer MUST natively expand `\n`, `\r`, `\t`, `\"`, and `\\` into their actual byte values during tokenization.
 - **File I/O**: The runtime MUST expose standard C `FILE*` operations via `l_file_open`, `l_file_read`, `l_file_write`, `l_file_close`.
 - **File Class**: The stdlib MUST provide `File.read_all` and `File.write_all` using L-native `String` and `Optional<String>` types for error handling.
 
-## 81. Command-Line Arguments
+## 80. Command-Line Arguments
+<!-- id:cli-args -->
 - **Main Signature**: The underlying LLVM entry point MUST always be compiled as `i32 @main(i32 %argc, i8** %argv)`.
 - **Argument Stash**: At the beginning of `main` (or `__l_global_init`), the compiler MUST call `l_init_args(argc, argv)` to stash the arguments in the C runtime.
 - **L-side Access**: `get_args() -> Array<String>` MUST be exposed via `stdlib/env.l` by iterating over `l_get_arg_count()` and `l_get_arg(i)`.
 
-## 82. Environment Variables & HTTP Client
+## 81. Environment Variables & HTTP Client
+<!-- id:env-http -->
 - **Environment Vars**: The C runtime MUST expose `l_get_env(name)` using standard `getenv`. The stdlib MUST wrap this as `get_env(name) -> Optional<String>`.
 - **HTTP Client**: A basic HTTP GET client MUST be implemented in `examples/http_client.l` using the existing TCP sockets (`l_socket_connect`, `l_socket_send`, `l_socket_recv`), passing `Connection: close`.
 - **Client/Server Testability**: The test suite MUST spin up an in-memory HTTP server (`serve_once`) and have the client query it, asserting `200 OK` and the correct body.
 
-## 83. File System API
+## 82. File System API
+<!-- id:filesystem -->
 - **Cross-platform APIs**: Implement `l_file_exists`, `l_create_dir`, `l_remove_file`, and `l_remove_dir` using OS-specific APIs (Win32 vs POSIX).
 - **Result Wrapping**: The stdlib `fs.l` MUST wrap these calls in `Result<bool, String>` to prevent silent failures and implicit nulls.
 - **Error Safety**: All fs operations must check the underlying C return codes and map them to human-readable error strings (e.g., "Permission denied").
 
-## 84. Extended Variant Types
+## 83. Extended Variant Types
+<!-- id:variant-types -->
 - **Type Tags**: `1 = i32`, `2 = String`, `3 = f64`, `4 = bool`. (Reserved `5 = Array`).
 - **Boxing**: `bool` MUST be boxed as an `i32` (0 or 1) on the heap. `f64` MUST use `l_store_f64` / `l_load_f64`.
 - **Factories & Extractors**: Provide `Variant.from_f64` / `from_bool` and safe `is_*` / `as_* -> Optional<T>` methods.
 
-## 85. Regex Engine (Phase 1)
+## 84. Regex Engine (Phase 1)
+<!-- id:regex -->
 - **Custom Engine**: The C runtime (`runtime/regex.c`) implements a custom, cross-platform mini-regex engine supporting literals, `.`, `[a-z]`, `*`, `+`, and `?`. Do NOT rely on POSIX `<regex.h>` on Windows.
 - **API**: Exposes `i32 l_regex_match(const char* pattern, const char* text)`.
 - **Stdlib**: `stdlib/regex.l` provides `contains_pattern(text, pattern) -> bool`.
 
-## 86. Time Formatting
+## 85. Time Formatting
+<!-- id:time-format -->
 - **Thread-Safe Time**: C runtime MUST use `localtime_s` (Windows) or `localtime_r` (Unix) for time conversion. NEVER use the unsafe global `localtime`.
 - **Memory Ownership**: `l_format_time` MUST allocate the result using `l_alloc` and return the pointer, allowing the L side to manage its lifecycle.
 - **API**: Expose `format_time(timestamp: i64, format: String) -> String` via `stdlib/time.l`.
 
-## 87. Process Execution & Exit Codes
+## 86. Process Execution & Exit Codes
+<!-- id:process-exec -->
 - **C Runtime**: `l_run_command` MUST use standard C `system()`.
 - **Exit Code Normalization**: On Unix, extract the real exit code using `WEXITSTATUS()`. On Windows, `system()` already returns the exit code directly.
 - **Result Semantics**: The stdlib `run_command -> Result<i32, String>` MUST only return `Err` if the process fails to start. A non-zero exit code from the command MUST still be wrapped in `Ok(exit_code)`.
 
-## 88. Static Methods
+## 87. Static Methods
+<!-- id:static-methods -->
 - **Syntax**: Support `static fun`, `pub static fun`, and `static pub fun`.
 - **No Implicit `this`**: Static methods MUST NOT receive the implicit `this` pointer in their LLVM signature.
 - **Instantiation Rule**: Static methods can be called directly via `ClassName.method()` without instantiating the class.
 - **Context Restriction**: Inside a static method, accessing instance fields or using `this` MUST trigger a compile error.
 - **Compatibility**: The existing associated function resolution (`Variant.from_i32`) MUST remain intact and be superseded by this native syntax.
 
-## 89. Stdlib Business Logic (L-Native)
+## 88. Stdlib Business Logic (L-Native)
+<!-- id:stdlib-logic -->
 - **Language Boundary**: All business logic (e.g., CLI flag parsing, string manipulations beyond raw C ABI) MUST be implemented in pure L language (`stdlib/*.l`), NOT in C.
 - **C Runtime Limit**: The C runtime is ONLY for OS-level APIs (syscalls, standard C libs like `printf`, `malloc`).
 - **CLI Flags**: `parse_flags() -> Map<String>` MUST be written in L, utilizing `String.starts_with`, `split`, and `Map`.
 
-## 90. Timer/Delay Sugar & Implicit String Conversion
+## 89. Timer/Delay Sugar & Implicit String Conversion
+<!-- id:delay-sugar -->
 - **Delay Sugar**: `delay(ms) { ... }` MUST be inlined by Codegen into `spawn { sleep(ms); body }`.
 - **Bare Block Scope**: A naked `{` block is ONLY allowed immediately after a `delay(...)` call. Do NOT greedily consume `{` in other call expressions (e.g., `if foo() {`).
 - **Implicit `String` + Primitive**: Binary `+` operations between a `String` and a primitive (like `i64`, `i32`) MUST automatically desugar into `l_str_concat` using the primitive's string conversion.
 
-## 91. Source Line Tracking & Unique IDs
+## 90. Source Line Tracking & Unique IDs
+<!-- id:source-line -->
 - **Line Counter**: The Lexer/Parser MUST track the exact current line number during the entire compilation process.
 - **Built-in Context**: Expose the current line number to L-side `comptime` and LCMD handlers.
 
-## 92. Column Tracking
+## 91. Column Tracking
+<!-- id:source-column -->
 - **Column Counter**: The Lexer MUST track the exact column number alongside the line number.
 - **Full Context**: Pass both `line` and `column` to LCMD callbacks and `comptime`.
 
-## 93. Global Monotonic Unique ID (Background)
+## 92. Global Monotonic Unique ID (Background)
+<!-- id:uid-counter-global -->
 - **Global Counter**: The compiler MUST maintain a global `unique_id_counter` (u64) that increments every time an LCMD macro or AST injection is triggered.
 
-## 94. Compile-Time Unique IDs (uid_counter)
+## 93. Compile-Time Unique IDs (uid_counter)
+<!-- id:uid-counter -->
 - **Built-in API**: Expose a built-in function `uid_counter() -> i64`.
 - **Compile-Time Only**: This function is STRICTLY evaluated during the compilation phase (inside `comptime` or LCMD handlers). 
 - **Zero Overhead**: Every time `uid_counter()` is called during compilation, the frontend MUST return the current global monotonic counter value, increment the counter, and inline the result as an LLVM `i64` constant. It MUST NOT generate any runtime function calls.
 - **Runtime Restriction**: Calling `uid_counter()` in normal runtime code MUST be rejected by the compiler (throw a compile error).
 
-## 95. Magic Context Constants (`__FILE__` / `__FUNC__` / `__LINE__`)
+## 94. Magic Context Constants (`__FILE__` / `__FUNC__` / `__LINE__`)
+<!-- id:magic-constants -->
 - **Magic Constants**: L code MUST support `__FILE__` (string), `__FUNC__` (string), and `__LINE__` (i64).
 - **Zero Overhead**: They MUST be intercepted at AST/Codegen phase and replaced with literal constants. No runtime function calls.
 - **Underscore Exception (CRITICAL)**: These specific reserved names are the ONLY allowed exception to the "no trailing underscore" rule. The Lexer MUST explicitly allow them.
 - **Comptime Support**: They MUST be resolvable inside `comptime` and LCMD handler blocks.
 
-## 96. Compile-Time Assertions & Errors
+## 95. Compile-Time Assertions & Errors
+<!-- id:comptime-assert -->
 - **`compile_error(msg)`**: A built-in function that halts compilation immediately. The error message MUST include `[ERROR] file:line:col - Compile-time error: <msg>`.
 - **`comptime_assert(cond, msg)`**: Halts compilation if `cond` is false.
 - **Context Restriction**: These functions are ONLY allowed inside `comptime` or LCMD handlers. Calling them at runtime MUST trigger a compile error.
 - **Frontend Stripping**: `comptime` blocks MUST be fully executed and stripped during the AST phase. They MUST NOT lower to LLVM IR.
 
-## 97. API Documentation Generator (`l doc`)
+## 96. API Documentation Generator (`l doc`)
+<!-- id:doc-generator -->
 - **Extraction Scope**: Extract `pub fun`, `pub class`, and `pub interface` (including `pub` fields/methods inside classes).
 - **Comment Attachment**: Capture `#` and `//` comments immediately preceding a declaration as its documentation. Ignore `//LCMD_` directives.
 - **Formatting**: Output standard Markdown with headers and signature code blocks.
 
+## 97. Implicit Delegation (Struct Embedding)
+<!-- id:delegate -->
+- **Embedded Fields**: Use `delegate TypeName` (e.g., `delegate Engine`) to declare an anonymous embedded field.
+- **Method Promotion**: When `obj.method()` is called, if `method` is not found in the class's own methods, the compiler MUST search the methods of all `delegate` fields.
+- **Conflict Resolution**: If an outer class does not define a method, but MULTIPLE delegated fields define a method with the same name, the compiler MUST throw an ambiguity error. Developers MUST use explicit syntax `obj.EmbeddedType.method()` to resolve it.
+- **Hidden This**: For an embedded method call, the implicit `this` pointer MUST be the GEP address of the delegated field.
+
+## 98. Raw Pointer Operations
+<!-- id:raw-pointer -->
+- **Dereference (`*ptr`)**: The unary `*` operator MUST be supported for raw pointers. It evaluates to the value stored at the memory address (LLVM `load`).
+- **Pointer Indexing (`ptr[i]`)**: `ptr[i]` MUST be supported as syntactic sugar for pointer arithmetic. It MUST compile directly to LLVM `GetElementPtr` (GEP) and a `load`, avoiding raw byte arithmetic.
+- **Explicit Casting**: Pointers can be cast between different types using `as` (zero-cost `bitcast`).
+- **Safety**: Dereferencing a null pointer or out-of-bounds pointer is strictly UB (undefined behavior), matching C/C++. The compiler is NOT required to insert null checks for raw pointers.
+
+## 99. Explicit Interface Implementation (No Duck Typing)
+<!-- id:iface-explicit -->
+- **Explicit Declaration**: A class MUST explicitly declare which interfaces it implements (e.g., `class User : IReader`).
+- **Full Implementation Required**: The compiler MUST enforce that ALL methods required by the interface are implemented at the class definition site. Missing methods MUST trigger a compile error immediately.
+- **No Implicit Type Matching**: Passing a class to an interface parameter is ONLY allowed if the class explicitly declared the interface.
+
+## 100. Testing Execution Boundary (CRITICAL)
+- **No Unprompted Test Execution**: The AI MUST NOT execute `ruby tests/run_tests.rb` or any compilation test suites on its own. 
+- **Human-Driven Testing**: The human operator is exclusively responsible for running the full test suite and verifying logs. The AI should only make code changes and provide static analysis.
+- **Filtered Execution Exception**: ONLY when explicitly requested by the human (e.g., "Please run the filter test to verify"), should the AI execute a specific `--filter` command.
+
 
 ## 999. AI Collaboration Discipline (CRITICAL)
+<!-- id:ai-discipline -->
 - **NO Auto-Rule Generation**: Do NOT automatically append or modify rules in `.mdc` after passing tests. 
 - **Wait for Human Architect**: Only update rules when explicitly instructed.
 - **No Duplicate Rules**: When instructed to update a rule, REPLACE the old one; do not append duplicates.
-

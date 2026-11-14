@@ -43,7 +43,7 @@ public:
 private:
   struct InterfaceInfo {
     std::vector<std::string> method_names;
-    // Method slots start at 1; slot 0 is reserved for TypeID (rule 64).
+    // Method slots start at 1; slot 0 is reserved for TypeID ([vtable-layout]).
     std::unordered_map<std::string, unsigned> method_index;
     std::unordered_map<std::string, const ast::FuncDeclStmt*> methods;
   };
@@ -65,7 +65,7 @@ private:
     std::string ir_name;        // LLVM-friendly name (Array_i32)
   };
 
-  // Property fallback (rule 70): `u.age` → get_age/set_age else physical age_.
+  // Property fallback ([property]): `u.age` → get_age/set_age else physical age_.
   enum class PropAccess { Read, Write };
   enum class PropResolveKind { Method, Field, None };
   struct PropResolve {
@@ -325,7 +325,7 @@ private:
     llvm::StructType* ctx_ty = nullptr;
   };
   std::unordered_map<std::string, ClosureLocal> closure_locals_;
-  // Locals holding an escaped fat closure value `{fn_ptr, ctx_ptr}` (rule 76).
+  // Locals holding an escaped fat closure value `{fn_ptr, ctx_ptr}` ([closure-escape]).
   // `local_types_` still stores the payload fun(...) type for call ABI.
   std::unordered_set<std::string> fat_closure_locals_;
   // Heap cells owned by an escaped fat closure (ctx + promoted captures) — free on scope exit.

@@ -39,7 +39,7 @@ Value Interpreter::evalCall(const ast::CallExpr& call) {
     return evalExpr(*a.value);
   };
 
-  // Rule 94: compile-time builtin — never a runtime LLVM call.
+  // [uid-counter]: compile-time builtin — never a runtime LLVM call.
   if (call.callee == "uid_counter") {
     if (!call.args.empty()) {
       error(call.loc, "uid_counter() takes no arguments");
@@ -47,7 +47,7 @@ Value Interpreter::evalCall(const ast::CallExpr& call) {
     }
     return Value::makeInt(takeUidCounter());
   }
-  // Rules 91–92: expose directive/comptime source position.
+  // [source-line] [source-column] expose directive/comptime source position.
   if (call.callee == "source_line") {
     if (!call.args.empty()) {
       error(call.loc, "source_line() takes no arguments");

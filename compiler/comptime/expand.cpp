@@ -20,7 +20,7 @@ bool isClassHookToggle(const std::string& command) {
 std::string runHandler(const ast::FuncDeclStmt& handler, const ast::DirectiveStmt& dir,
                        diag::DiagnosticEngine& diags) {
   Interpreter interp(&diags);
-  // Rules 91–92: directive Token/AST loc carries exact line/column from Lexer.
+  // [source-line] [source-column] directive Token/AST loc carries exact line/column from Lexer.
   interp.setSourceContext(dir.loc);
   interp.setFuncContext(handler.name);
 

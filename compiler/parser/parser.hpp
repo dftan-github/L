@@ -28,7 +28,7 @@ public:
   void registerInterfaceName(const std::string& name);
   void addAstHook(AstHook hook);
 
-  // Opt-in ClassDecl hooks (rule 22). Default false = zero interpreter cost.
+  // Opt-in ClassDecl hooks ([hook-performance]). Default false = zero interpreter cost.
   void setClassHookEnabled(bool enabled) { class_hook_enabled_ = enabled; }
   bool classHookEnabled() const { return class_hook_enabled_; }
 
@@ -74,7 +74,7 @@ private:
   void parseLambdaParamList(ast::LambdaExpr& lambda);
   ast::ExprPtr parseArrayLiteral();
   // After `foo(...)`, bare `{ ... }` is a zero-arg trailing block; after `obj.m`,
-  // require `{ |` so `obj.field { .x = 1 }` (rule 68) is not treated as a lambda.
+  // require `{ |` so `obj.field { .x = 1 }` ([config-syntax]) is not treated as a lambda.
   void attachTrailingBlockIfPresent(std::vector<ast::CallArg>& args,
                                     bool allow_bare_brace = false);
   bool maybeConsumeStmtSemicolon();
@@ -127,7 +127,7 @@ private:
   std::unordered_set<std::string> interface_names_;
   std::unordered_set<std::string> generic_type_names_;  // in-scope <T: ...>
   std::vector<AstHook> ast_hooks_;
-  // Rule 22: ClassDecl hooks are off unless //LCMD_enable_class_hook().
+  // [hook-performance]: ClassDecl hooks are off unless //LCMD_enable_class_hook().
   bool class_hook_enabled_ = false;
   // Hierarchical path stack: class / fun names → e.g. User.generate
   std::vector<std::string> context_path_;

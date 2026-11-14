@@ -1,0 +1,45 @@
+#!/bin/sh
+# L language compiler — pre-commit hook.
+#
+# Runs the full Ruby test suite before every commit. The runner is incremental
+# (MD5 fingerprints in tests/.test_cache.json), so an unchanged tree finishes in
+# well under a second; only tests whose dependencies actually changed re-run.
+#
+# Install (one line, run from the repo root):
+#   sh tools/install-hooks.sh
+#
+# Bypass for a single commit (NOT recommended):
+#   git commit --no-verify
+#
+# Requires `ruby` on PATH.
+
+set -e
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if ! command -v ruby >/dev/null 2>&1; then
+    echo "[pre-commit] ERROR: ruby not found on PATH; skipping tests." >&2
+    echo "[pre-commit] Install Ruby or commit with --no-verify." >&2
+    exit 1
+fi
+
+# The compiler binary must exist; the suite fails fast otherwise.
+compiler="build/clang-debug/compiler/l.exe"
+if [ ! -f "$compiler" ] && [ ! -f "build/clang-debug/compiler/l" ]; then
+    echo "[pre-commit] ERROR: compiler not built ($compiler)." >&2
+    echo "[pre-commit] Build it first, or commit with --no-verify." >&2
+    exit 1
+fi
+
+echo "[pre-commit] Running L test suite (incremental)..."
+
+if ruby tests/run_tests.rb; then
+    echo "[pre-commit] Tests passed."
+    exit 0
+else
+    echo "" >&2
+    echo "[pre-commit] Tests FAILED — commit aborted." >&2
+    echo "[pre-commit] Fix the failure, or bypass with: git commit --no-verify" >&2
+    exit 1
+fi

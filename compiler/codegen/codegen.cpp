@@ -49,7 +49,7 @@ std::string vtableName(const std::string& class_name, const std::string& iface) 
   return "vtable_" + class_name + "_" + iface;
 }
 
-// Logical field `age` → physical LLVM / field_index key `age_` (rule 70).
+// Logical field `age` → physical LLVM / field_index key `age_` ([no-trailing-underscore]).
 std::string physicalFieldName(const std::string& logical) {
   return logical + "_";
 }
@@ -720,6 +720,30 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {
       for (const auto& m : info->ast->methods) {
         if (m && m->name == call.method) {
           return instantiateMemberType(m->return_type, *info);
+        }
+      }
+      // [delegate]: unambiguous delegate promotion for typing (ambiguity errors at emit).
+      std::vector<const ClassInfo*> delegate_hits;
+      for (const auto& field : info->ast->fields) {
+        if (!field || !field->is_delegate || !isClassType(field->type_name)) {
+          continue;
+        }
+        const ClassInfo* emb = findClass(field->type_name);
+        if (!emb || !emb->ast) {
+          continue;
+        }
+        for (const auto& m : emb->ast->methods) {
+          if (m && m->name == call.method) {
+            delegate_hits.push_back(emb);
+            break;
+          }
+        }
+      }
+      if (delegate_hits.size() == 1) {
+        for (const auto& m : delegate_hits[0]->ast->methods) {
+          if (m && m->name == call.method) {
+            return instantiateMemberType(m->return_type, *delegate_hits[0]);
+          }
         }
       }
       return {};
@@ -1524,7 +1548,7 @@ llvm::Value* Codegen::classObjectPtr(const std::string& name) {
 Codegen::PropResolve Codegen::resolveProperty(const ClassInfo& info, const std::string& prop,
                                               PropAccess access) const {
   PropResolve out;
-  // Trailing `_` identifiers are forbidden in source (rule 70); bare `_` is not a property.
+  // Trailing `_` identifiers are forbidden in source ([no-trailing-underscore]); bare `_` is not a property.
   if (prop.size() > 1 && prop.back() == '_') {
     return out;
   }
@@ -4472,7 +4496,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   }
 
   // First-class function local: `double := |x| x * 2` / `fun(i32)->i32 f = ...`
-  // Escaped returns: `cb := get_closure()` stores fat `{fn,ctx}` (rule 76).
+  // Escaped returns: `cb := get_closure()` stores fat `{fn,ctx}` ([closure-escape]).
   if (isFunTypeName(type_name)) {
     if (!decl.init) {
       error("function variable '" + decl.name + "' requires an initializer");
@@ -5014,7 +5038,7 @@ bool Codegen::emitReturn(const ast::ReturnStmt& ret) {
   llvm::Function* fn = builder_.GetInsertBlock()->getParent();
   llvm::Value* v = nullptr;
   if (ret.value) {
-    // Rule 76: returning an escaping capturing lambda → fat closure {fn, ctx}.
+    // [closure-escape]: returning an escaping capturing lambda → fat closure {fn, ctx}.
     if (ret.value->kind() == ast::ExprKind::Lambda) {
       const auto& lam = static_cast<const ast::LambdaExpr&>(*ret.value);
       if (lam.escapes) {
@@ -5902,11 +5926,185 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
     return nullptr;
   }
 
-  // Resolve object type from Identifier local.
+  // MemberAccess / other receivers: e.g. `c.Engine.start()` (explicit delegate).
   if (call.object->kind() != ast::ExprKind::Identifier) {
-    error("method call object must be a local for now");
-    return nullptr;
+    std::string recv_ty = exprTypeOf(*call.object);
+    if (recv_ty.empty()) {
+      recv_ty = inferTypeFromExpr(*call.object);
+    }
+    if (!recv_ty.empty()) {
+      ensureTypeAvailable(recv_ty);
+    }
+    if (!isClassType(recv_ty)) {
+      error("method call object must be a class or interface value");
+      return nullptr;
+    }
+    const ClassInfo* info = findClass(recv_ty);
+    if (!info) {
+      error("unknown class in method call: " + recv_ty);
+      return nullptr;
+    }
+    llvm::Function* callee_fn = nullptr;
+    const ClassInfo* callee_info = info;
+    auto own = info->methods.find(call.method);
+    if (own != info->methods.end()) {
+      callee_fn = own->second;
+    } else if (info->ast) {
+      // Nested promotion on the field's type (same ambiguity rule).
+      struct DelegateHit {
+        std::string type_name;
+        unsigned field_idx = 0;
+        llvm::Function* fn = nullptr;
+        const ClassInfo* emb = nullptr;
+      };
+      std::vector<DelegateHit> hits;
+      for (const auto& field : info->ast->fields) {
+        if (!field || !field->is_delegate) {
+          continue;
+        }
+        if (!ensureTypeAvailable(field->type_name) || !isClassType(field->type_name)) {
+          continue;
+        }
+        const ClassInfo* emb = findClass(field->type_name);
+        if (!emb) {
+          continue;
+        }
+        auto emit = emb->methods.find(call.method);
+        if (emit == emb->methods.end()) {
+          continue;
+        }
+        const std::string phys = physicalFieldName(field->name);
+        auto fit = info->field_index.find(phys);
+        if (fit == info->field_index.end()) {
+          continue;
+        }
+        hits.push_back(DelegateHit{field->type_name, fit->second, emit->second, emb});
+      }
+      if (hits.size() >= 2) {
+        error(call.loc, "Ambiguous method '" + call.method + "': defined in both '" +
+                            hits[0].type_name + "' and '" + hits[1].type_name + "'.");
+        return nullptr;
+      }
+      if (hits.size() == 1) {
+        llvm::Value* outer = classValuePtr(*call.object, recv_ty);
+        if (!outer) {
+          return nullptr;
+        }
+        llvm::Value* this_ptr = builder_.CreateStructGEP(info->type, outer, hits[0].field_idx,
+                                                         "delegate." + hits[0].type_name);
+        callee_fn = hits[0].fn;
+        callee_info = hits[0].emb;
+        // Emit call with delegate this immediately.
+        std::vector<const ast::Expr*> ordered;
+        const ast::FuncDeclStmt* method_ast = nullptr;
+        if (callee_info->ast) {
+          for (const auto& m : callee_info->ast->methods) {
+            if (m && m->name == call.method) {
+              method_ast = m.get();
+              break;
+            }
+          }
+        }
+        if (method_ast) {
+          if (!resolveCallArgs(*method_ast, call.args, ordered)) {
+            return nullptr;
+          }
+        } else {
+          for (const ast::CallArg& a : call.args) {
+            if (!a.value) {
+              return nullptr;
+            }
+            ordered.push_back(a.value.get());
+          }
+        }
+        std::vector<llvm::Value*> call_args{this_ptr};
+        unsigned ai = 1;
+        for (const ast::Expr* arg : ordered) {
+          if (ai >= callee_fn->arg_size()) {
+            error("argument count mismatch calling " + recv_ty + "." + call.method);
+            return nullptr;
+          }
+          llvm::Type* expected = callee_fn->getFunctionType()->getParamType(ai++);
+          llvm::Value* v = emitValueForParam(*arg, expected, "");
+          if (!v) {
+            return nullptr;
+          }
+          call_args.push_back(v);
+        }
+        if (callee_fn->arg_size() != call_args.size()) {
+          error("argument count mismatch calling " + recv_ty + "." + call.method);
+          return nullptr;
+        }
+        if (callee_fn->getReturnType()->isVoidTy()) {
+          builder_.CreateCall(callee_fn, call_args);
+          return llvm::ConstantInt::get(i32Ty(), 0);
+        }
+        return builder_.CreateCall(callee_fn, call_args, "mcall");
+      }
+    }
+    if (!callee_fn) {
+      error("unknown method " + recv_ty + "." + call.method);
+      return nullptr;
+    }
+    std::vector<const ast::Expr*> ordered;
+    const ast::FuncDeclStmt* method_ast = nullptr;
+    if (callee_info->ast) {
+      for (const auto& m : callee_info->ast->methods) {
+        if (m && m->name == call.method) {
+          method_ast = m.get();
+          break;
+        }
+      }
+    }
+    if (method_ast) {
+      if (!resolveCallArgs(*method_ast, call.args, ordered)) {
+        return nullptr;
+      }
+    } else {
+      for (const ast::CallArg& a : call.args) {
+        if (!a.value) {
+          return nullptr;
+        }
+        ordered.push_back(a.value.get());
+      }
+    }
+    const bool is_static = method_ast && method_ast->is_static;
+    std::vector<llvm::Value*> call_args;
+    unsigned ai = 0;
+    if (!is_static) {
+      llvm::Value* this_ptr = classValuePtr(*call.object, recv_ty);
+      if (!this_ptr) {
+        return nullptr;
+      }
+      call_args.push_back(this_ptr);
+      ai = 1;
+    }
+    for (const ast::Expr* arg : ordered) {
+      llvm::Type* expected = callee_fn->getFunctionType()->getParamType(ai);
+      std::string expected_name;
+      const size_t param_i = is_static ? static_cast<size_t>(ai) : static_cast<size_t>(ai - 1);
+      if (method_ast && param_i < method_ast->params.size()) {
+        expected_name =
+            instantiateMemberType(method_ast->params[param_i].type_name, *callee_info);
+      }
+      ++ai;
+      llvm::Value* v = emitValueForParam(*arg, expected, expected_name);
+      if (!v) {
+        return nullptr;
+      }
+      call_args.push_back(v);
+    }
+    if (callee_fn->arg_size() != call_args.size()) {
+      error("argument count mismatch calling " + recv_ty + "." + call.method);
+      return nullptr;
+    }
+    if (callee_fn->getReturnType()->isVoidTy()) {
+      builder_.CreateCall(callee_fn, call_args);
+      return llvm::ConstantInt::get(i32Ty(), 0);
+    }
+    return builder_.CreateCall(callee_fn, call_args, is_static ? "static.call" : "mcall");
   }
+
   const auto& id = static_cast<const ast::IdentifierExpr&>(*call.object);
   auto lit = local_types_.find(id.name);
   auto vit = named_values_.find(id.name);
@@ -6032,7 +6230,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
       return nullptr;
     }
 
-    // Rule 42: Array.each + inline Lambda → while desugar (capturing-safe).
+    // [closure-integration]: Array.each + inline Lambda → while desugar (capturing-safe).
     if (call.method == "each" && info->template_name == "Array" && !call.args.empty() &&
         call.args.back().value && call.args.back().value->kind() == ast::ExprKind::Lambda) {
       return emitArrayEachInline(id.name, *info,
@@ -6040,15 +6238,70 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
     }
 
     auto mit = info->methods.find(call.method);
-    if (mit == info->methods.end()) {
+    llvm::Function* callee_fn = nullptr;
+    const ClassInfo* callee_info = info;
+    llvm::Value* this_ptr = nullptr;  // outer object or delegate field GEP
+    if (mit != info->methods.end()) {
+      callee_fn = mit->second;
+      callee_info = info;
+    } else if (info->ast) {
+      // [delegate]: promote from delegates; multiple hits → hard ambiguity error.
+      struct DelegateHit {
+        std::string type_name;
+        unsigned field_idx = 0;
+        llvm::Function* fn = nullptr;
+        const ClassInfo* emb = nullptr;
+      };
+      std::vector<DelegateHit> hits;
+      for (const auto& field : info->ast->fields) {
+        if (!field || !field->is_delegate) {
+          continue;
+        }
+        if (!ensureTypeAvailable(field->type_name) || !isClassType(field->type_name)) {
+          continue;
+        }
+        const ClassInfo* emb = findClass(field->type_name);
+        if (!emb) {
+          continue;
+        }
+        auto emit = emb->methods.find(call.method);
+        if (emit == emb->methods.end()) {
+          continue;
+        }
+        const std::string phys = physicalFieldName(field->name);
+        auto fit = info->field_index.find(phys);
+        if (fit == info->field_index.end()) {
+          error(call.loc, "delegate field layout missing for '" + field->type_name + "'");
+          return nullptr;
+        }
+        hits.push_back(DelegateHit{field->type_name, fit->second, emit->second, emb});
+      }
+      if (hits.size() >= 2) {
+        error(call.loc, "Ambiguous method '" + call.method + "': defined in both '" +
+                            hits[0].type_name + "' and '" + hits[1].type_name + "'.");
+        return nullptr;
+      }
+      if (hits.size() == 1) {
+        llvm::Value* outer = classObjectPtr(id.name);
+        if (!outer) {
+          return nullptr;
+        }
+        // `this` must be the delegated field address, not the outer object.
+        this_ptr = builder_.CreateStructGEP(info->type, outer, hits[0].field_idx,
+                                            "delegate." + hits[0].type_name);
+        callee_fn = hits[0].fn;
+        callee_info = hits[0].emb;
+      }
+    }
+    if (!callee_fn) {
       error("unknown method " + lit->second + "." + call.method);
       return nullptr;
     }
     // Prefer signature reorder when the method AST is available.
     std::vector<const ast::Expr*> ordered;
     const ast::FuncDeclStmt* method_ast = nullptr;
-    if (info->ast) {
-      for (const auto& m : info->ast->methods) {
+    if (callee_info->ast) {
+      for (const auto& m : callee_info->ast->methods) {
         if (m && m->name == call.method) {
           method_ast = m.get();
           break;
@@ -6077,19 +6330,22 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
     std::vector<llvm::Value*> call_args;
     unsigned ai = 0;
     if (!is_static) {
-      llvm::Value* self = classObjectPtr(id.name);
-      if (!self) {
+      if (!this_ptr) {
+        this_ptr = classObjectPtr(id.name);
+      }
+      if (!this_ptr) {
         return nullptr;
       }
-      call_args.push_back(self);
+      call_args.push_back(this_ptr);
       ai = 1;
     }
     for (const ast::Expr* arg : ordered) {
-      llvm::Type* expected = mit->second->getFunctionType()->getParamType(ai);
+      llvm::Type* expected = callee_fn->getFunctionType()->getParamType(ai);
       std::string expected_name;
       const size_t param_i = is_static ? static_cast<size_t>(ai) : static_cast<size_t>(ai - 1);
       if (method_ast && param_i < method_ast->params.size()) {
-        expected_name = instantiateMemberType(method_ast->params[param_i].type_name, *info);
+        expected_name =
+            instantiateMemberType(method_ast->params[param_i].type_name, *callee_info);
       }
       ++ai;
       llvm::Value* v = emitValueForParam(*arg, expected, expected_name);
@@ -6098,15 +6354,15 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call) {
       }
       call_args.push_back(v);
     }
-    if (mit->second->arg_size() != call_args.size()) {
+    if (callee_fn->arg_size() != call_args.size()) {
       error("argument count mismatch calling " + lit->second + "." + call.method);
       return nullptr;
     }
-    if (mit->second->getReturnType()->isVoidTy()) {
-      builder_.CreateCall(mit->second, call_args);
+    if (callee_fn->getReturnType()->isVoidTy()) {
+      builder_.CreateCall(callee_fn, call_args);
       return llvm::ConstantInt::get(i32Ty(), 0);
     }
-    return builder_.CreateCall(mit->second, call_args, is_static ? "static.call" : "mcall");
+    return builder_.CreateCall(callee_fn, call_args, is_static ? "static.call" : "mcall");
   }
 
   std::vector<llvm::Value*> args;
@@ -6399,7 +6655,7 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
       return nullptr;
     }
     if (expr.escapes) {
-      // Rule 76: escaping closure — heap-allocate ctx and copy capture values into it.
+      // [closure-escape]: escaping closure — heap-allocate ctx and copy capture values into it.
       llvm::Function* alloc_fn = requireExtern("l_alloc");
       if (!alloc_fn) {
         return nullptr;
@@ -7129,7 +7385,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     return true;
   };
 
-  // Rule 94: never emit a runtime call for uid_counter (semantic should have rejected).
+  // [uid-counter]: never emit a runtime call for uid_counter (semantic should have rejected).
   if (call.callee == "uid_counter") {
     error(call.loc, "uid_counter() is only allowed in compile-time context");
     return nullptr;
@@ -7139,7 +7395,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     return nullptr;
   }
 
-  // Rule 42-style: `delay(ms) { ... }` / `delay(ms, || ...)` with inline Lambda → spawn desugar.
+  // [closure-integration] `delay(ms) { ... }` / `delay(ms, || ...)` with inline Lambda → spawn desugar.
   if (call.callee == "delay" && call.args.size() == 2 && call.args[0].value &&
       call.args[1].value && call.args[1].value->kind() == ast::ExprKind::Lambda) {
     return emitDelayInline(*call.args[0].value,

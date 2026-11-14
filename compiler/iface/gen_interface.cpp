@@ -106,6 +106,10 @@ void emitClass(std::ostringstream& out, const ast::ClassDeclStmt& cls) {
     }
     // Logical field name only (physical trailing _ is compiler-hidden).
     out << "    ";
+    if (field->is_delegate) {
+      out << "delegate " << field->type_name << "\n";
+      continue;
+    }
     if (field->is_pub) {
       out << "pub ";
     }

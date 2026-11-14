@@ -334,7 +334,7 @@ void Analyzer::checkExpr(ast::Expr& expr) {
     }
     case ast::ExprKind::Call: {
       auto& call = static_cast<ast::CallExpr&>(expr);
-      // Rule 94: uid_counter() is compile-time only (LCMD / comptime interpreter).
+      // [uid-counter]: uid_counter() is compile-time only (LCMD / comptime interpreter).
       if (call.callee == "uid_counter") {
         error(call.loc, "uid_counter() is only allowed in compile-time context");
         break;
@@ -689,7 +689,7 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
       auto& ret = static_cast<ast::ReturnStmt&>(stmt);
       if (ret.value) {
         checkExpr(*ret.value);
-        // Rule 76: returning a capturing lambda → mark escape + fat-closure ABI.
+        // [closure-escape]: returning a capturing lambda → mark escape + fat-closure ABI.
         if (ret.value->kind() == ast::ExprKind::Lambda) {
           auto& lam = static_cast<ast::LambdaExpr&>(*ret.value);
           if (!lam.captures.empty()) {
@@ -1040,7 +1040,7 @@ void Analyzer::checkPropertyAccess(const ast::MemberAccessExpr& access, bool is_
   if (!access.object || access.member.empty()) {
     return;
   }
-  // Rule 70: trailing `_` identifiers are forbidden (bare `_` is match wildcard only).
+  // [no-trailing-underscore]: trailing `_` identifiers are forbidden (bare `_` is match wildcard only).
   if (access.member.size() > 1 && access.member.back() == '_') {
     error(access.loc, "identifier ending with '_' is forbidden: '" + access.member + "'");
     return;

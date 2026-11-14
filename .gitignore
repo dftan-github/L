@@ -1,1 +1,5 @@
 build/
+
+# Test runner artifacts
+tests/.test_cache.json
+tests/test_out/

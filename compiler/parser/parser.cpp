@@ -76,7 +76,7 @@ void Parser::flushPendingInjections(ast::Module& module) {
 }
 
 void Parser::maybeRunClassHook(ast::ClassDeclStmt& cls) {
-  // Fast path: disabled → no interpreter lookup or call (rule 22).
+  // Fast path: disabled → no interpreter lookup or call ([hook-performance]).
   if (!class_hook_enabled_) {
     return;
   }
@@ -348,7 +348,7 @@ void Parser::attachTrailingBlockIfPresent(std::vector<ast::CallArg>& args,
   if (!check(ast::TokenType::LBrace)) {
     return;
   }
-  // Method trailing without parens still requires `{ |` (rule 68 relative-init).
+  // Method trailing without parens still requires `{ |` ([config-syntax] relative-init).
   // Free calls `delay(100) { ... }` allow a bare brace as a zero-arg block.
   if (!allow_bare_brace && peek(1).type != ast::TokenType::Pipe &&
       peek(1).type != ast::TokenType::PipePipe) {
@@ -594,7 +594,7 @@ bool Parser::maybeConsumeStmtSemicolon() {
   if (match(ast::TokenType::Semicolon)) {
     return true;
   }
-  // Trailing-block exprs end with '}'; ASI after '}' is suppressed (rule 4), so
+  // Trailing-block exprs end with '}'; ASI after '}' is suppressed ([asi]), so
   // allow omitting ';' when the next token starts another statement / ends the block.
   if (check(ast::TokenType::RBrace) || check(ast::TokenType::EndOfFile) ||
       check(ast::TokenType::KwReturn) || check(ast::TokenType::KwIf) ||
@@ -1465,7 +1465,7 @@ ast::StmtPtr Parser::parseDirective() {
 
   stmt->context_path = currentContextPath();
 
-  // Opt-in class-hook toggles (rule 22) — no interpreter cost by themselves.
+  // Opt-in class-hook toggles ([hook-performance]) — no interpreter cost by themselves.
   if (stmt->command == "enable_class_hook") {
     class_hook_enabled_ = true;
   } else if (stmt->command == "disable_class_hook") {
@@ -1648,6 +1648,24 @@ ast::StmtPtr Parser::parseClassDecl() {
       method->is_pub = method_pub;
       method->is_static = method_static;
       cls->methods.push_back(std::move(method));
+      continue;
+    }
+    // [delegate]: `delegate Engine` — anonymous field named after the type.
+    if (check(ast::TokenType::KwDelegate)) {
+      auto field = std::make_unique<ast::FieldDeclStmt>();
+      field->loc = peek().loc;
+      advance();  // delegate
+      field->is_delegate = true;
+      field->is_pub = true;  // promoted methods are reachable; type-named field is public
+      if (!isTypeStart()) {
+        errorAt(peek(), "expected type name after 'delegate'");
+        synchronize();
+        continue;
+      }
+      field->type_name = parseTypeName();
+      field->name = field->type_name;
+      consume(ast::TokenType::Semicolon, "expected ';' after delegate declaration");
+      cls->fields.push_back(std::move(field));
       continue;
     }
     // `pub i32 level_` / `i32 score_`

@@ -2,8 +2,18 @@
 # frozen_string_literal: true
 
 # L test runner (Ruby automation only).
+#
+# Usage:
+#   ruby tests/run_tests.rb              # smart incremental (skip unchanged PASS)
+#   ruby tests/run_tests.rb --all        # force every test, ignore cache (human)
+#   ruby tests/run_tests.rb --filter=kw  # targeted run (AI default)
+#   ruby tests/run_tests.rb --all --filter=delegate
+#
+# Policy: compiles with -O0; fail-fast on first FAIL; AI must use --filter only.
 
+require "digest"
 require "fileutils"
+require "json"
 require "open3"
 require "pathname"
 
@@ -18,6 +28,9 @@ RUN_HELLO = ROOT.join("tests", "cases", "run_hello.l")
 HELLO_WORLD = ROOT.join("tests", "cases", "hello_world.l")
 CONTROL_FLOW = ROOT.join("tests", "cases", "control_flow.l")
 CLASS_BASIC = ROOT.join("tests", "cases", "class_basic.l")
+DELEGATE_TEST = ROOT.join("tests", "cases", "delegate_test.l")
+DELEGATE_CONFLICT_TEST = ROOT.join("tests", "cases", "delegate_conflict_test.l")
+DELEGATE_CONFLICT_BAD = ROOT.join("tests", "cases", "delegate_conflict_bad.l")
 STATIC_METHOD_TEST = ROOT.join("tests", "cases", "static_method_test.l")
 STATIC_METHOD_BAD = ROOT.join("tests", "cases", "static_method_bad.l")
 INTERFACE_TEST = ROOT.join("tests", "cases", "interface_test.l")
@@ -155,6 +168,16 @@ COMPILER = ENV.fetch(
   "L_COMPILER",
   ROOT.join("build", "clang-debug", "compiler", "l.exe").to_s
 )
+COMPILER_LIB = ROOT.join(
+  "build", "clang-debug", "compiler",
+  Gem.win_platform? ? "l_compiler.lib" : "libl_compiler.a"
+)
+RUNTIME_LIB = ROOT.join(
+  "build", "clang-debug", "runtime",
+  Gem.win_platform? ? "l_runtime.lib" : "libl_runtime.a"
+)
+TEST_CACHE_PATH = ROOT.join("tests", ".test_cache.json")
+RUNNER_SOURCE = Pathname.new(__FILE__).expand_path
 
 # C runtime extern modules required by print / heap / Array / String helpers.
 def runtime_l_files
@@ -253,7 +276,10 @@ end
 
 RED = "\e[31m"
 GREEN = "\e[32m"
+YELLOW = "\e[33m"
 RESET = "\e[0m"
+
+class TestFailed < StandardError; end
 
 REQUIRED_TOKEN_TYPES = %w[
   KwConst
@@ -294,19 +320,270 @@ end
 
 def fail_test!(msg)
   warn color("FAIL: #{msg}", RED)
-  exit 1
+  raise TestFailed, msg
 end
-
 def assert!(cond, msg)
   fail_test!(msg) unless cond
 end
 
 def run_compiler(*args, stdin_data: nil)
   assert!(File.exist?(COMPILER), "compiler not found: #{COMPILER}")
+  args = args.map(&:to_s)
+  # Spec 1: E2E compile must pass -O0 (never -O3). Default CLI opt is already 0,
+  # but we still inject explicitly. CRITICAL: do NOT put -O0 before a subcommand
+  # (`run`/`build`), or argv[1] is no longer the subcommand and `run` is opened
+  # as a source file → [ERROR] cannot open module.
+  head = args[0].to_s
+  has_opt = args.any? { |a| a.match?(/\A-O[0-3]\z/) || a == "--release" }
+  skip_force_o0 =
+    %w[gen-interface doc repl eval].include?(head) ||
+    head.start_with?("--dump-") ||
+    has_opt
+  unless skip_force_o0
+    args =
+      if %w[build run].include?(head)
+        [head, "-O0", *args.drop(1)]
+      else
+        ["-O0", *args]
+      end
+  end
   stdout, stderr, status = Open3.capture3(COMPILER, *args, stdin_data: stdin_data)
   [stdout, stderr, status]
 end
 
+# --- Incremental cache / CLI helpers -----------------------------------------
+#
+# Cache shape:
+# {
+#   "files": { "rel/path": { "md5": "...", "size": N, "mtime": T }, ... },
+#   "tests": { "test_foo!": { "status":"pass", "body_md5":"...", "files":[...keys] } }
+# }
+# Fast path: size+mtime unchanged → reuse md5 (no file read).
+# If size/mtime changed → MD5; same digest still counts as unchanged (touch-only).
+
+def stable_path_key(path)
+  p = Pathname(path).expand_path
+  begin
+    p.relative_path_from(ROOT).to_s.tr("\\", "/")
+  rescue ArgumentError
+    p.to_s.tr("\\", "/")
+  end
+end
+
+def path_from_key(key)
+  p = Pathname(key)
+  p.absolute? ? p : ROOT.join(key)
+end
+
+def load_test_cache
+  return { "files" => {}, "tests" => {} } unless TEST_CACHE_PATH.exist?
+  data = JSON.parse(TEST_CACHE_PATH.read)
+  data["files"] = {} unless data["files"].is_a?(Hash)
+  data["tests"] = {} unless data["tests"].is_a?(Hash)
+  data
+rescue StandardError
+  { "files" => {}, "tests" => {} }
+end
+
+def save_test_cache(cache)
+  TEST_CACHE_PATH.write(JSON.pretty_generate(cache))
+end
+
+def deep_copy_cache(cache)
+  JSON.parse(JSON.generate(cache))
+end
+
+# Resolve current content MD5 for path; update cache["files"][key].
+# Returns md5 string, or nil if file missing.
+def ensure_file_record(path, cache)
+  cache["files"] ||= {}
+  key = stable_path_key(path)
+  p = Pathname(path)
+  unless p.file?
+    cache["files"].delete(key)
+    return nil
+  end
+  st = p.stat
+  size = st.size
+  mtime = st.mtime.to_i
+  prev = cache["files"][key]
+  if prev.is_a?(Hash) &&
+     prev["size"] == size &&
+     prev["mtime"] == mtime &&
+     prev["md5"].is_a?(String) &&
+     !prev["md5"].empty?
+    return prev["md5"] # fast skip — no MD5 I/O
+  end
+  md5 = Digest::MD5.file(p.to_s).hexdigest
+  cache["files"][key] = { "md5" => md5, "size" => size, "mtime" => mtime }
+  md5
+end
+
+def runner_method_sources
+  @runner_method_sources ||= begin
+    map = {}
+    # Normalize newlines so Windows CRLF does not churn the method-body digest.
+    text = RUNNER_SOURCE.read.gsub("\r\n", "\n")
+    text.scan(/^def (test_\w+!?)\n(.*?)(?=^def |\z)/m) do |name, body|
+      map[name] = body
+    end
+    map
+  end
+end
+
+def under_build_or_out?(path)
+  s = Pathname(path).expand_path.to_s
+  sep = File::SEPARATOR
+  s.include?("#{sep}build#{sep}") || s.include?("test_out") || s.include?("#{sep}Temp#{sep}")
+end
+
+def fingerprintable_source?(path)
+  path = Pathname(path)
+  return false unless path.file?
+  return false if under_build_or_out?(path)
+  return false if path.expand_path == TEST_CACHE_PATH.expand_path
+  # Sources only — never .exe/.o/.obj/.dll/.lib/.json cache artifacts.
+  %w[.l .li .toml .c .rb .md].include?(path.extname.downcase)
+end
+
+# Alias used by --filter matching (source fixtures only).
+def source_input_file?(path)
+  fingerprintable_source?(path)
+end
+
+def paths_referenced_by_test(name)
+  body = runner_method_sources[name.to_s] || ""
+  paths = []
+
+  # Precise: ROOT.join("tools", "check_rule_refs.rb") -> one file, not the whole repo.
+  body.scan(/ROOT\.join\(([^)]*)\)/) do |(args)|
+    parts = args.scan(/"([^"]*)"/).flatten
+    next if parts.empty?
+    paths << ROOT.join(*parts)
+  end
+
+  consts = body.scan(/\b([A-Z][A-Z0-9_]*)\b/).flatten.uniq
+  consts.each do |c|
+    next if c == "ROOT"
+    next unless Object.const_defined?(c, false)
+    v = Object.const_get(c)
+    next unless v.is_a?(Pathname)
+    if v.directory?
+      next if under_build_or_out?(v) || v.expand_path == OUT_DIR.expand_path
+      Dir.glob(v.join("**", "*").to_s).each do |f|
+        paths << Pathname(f) if fingerprintable_source?(f)
+      end
+    elsif fingerprintable_source?(v)
+      paths << v
+    end
+  end
+  # Shared runtime / stdlib .l bindings used by almost every e2e compile.
+  runtime_l_files.each { |f| paths << Pathname(f) }
+  paths.select { |p| fingerprintable_source?(p) }.uniq
+end
+
+def toolchain_paths
+  [COMPILER, COMPILER_LIB, RUNTIME_LIB].map { |p| Pathname(p) }.select(&:file?)
+end
+
+def test_file_list(name)
+  (toolchain_paths + paths_referenced_by_test(name))
+    .map { |p| Pathname(p).expand_path }
+    .select(&:file?)
+    .uniq
+    .sort_by { |p| stable_path_key(p) }
+end
+
+def test_body_md5(name)
+  Digest::MD5.hexdigest(runner_method_sources[name.to_s].to_s)
+end
+
+# True when every dependency's content matches the cached file records (fast path).
+#
+# IMPORTANT: this predicate must be SIDE-EFFECT FREE. An earlier revision called
+# `ensure_file_record` here, which rewrote `cache["files"]` on a mismatch; a test
+# that ran and passed earlier in the same session (e.g. a broad test that lists
+# ROOT as a dependency) would then refresh the shared file records, making later
+# tests look "unchanged" and skip wrongly. Compare against the loaded snapshot
+# only; `record_test_pass!` is the single writer.
+def test_can_skip?(name, entry, cache)
+  return false unless entry.is_a?(Hash) && entry["status"] == "pass"
+  body = test_body_md5(name)
+  return false unless entry["body_md5"] == body
+  files = test_file_list(name)
+  keys = files.map { |p| stable_path_key(p) }
+  return false unless Array(entry["files"]) == keys
+  cached_files = cache["files"] || {}
+  files.each do |path|
+    key = stable_path_key(path)
+    expected = cached_files.dig(key, "md5")
+    return false if expected.nil? || expected.empty?
+    actual = current_md5(path, cached_files[key])
+    return false if actual != expected
+  end
+  true
+end
+
+# MD5 of `path` without mutating any cache. Reuses the recorded md5 only when
+# size+mtime are unchanged (fast path, no file read).
+def current_md5(path, prev_record)
+  p = Pathname(path)
+  return nil unless p.file?
+  st = p.stat
+  if prev_record.is_a?(Hash) &&
+     prev_record["size"] == st.size &&
+     prev_record["mtime"] == st.mtime.to_i &&
+     prev_record["md5"].is_a?(String) &&
+     !prev_record["md5"].empty?
+    return prev_record["md5"]
+  end
+  Digest::MD5.file(p.to_s).hexdigest
+end
+
+def record_test_pass!(name, cache)
+  files = test_file_list(name)
+  keys = files.map { |p| stable_path_key(p) }
+  files.each { |path| ensure_file_record(path, cache) }
+  cache["tests"][name.to_s] = {
+    "status" => "pass",
+    "body_md5" => test_body_md5(name),
+    "files" => keys
+  }
+end
+
+def test_matches_filter?(name, filter)
+  return true if filter.nil? || filter.empty?
+  key = filter.downcase
+  return true if name.to_s.downcase.include?(key)
+  paths_referenced_by_test(name).any? do |p|
+    fingerprintable_source?(p) && p.basename.to_s.downcase.include?(key)
+  end
+end
+
+def parse_runner_args!(argv)
+  force_all = false
+  filter = nil
+  argv.each do |a|
+    case a
+    when "--all"
+      force_all = true
+    when /\A--filter=(.*)\z/
+      filter = Regexp.last_match(1)
+    when "--help", "-h"
+      puts <<~HELP
+        L test runner
+          (default)           smart incremental — skip unchanged PASS cases
+          --all               force every selected test (ignore cache)
+          --filter=keyword    only tests whose name or input path matches keyword
+      HELP
+      exit 0
+    else
+      warn color("unknown arg: #{a} (try --help)", RED)
+      exit 2
+    end
+  end
+  [force_all, filter]
+end
 def test_golden_dump_tokens!
   assert!(File.exist?(GOLDEN), "golden case not found: #{GOLDEN}")
   stdout, stderr, status = run_compiler("--dump-tokens", GOLDEN.to_s)
@@ -440,6 +717,26 @@ def test_codegen_simple_emit_llvm!
   puts "  OK codegen_simple --emit-llvm"
 end
 
+def test_rule_refs_consistent!
+  rules = ROOT.join(".cursor", "rules", "language-rules.mdc")
+  script = ROOT.join("tools", "check_rule_refs.rb")
+  assert!(File.exist?(rules), "rules file not found: #{rules}")
+  assert!(File.exist?(script), "rule-reference guard not found: #{script}")
+
+  stdout, stderr, status = Open3.capture3("ruby", script.to_s)
+  combined = "#{stdout}\n#{stderr}".gsub("\r\n", "\n").strip
+  assert!(
+    status.success?,
+    "rule references inconsistent (renumbered sections or stale anchors?)\n#{combined}"
+  )
+  assert!(
+    combined.include?("all references resolve"),
+    "unexpected guard output:\n#{combined}"
+  )
+
+  puts "  OK rule_refs (#{combined.sub(/\AOK:\s*/, '')})"
+end
+
 def test_run_hello_e2e!
   assert!(File.exist?(RUN_HELLO), "run_hello case not found: #{RUN_HELLO}")
   FileUtils.mkdir_p(OUT_DIR)
@@ -492,6 +789,59 @@ def test_class_basic_e2e!
   assert!(normalized == "30\n", "expected \"30\\n\", got #{normalized.inspect}")
 
   puts "  OK class_basic e2e"
+end
+
+def test_delegate_e2e!
+  assert!(File.exist?(DELEGATE_TEST), "delegate_test case not found: #{DELEGATE_TEST}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("delegate_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(DELEGATE_TEST))
+  assert!(status.success?, "compile delegate_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "delegate_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "delegate_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "Vroom!\n", "expected \"Vroom!\\n\", got #{normalized.inspect}")
+
+  puts "  OK delegate e2e (c.start → Engine.start via delegate GEP this)"
+end
+
+def test_delegate_conflict_e2e!
+  assert!(File.exist?(DELEGATE_CONFLICT_TEST),
+          "delegate_conflict_test not found: #{DELEGATE_CONFLICT_TEST}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("delegate_conflict_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(DELEGATE_CONFLICT_TEST))
+  assert!(status.success?,
+          "compile delegate_conflict_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "delegate_conflict_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "delegate_conflict_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "engine\nmotor\n", "expected engine/motor lines, got #{normalized.inspect}")
+
+  puts "  OK delegate conflict e2e (explicit c.Engine.start / c.Motor.start)"
+end
+
+def test_delegate_conflict_bad_rejected!
+  assert!(File.exist?(DELEGATE_CONFLICT_BAD),
+          "delegate_conflict_bad not found: #{DELEGATE_CONFLICT_BAD}")
+  stdout, stderr, status = run_compiler("--emit-llvm", *with_runtime(DELEGATE_CONFLICT_BAD))
+  assert!(!status.success?, "delegate_conflict_bad.l should fail to compile")
+  combined = "#{stdout}\n#{stderr}"
+  assert!(
+    combined.include?("Ambiguous method 'start'") &&
+      combined.include?("Engine") &&
+      combined.include?("Motor"),
+    "expected Ambiguous method diagnostic, got:\n#{combined}"
+  )
+  puts "  OK delegate_conflict_bad rejected (Ambiguous method 'start')"
 end
 
 def test_static_method_e2e!
@@ -2998,9 +3348,13 @@ def main
     test_func_call_dump_ast!
     test_func_def_dump_ast!
     test_codegen_simple_emit_llvm!
+    test_rule_refs_consistent!
     test_run_hello_e2e!
     test_control_flow_e2e!
     test_class_basic_e2e!
+    test_delegate_e2e!
+    test_delegate_conflict_e2e!
+    test_delegate_conflict_bad_rejected!
     test_static_method_e2e!
     test_static_method_bad_rejected!
     test_interface_e2e!
@@ -3105,9 +3459,84 @@ def main
     test_cli_run_e2e!
   ]
 
-  suite.each { |name| send(name) }
+  force_all, filter = parse_runner_args!(ARGV)
+  filter = nil if filter && filter.empty?
 
-  puts color("PASS (#{suite.size} tests)", GREEN)
+  $stdout.sync = true
+  $stderr.sync = true
+
+  selected = suite.select { |name| test_matches_filter?(name, filter) }
+  if selected.empty?
+    warn color("no tests matched filter=#{filter.inspect}", RED)
+    exit 2
+  end
+
+  mode = force_all ? "ALL (cache ignored)" : "INCREMENTAL (skip unchanged PASS)"
+  mode += " filter=#{filter.inspect}" if filter
+
+  cache = load_test_cache
+  # Frozen view for skip decisions. `record_test_pass!` refreshes `cache["files"]`
+  # as the session progresses; decisions must always compare against the state
+  # the session STARTED with, otherwise a test that re-ran earlier in this run
+  # silently "blesses" changed dependencies for every later test.
+  decision_cache = deep_copy_cache(cache)
+
+  passed = 0
+  failed = 0
+  skipped = 0
+  total = selected.size
+
+  puts color("Running #{total}/#{suite.size} tests — #{mode}", GREEN)
+  t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+  selected.each_with_index do |name, i|
+    n = i + 1
+    key = name.to_s
+    entry = cache["tests"][key]
+
+    if !force_all && test_can_skip?(name, decision_cache["tests"][key], decision_cache)
+      puts color("[#{n}/#{total}] [SKIP] #{name}", YELLOW)
+      skipped += 1
+      next
+    end
+
+    print color("[#{n}/#{total}] ", GREEN)
+    print "> #{name} ... "
+    $stdout.flush
+    t_case = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    begin
+      send(name)
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_case
+      puts color(format("PASS (%.1fs)", elapsed), GREEN)
+      passed += 1
+      record_test_pass!(name, cache)
+    rescue TestFailed => e
+      # Fail-fast: stop the suite on the first red failure.
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_case
+      puts color(format("[FAIL] (%.1fs)", elapsed), RED)
+      cache["tests"].delete(key)
+      save_test_cache(cache)
+      total_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
+      puts color(
+        format(
+          "STOPPED on first failure: %d passed, 1 failed, %d skipped (%.1fs)",
+          passed, skipped, total_elapsed
+        ),
+        RED
+      )
+      warn color("fail-fast: remaining tests not run", YELLOW)
+      warn e.message unless e.message.to_s.empty?
+      exit 1
+    end
+  end
+
+  save_test_cache(cache)
+
+  total_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
+  puts color(
+    format("%d passed, %d failed, %d skipped (%.1fs)", passed, failed, skipped, total_elapsed),
+    GREEN
+  )
   exit 0
 end
 

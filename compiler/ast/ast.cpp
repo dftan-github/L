@@ -57,6 +57,7 @@ const char* toString(TokenType type) {
     case TokenType::KwStatic: return "KwStatic";
     case TokenType::KwExtern: return "KwExtern";
     case TokenType::KwModule: return "KwModule";
+    case TokenType::KwDelegate: return "KwDelegate";
     case TokenType::TyI32: return "TyI32";
     case TokenType::TyI64: return "TyI64";
     case TokenType::TyF64: return "TyF64";
@@ -382,6 +383,10 @@ void ForInStmt::dump(std::ostream& out, int indent) const {
 
 void FieldDeclStmt::dump(std::ostream& out, int indent) const {
   pad(out, indent);
+  if (is_delegate) {
+    out << "FieldDeclStmt delegate " << type_name << '\n';
+    return;
+  }
   out << "FieldDeclStmt " << (is_pub ? "pub " : "") << type_name << ' ' << name << '\n';
 }
 

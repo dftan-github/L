@@ -404,6 +404,9 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "module") {
     return ast::TokenType::KwModule;
   }
+  if (text == "delegate") {
+    return ast::TokenType::KwDelegate;
+  }
   if (text == "i32") {
     return ast::TokenType::TyI32;
   }
@@ -442,7 +445,7 @@ ast::Token Lexer::lexIdentifierOrKeyword() {
 
   const std::string text(source_.substr(begin, index_ - begin));
   const ast::TokenType ty = keywordOrType(text);
-  // Rule 70/73: identifiers must not end with `_` (physical fields are compiler-hidden).
+// [no-trailing-underscore] [identifier-exceptions] Identifiers must not end with `_` (physical fields are compiler-hidden).
   // Bare `_` remains valid (match wildcard). Compile-time context macros are exceptions.
   if (ty == ast::TokenType::Identifier && text.size() > 1 && text.back() == '_') {
     if (text != "__FILE__" && text != "__FUNC__" && text != "__LINE__") {

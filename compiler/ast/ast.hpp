@@ -183,7 +183,7 @@ struct LambdaExpr : Expr {
   std::vector<StmtPtr> body;
   // Free locals referenced from the enclosing scope (filled by semantic).
   std::vector<std::string> captures;
-  // True when this capturing lambda is returned from its enclosing function (rule 76).
+  // True when this capturing lambda is returned from its enclosing function ([closure-escape]).
   bool escapes = false;
   ExprKind kind() const override { return ExprKind::Lambda; }
   void dump(std::ostream& out, int indent = 0) const override;
@@ -197,7 +197,7 @@ struct CastExpr : Expr {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
-// `++a!` / `a!++` / `--a!` / `a!--` (rule 43). Target is the lvalue without `!`.
+// `++a!` / `a!++` / `--a!` / `a!--` ([inc-dec]). Target is the lvalue without `!`.
 struct IncDecExpr : Expr {
   bool is_prefix = true;
   bool is_inc = true;  // false → decrement
@@ -239,7 +239,7 @@ struct VarDeclStmt : Stmt {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
-// One LHS name in `(a, b!) := expr` (rule 49).
+// One LHS name in `(a, b!) := expr` ([destructure]).
 struct DestructureBinding {
   std::string name;
   bool is_mutable = false;
@@ -294,7 +294,7 @@ struct FuncDeclStmt : Stmt {
   bool is_extern = false;  // C ABI: ExternalLinkage, unmangled name
   // Compiler-injected methods (e.g. auto `clone`) — body emitted by codegen, not AST.
   bool is_compiler_generated = false;
-  // True when a capturing lambda is returned — LLVM ret is fat closure {fn,ctx} (rule 76).
+  // True when a capturing lambda is returned — LLVM ret is fat closure {fn,ctx} ([closure-escape]).
   bool returns_fat_closure = false;
   std::string module_name;  // file stem; used for private mangling
   StmtKind kind() const override { return StmtKind::FuncDecl; }
@@ -356,6 +356,7 @@ struct FieldDeclStmt : Stmt {
   std::string type_name;
   std::string name;
   bool is_pub = false;  // `pub i32 level_` — required for property fallback `u.level`
+  bool is_delegate = false;  // `delegate Engine` — anonymous field; methods promote ([delegate])
   StmtKind kind() const override { return StmtKind::FieldDecl; }
   void dump(std::ostream& out, int indent = 0) const override;
 };

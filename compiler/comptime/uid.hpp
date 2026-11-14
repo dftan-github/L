@@ -4,7 +4,7 @@
 
 namespace l::comptime {
 
-// Rule 93–94: process-wide monotonic counter for compile-time uid_counter().
+// [uid-counter-global] [uid-counter] Process-wide monotonic counter for compile-time uid_counter().
 // Reset at the start of each LCMD expansion / compilation unit.
 void resetUidCounter();
 std::uint64_t peekUidCounter();
