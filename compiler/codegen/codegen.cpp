@@ -4632,7 +4632,12 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
         return true;
       }
       // Allow := from method calls / String+ / other class-typed expressions.
-      llvm::Value* v = emitExpr(*decl.init);
+      // [variant] A Variant source unboxes to String first when that's the target.
+      llvm::Value* v = emitContextualVariantUnbox(*decl.init, type_name, nullptr,
+                                                  /*immediate=*/true);
+      if (!v) {
+        v = emitExpr(*decl.init);
+      }
       if (!v) {
         return false;
       }
@@ -4820,7 +4825,11 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   llvm::AllocaInst* alloca = createEntryAlloca(fn, lty, decl.name);
   llvm::Value* init = nullptr;
   if (decl.init) {
-    init = emitExpr(*decl.init);
+    // [variant] `n := <Variant expr>` with an inferred primitive/String target.
+    init = emitContextualVariantUnbox(*decl.init, type_name, lty, /*immediate=*/true);
+    if (!init) {
+      init = emitExpr(*decl.init);
+    }
     if (!init) {
       return false;
     }
@@ -4843,6 +4852,178 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   named_values_[decl.name] = alloca;
   local_types_[decl.name] = type_name;
   return true;
+}
+
+// `print(v)` where v:Variant — dispatch on `type_tag_` and print the payload.
+// Each arm converts its payload to a C string, prints it with `l_print_str`,
+// then jumps to the shared exit block (which prints the newline).
+llvm::Value* Codegen::emitPrintVariant(const ast::Expr& arg_expr, llvm::Value* var_val,
+                                       const ast::SourceLocation& loc) {
+  (void)arg_expr;
+  const ClassInfo* vinfo = findClass("Variant");
+  const ClassInfo* sinfo = findClass("String");
+  if (!vinfo || !vinfo->type || !sinfo || !sinfo->type) {
+    error(loc, "print(Variant) requires Variant and String types");
+    return nullptr;
+  }
+  // A class value may arrive as a pointer to its storage; normalize to a value.
+  if (var_val->getType()->isPointerTy()) {
+    var_val = builder_.CreateLoad(vinfo->type, var_val, "pv.variant");
+  }
+  llvm::Value* tag = builder_.CreateExtractValue(var_val, 0, "pv.tag");
+  llvm::Value* data = builder_.CreateExtractValue(var_val, 1, "pv.data");
+  llvm::Function* print_str = requireExtern("l_print_str");
+  llvm::Function* int_str = requireExtern("l_int_to_str");
+  llvm::Function* f64_str = requireExtern("l_f64_to_str");
+  llvm::Function* load_i32 = requireExtern("l_load_i32");
+  llvm::Function* load_f64 = requireExtern("l_load_f64");
+  if (!print_str || !int_str || !f64_str || !load_i32 || !load_f64) {
+    error(loc, "print(Variant) requires runtime helpers");
+    return nullptr;
+  }
+
+  llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+  llvm::BasicBlock* i32_bb = llvm::BasicBlock::Create(globalContext(), "pv.i32", fn);
+  llvm::BasicBlock* str_bb = llvm::BasicBlock::Create(globalContext(), "pv.str", fn);
+  llvm::BasicBlock* f64_bb = llvm::BasicBlock::Create(globalContext(), "pv.f64", fn);
+  llvm::BasicBlock* bool_bb = llvm::BasicBlock::Create(globalContext(), "pv.bool", fn);
+  llvm::BasicBlock* bad_bb = llvm::BasicBlock::Create(globalContext(), "pv.bad", fn);
+  llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(globalContext(), "pv.merge", fn);
+
+  auto is_tag = [&](int want) {
+    return builder_.CreateICmpEQ(tag, llvm::ConstantInt::get(i32Ty(), want), "pv.is");
+  };
+  auto cell = [&]() { return builder_.CreateBitCast(data, ptrTy(), "pv.cell"); };
+
+  // tag 1 → i32 cell
+  builder_.CreateCondBr(is_tag(1), i32_bb, str_bb);
+  builder_.SetInsertPoint(i32_bb);
+  llvm::Value* i32_text = nullptr;
+  {
+    llvm::Value* num = builder_.CreateCall(load_i32, {cell()}, "pv.i32.val");
+    i32_text = builder_.CreateCall(int_str, {num}, "pv.i32.text");
+    builder_.CreateBr(merge_bb);
+  }
+  llvm::BasicBlock* i32_end = builder_.GetInsertBlock();
+
+  // tag 2 → String payload: data_ points at the String object.
+  builder_.SetInsertPoint(str_bb);
+  llvm::BasicBlock* str_body = llvm::BasicBlock::Create(globalContext(), "pv.str.body", fn);
+  builder_.CreateCondBr(is_tag(2), str_body, f64_bb);
+  builder_.SetInsertPoint(str_body);
+  llvm::Value* str_text = nullptr;
+  {
+    auto fit = sinfo->field_index.find("data_");
+    str_text = data;
+    if (fit != sinfo->field_index.end()) {
+      llvm::Value* gep =
+          builder_.CreateStructGEP(sinfo->type, cell(), fit->second, "pv.str.data");
+      str_text = builder_.CreateLoad(ptrTy(), gep, "pv.str.ptr");
+    }
+    builder_.CreateBr(merge_bb);
+  }
+  llvm::BasicBlock* str_end = builder_.GetInsertBlock();
+
+  // tag 3 → f64 cell
+  builder_.SetInsertPoint(f64_bb);
+  llvm::BasicBlock* f64_body = llvm::BasicBlock::Create(globalContext(), "pv.f64.body", fn);
+  builder_.CreateCondBr(is_tag(3), f64_body, bool_bb);
+  builder_.SetInsertPoint(f64_body);
+  llvm::Value* f64_text = nullptr;
+  {
+    llvm::Value* num = builder_.CreateCall(load_f64, {cell()}, "pv.f64.val");
+    f64_text = builder_.CreateCall(f64_str, {num}, "pv.f64.text");
+    builder_.CreateBr(merge_bb);
+  }
+  llvm::BasicBlock* f64_end = builder_.GetInsertBlock();
+
+  // tag 4 → bool cell (i32 0/1)
+  builder_.SetInsertPoint(bool_bb);
+  llvm::BasicBlock* bool_body = llvm::BasicBlock::Create(globalContext(), "pv.bool.body", fn);
+  builder_.CreateCondBr(is_tag(4), bool_body, bad_bb);
+  builder_.SetInsertPoint(bool_body);
+  llvm::Value* bool_text = nullptr;
+  {
+    llvm::Value* num = builder_.CreateCall(load_i32, {cell()}, "pv.bool.val");
+    llvm::Value* non_zero =
+        builder_.CreateICmpNE(num, llvm::ConstantInt::get(i32Ty(), 0), "pv.bool.nz");
+    llvm::Value* t = builder_.CreateGlobalStringPtr("true", "pv.true");
+    llvm::Value* f = builder_.CreateGlobalStringPtr("false", "pv.false");
+    bool_text = builder_.CreateSelect(toI1(non_zero), t, f, "pv.bool.text");
+    builder_.CreateBr(merge_bb);
+  }
+  llvm::BasicBlock* bool_end = builder_.GetInsertBlock();
+
+  // Unknown tag → a marker, same as the previous Optional-print behaviour.
+  builder_.SetInsertPoint(bad_bb);
+  llvm::Value* bad_text = nullptr;
+  {
+    bad_text = builder_.CreateGlobalStringPtr("[Variant]", "pv.unknown");
+    builder_.CreateBr(merge_bb);
+  }
+  llvm::BasicBlock* bad_end = builder_.GetInsertBlock();
+
+  // Single print site: all five arms merge into one C string.
+  builder_.SetInsertPoint(merge_bb);
+  llvm::PHINode* text = builder_.CreatePHI(ptrTy(), 5, "pv.text");
+  text->addIncoming(i32_text, i32_end);
+  text->addIncoming(str_text, str_end);
+  text->addIncoming(f64_text, f64_end);
+  text->addIncoming(bool_text, bool_end);
+  text->addIncoming(bad_text, bad_end);
+  builder_.CreateCall(print_str, {text});
+
+  llvm::Value* nl = builder_.CreateGlobalString("\n", "nl");
+  builder_.CreateCall(print_str, {nl});
+  return llvm::ConstantInt::get(i32Ty(), 0);
+}
+
+// `print(opt)` where opt:Optional<Variant> — payload when present, marker when empty.
+llvm::Value* Codegen::emitPrintOptionalVariant(const ast::Expr& arg_expr, llvm::Value* opt_val,
+                                               const ast::SourceLocation& loc) {
+  const std::string opt_ty = "Optional<Variant>";
+  if (!ensureTypeAvailable(opt_ty)) {
+    return nullptr;
+  }
+  const ClassInfo* oinfo = findClass(opt_ty);
+  if (!oinfo || !oinfo->type) {
+    error(loc, "print(Optional<Variant>) requires the Optional<Variant> type");
+    return nullptr;
+  }
+  if (opt_val->getType()->isPointerTy()) {
+    opt_val = builder_.CreateLoad(oinfo->type, opt_val, "pov.opt");
+  }
+  llvm::Value* has = builder_.CreateExtractValue(opt_val, 0, "pov.has");
+  llvm::Value* payload = builder_.CreateExtractValue(opt_val, 1, "pov.payload");
+
+  llvm::Function* print_str = requireExtern("l_print_str");
+  if (!print_str) {
+    return nullptr;
+  }
+  llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+  llvm::BasicBlock* some_bb = llvm::BasicBlock::Create(globalContext(), "pov.some", fn);
+  llvm::BasicBlock* none_bb = llvm::BasicBlock::Create(globalContext(), "pov.none", fn);
+  llvm::BasicBlock* exit_bb = llvm::BasicBlock::Create(globalContext(), "pov.exit", fn);
+  builder_.CreateCondBr(toI1(has), some_bb, none_bb);
+
+  // Present: the shared Variant printer (payload branch + newline).
+  builder_.SetInsertPoint(some_bb);
+  llvm::Value* some_ret = emitPrintVariant(arg_expr, payload, loc);
+  if (!some_ret) {
+    return nullptr;
+  }
+  builder_.CreateBr(exit_bb);
+
+  // Absent: an empty line, matching the previous `print("")` behaviour.
+  builder_.SetInsertPoint(none_bb);
+  llvm::Value* empty = builder_.CreateGlobalStringPtr("", "pov.empty");
+  builder_.CreateCall(print_str, {empty});
+  llvm::Value* nl = builder_.CreateGlobalString("\n", "pov.nl");
+  builder_.CreateCall(print_str, {nl});
+  builder_.CreateBr(exit_bb);
+
+  builder_.SetInsertPoint(exit_bb);
+  return llvm::ConstantInt::get(i32Ty(), 0);
 }
 
 llvm::Type* Codegen::elementTypeForPtrIndex() const {
@@ -5300,8 +5481,12 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
 // [variant] `return v` where `v : Variant` and the enclosing function
 // returns String/i32/i64/f64/bool. Lowers to `v.as_<t>()` plus a runtime tag
 // check that panics on mismatch — the return type is a promise the tag must keep.
-llvm::Value* Codegen::emitContextualVariantUnbox(const ast::Expr& expr, llvm::Type* rty) {
-  const std::string want = resolveTypeName(current_fn_return_type_);
+llvm::Value* Codegen::emitContextualVariantUnbox(const ast::Expr& expr,
+                                                 const std::string& expected_type,
+                                                 llvm::Type* rty, bool immediate) {
+  const std::string want =
+      expected_type.empty() ? resolveTypeName(current_fn_return_type_)
+                            : resolveTypeName(expected_type);
   if (want.empty() || want == "Variant") {
     return nullptr;
   }
@@ -5370,29 +5555,48 @@ llvm::Value* Codegen::emitContextualVariantUnbox(const ast::Expr& expr, llvm::Ty
   llvm::Value* has = builder_.CreateExtractValue(opt, 0, "unbox.has");
   llvm::Value* payload = builder_.CreateExtractValue(opt, 1, "unbox.val");
 
-  llvm::BasicBlock* ok_bb = llvm::BasicBlock::Create(globalContext(), "unbox.ok", cur_fn);
-  llvm::BasicBlock* bad_bb = llvm::BasicBlock::Create(globalContext(), "unbox.bad", cur_fn);
-  builder_.CreateCondBr(toI1(has), ok_bb, bad_bb);
+  auto emit_panic = [&](llvm::BasicBlock* label) -> bool {
+    builder_.SetInsertPoint(label);
+    llvm::Function* panic_fn = requireExtern("l_panic");
+    if (!panic_fn) {
+      return false;
+    }
+    llvm::Function* str_fn = requireExtern("l_str_concat");
+    llvm::Value* msg =
+        llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy()));
+    if (str_fn) {
+      llvm::Value* head = builder_.CreateGlobalStringPtr(
+          "[PANIC] Variant does not hold a ", "unbox.panic.head");
+      llvm::Value* tail = builder_.CreateGlobalStringPtr(kind.c_str(), "unbox.panic.tail");
+      msg = builder_.CreateCall(str_fn, {head, tail}, "unbox.panic.msg");
+    }
+    builder_.CreateCall(panic_fn, {msg});
+    builder_.CreateUnreachable();
+    return true;
+  };
 
-  builder_.SetInsertPoint(bad_bb);
-  llvm::Function* panic_fn = requireExtern("l_panic");
-  if (!panic_fn) {
-    return nullptr;
+  // The caller may still be mid-expression (`print(v ?? "x")`, `n := <expr>`), so
+  // the success path must continue in a block that dominates the caller's code.
+  if (immediate) {
+    // Straight-line success path plus a side panic block. The panic block is
+    // placed after the success block, and emission continues in the latter — the
+    // caller keeps building on the live terminator-free block.
+    llvm::BasicBlock* ok_bb = llvm::BasicBlock::Create(globalContext(), "unbox.ok", cur_fn);
+    llvm::BasicBlock* bad_bb = llvm::BasicBlock::Create(globalContext(), "unbox.bad", cur_fn);
+    builder_.CreateCondBr(toI1(has), ok_bb, bad_bb);
+    if (!emit_panic(bad_bb)) {
+      return nullptr;
+    }
+    builder_.SetInsertPoint(ok_bb);
+  } else {
+    llvm::BasicBlock* keep_bb = llvm::BasicBlock::Create(globalContext(), "unbox.keep", cur_fn);
+    llvm::BasicBlock* bad_bb = llvm::BasicBlock::Create(globalContext(), "unbox.bad", cur_fn);
+    builder_.CreateCondBr(toI1(has), keep_bb, bad_bb);
+    if (!emit_panic(bad_bb)) {
+      return nullptr;
+    }
+    builder_.SetInsertPoint(keep_bb);
   }
-  llvm::Function* str_fn = requireExtern("l_str_concat");
-  llvm::Value* msg = llvm::ConstantPointerNull::get(
-      llvm::cast<llvm::PointerType>(ptrTy()));
-  if (str_fn) {
-    // "[PANIC] Variant does not hold a <kind> value"
-    llvm::Value* head = builder_.CreateGlobalStringPtr("[PANIC] Variant does not hold a ",
-                                                       "unbox.panic.head");
-    llvm::Value* tail = builder_.CreateGlobalStringPtr(kind.c_str(), "unbox.panic.tail");
-    msg = builder_.CreateCall(str_fn, {head, tail}, "unbox.panic.msg");
-  }
-  builder_.CreateCall(panic_fn, {msg});
-  builder_.CreateUnreachable();
-
-  builder_.SetInsertPoint(ok_bb);
   // Primitives may need widening; String stays a pointer to the String object.
   if (rty && rty->isIntegerTy(32) && !payload->getType()->isPointerTy()) {
     payload = toI32(payload);
@@ -5436,7 +5640,8 @@ bool Codegen::emitReturn(const ast::ReturnStmt& ret) {
     // Escaping a heap local via return (often `as ptr`) must not auto-free it.
     cancelAutoFreeEscaping(*ret.value);
     // [variant] `return v` with v:Variant into a primitive/String signature.
-    llvm::Value* unboxed = emitContextualVariantUnbox(*ret.value, fn->getReturnType());
+    llvm::Value* unboxed =
+        emitContextualVariantUnbox(*ret.value, current_fn_return_type_, fn->getReturnType());
     v = unboxed ? unboxed : emitExpr(*ret.value);
     if (!v) {
       return false;
@@ -8026,8 +8231,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       // both arms merge as `%Variant` values (read-side counterpart to auto-boxing).
       if (resolveTypeName(payload_ty) == "Variant") {
         none_val = emitImplicitVariantBox(*co.right, nullptr);
-      }
-      if (!none_val) {
+      }      if (!none_val) {
         if (payload_is_class && co.right->kind() == ast::ExprKind::StringLiteral) {
           none_val = emitStringObjectPtr(*co.right);
         } else {
@@ -8161,7 +8365,8 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
           !isNumericType(lt) && !isNumericType(rt)) {
         auto toCStr = [this](llvm::Value* v, const std::string& ty,
                              const ast::Expr& e) -> llvm::Value* {
-          if (ty == "String" || (ty.empty() && exprTypeOf(e) == "String")) {
+          const std::string eff_ty = ty.empty() ? exprTypeOf(e) : ty;
+          if (eff_ty == "String") {
             ensureTypeAvailable("String");
             const ClassInfo* info = findClass("String");
             if (!info || !v) {
@@ -8171,8 +8376,21 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
             if (fit == info->field_index.end()) {
               return nullptr;
             }
+            // `Array<String>` elements travel by VALUE (e.g. `names.get(i)`), so
+            // GEP needs a stack home first — spill when the operand isn't already
+            // a pointer to the String object.
+            llvm::Value* base = v;
+            if (v->getType() != ptrTy()) {
+              if (v->getType() != info->type) {
+                return nullptr;
+              }
+              llvm::Function* cur = builder_.GetInsertBlock()->getParent();
+              llvm::AllocaInst* slot = createEntryAlloca(cur, info->type, "streq.tmp");
+              builder_.CreateStore(v, slot);
+              base = slot;
+            }
             llvm::Value* gep =
-                builder_.CreateStructGEP(info->type, v, fit->second, "streq.data");
+                builder_.CreateStructGEP(info->type, base, fit->second, "streq.data");
             return builder_.CreateLoad(ptrTy(), gep, "streq.cstr");
           }
           return v;
@@ -8472,6 +8690,16 @@ llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expec
       if (resolveFuncIrName(id.name).size() != 0 || module_->getFunction(id.name)) {
         return emitNamedFunctionPointer(id.name, expr.loc);
       }
+    }
+  }
+
+  // [variant] Contextual unbox: a `Variant` argument passed to a String /
+  // primitive formal is lowered to `arg.as_<t>()` (same rule as `return`).
+  if (!expected_type_name.empty() && expected_type_name != "Variant") {
+    llvm::Value* unboxed =
+        emitContextualVariantUnbox(expr, expected_type_name, expected, /*immediate=*/true);
+    if (unboxed) {
+      return unboxed;
     }
   }
 
@@ -8897,6 +9125,19 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
       return llvm::ConstantInt::get(i32Ty(), 0);
     }
     const std::string arg_ty = exprTypeOf(arg_expr);
+    const std::string resolved_arg_ty = resolveTypeName(arg_ty);
+    // [variant] `print(v)`: v:Variant prints its payload by tag; the Optional
+    // form prints the payload when present and a blank line when absent.
+    if (resolved_arg_ty == "Variant" || resolved_arg_ty == "Optional<Variant>") {
+      llvm::Value* v = emitExpr(arg_expr);
+      if (!v) {
+        return nullptr;
+      }
+      if (resolved_arg_ty == "Variant") {
+        return emitPrintVariant(arg_expr, v, call.loc);
+      }
+      return emitPrintOptionalVariant(arg_expr, v, call.loc);
+    }
     llvm::Value* arg = emitExpr(arg_expr);
     if (!arg) {
       return nullptr;

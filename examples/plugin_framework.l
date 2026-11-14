@@ -64,9 +64,6 @@ interface IPlugin {
 // import "plugin_api.l"
 
 class LoggerPlugin : IPlugin {
-    fun init() {
-    }
-
     fun on_start() {
         print(String("[start] logger ready"))
     }
@@ -91,9 +88,6 @@ class LoggerPlugin : IPlugin {
 // import "plugin_api.l"
 
 class AuthPlugin : IPlugin {
-    fun init() {
-    }
-
     fun on_start() {
         print(String("[start] auth ready"))
     }
@@ -153,6 +147,137 @@ class App {
     pub fun version() -> String {
         return this.get("app_version") ?? "0.1.0"
     }
+
+    // ------------------------------------------------------------------
+    // Tree-shaped properties over dotted paths.
+    //
+    // Variant only carries scalars (i32 / String / f64 / bool), so a subtree is
+    // stored as flattened dotted keys: `db.host`, `db.pool.max`, ... The path
+    // segments below walk that virtual tree without materializing nodes.
+    // ------------------------------------------------------------------
+
+    // Write one leaf: `put("db.pool.max", 16)`.
+    pub fun put(String path, Variant value) {
+        this.set(path, value)
+    }
+
+    // Read one leaf with a typed default: `i32 n = this.int_at("db.pool.max", 8)`.
+    pub fun int_at(String path, i32 fallback) -> i32 {
+        return this.get(path) ?? fallback
+    }
+
+    pub fun text_at(String path, String fallback) -> String {
+        return this.get(path) ?? fallback
+    }
+
+    // Read a whole subtree as its own flat property bag (keys keep the full path).
+    // An empty prefix means the whole tree.
+    pub fun subtree(String prefix) -> CPropertys {
+        inner := CPropertys()
+        top := prefix.length() == 0
+        dotted := prefix + "."
+        all := this.keys()
+        for key in all {
+            if top || key.starts_with(dotted) {
+                existing := this.get(key)
+                if existing.is_some() {
+                    inner.set(key, existing.unwrap())
+                }
+            }
+        }
+        return inner
+    }
+
+    // List the direct child names of a subtree: "db" -> ["host", "port", "pool"].
+    // Deeper keys contribute only their next segment, so the result is a tree level.
+    pub fun children(String prefix) -> Array<String> {
+        out := Array<String>()
+        top := prefix.length() == 0
+        dotted := prefix + "."
+        base := prefix.length() + 1
+        all := this.keys()
+        i32 n = all.len()
+        i32 j = 0
+        while j < n {
+            key := all.get(j)
+            // Root level ("" prefix) lists the first segment of every key.
+            if top || key.starts_with(dotted) {
+                offset := base
+                if top {
+                    offset = 0
+                }
+                rest := key.slice(offset, key.length() - offset)
+                dot := rest.index_of(String("."))
+                // First segment only; `dot < 0` means this key is the leaf itself.
+                seg_len := rest.length()
+                if dot >= 0 {
+                    seg_len = dot
+                }
+                name := rest.slice(0, seg_len)
+                if !contains_name(out, name) {
+                    out.push(name)
+                }
+            }
+            j = j + 1
+        }
+        return out
+    }
+
+    // Membership test for a name list.
+    fun contains_name(Array<String> names, String probe) -> bool {
+        i32 i = 0
+        while i < names.len() {
+            if names.get(i) == probe {
+                return true;
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    // Render a Variant leaf as text for the dump. Scalars only — Variant has no
+    // object tag, so anything unknown falls back to a tag marker.
+    pub fun render(Variant v) -> String {
+        if v.is_i32() {
+            return String(l_int_to_str(v.as_i32() ?? 0))
+        }
+        if v.is_string() {
+            return v.as_string() ?? String("")
+        }
+        if v.is_f64() {
+            return String(l_f64_to_str(v.as_f64() ?? 0.0))
+        }
+        if v.is_bool() {
+            bool b = v.as_bool() ?? false
+            if b {
+                return String("true")
+            }
+            return String("false")
+        }
+        return String("<unknown>")
+    }
+
+    // Recursive dump of a subtree, one "path = value" line per leaf.
+    pub fun dump(String prefix) {
+        kids := this.children(prefix)
+        for name in kids {
+            // Root level must not prepend a leading dot; deeper levels join with one.
+            child := name
+            if prefix.length() > 0 {
+                child = prefix + "." + name
+            }
+            branch := this.subtree(child)
+            if branch.len() == 0 {
+                leaf := this.get(child)
+                if leaf.is_some() {
+                    print(String("  ") + child + String(" = ") + this.render(leaf.unwrap()))
+                }
+            } else {
+                print(String("  ") + child + String("/"))
+                this.dump(child)
+            }
+        }
+    }
 }
 
 // END MODULE app_host
@@ -189,6 +314,36 @@ fun main() -> i32 {
     for p in app.plugins {
         print(p.get_name())
     }
+
+    // ---- Tree-shaped properties over dotted paths -------------------------
+    print(String("-- config tree --"))
+
+    // Write leaves; three levels deep under `db`.
+    app.put("db.host", "localhost")
+    app.put("db.port", 5432)
+    app.put("db.pool.max", 16)
+    app.put("db.pool.idle", 4)
+    app.put("http.timeout", 30)
+    app.put("http.retries", 3)
+
+    // Typed reads with defaults (a missing path yields the fallback).
+    print(app.text_at("db.host", String("none")))
+    print(app.int_at("db.pool.max", 0))
+    print(app.int_at("db.pool.missing", 8))
+
+    // Direct children of a subtree, one level only.
+    print(app.children("db").len())
+    print(app.children("db.pool").len())
+
+    // Whole subtree as its own bag (keys keep the full dotted path).
+    pool := app.subtree("db.pool")
+    print(pool.len())
+
+    // An empty prefix selects the whole tree.
+    print(app.subtree(String("")).len())
+
+    // Recursive dump of the whole tree.
+    app.dump(String(""))
     return 0
 }
 
@@ -204,5 +359,23 @@ app version: 0.1.0
 auth
 logger
 auth
+-- config tree --
+localhost
+16
+8
+3
+2
+2
+7
+  db/
+  db.port = 5432
+  db.host = localhost
+  db.pool/
+  db.pool.max = 16
+  db.pool.idle = 4
+  http/
+  http.retries = 3
+  http.timeout = 30
+  app_version = 0.1.0
 
 //*/

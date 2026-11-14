@@ -75,6 +75,8 @@ VARIANT_UNBOX_RETURN_TEST = ROOT.join("tests", "cases", "variant_unbox_return_te
 COMMENT_POLLUTION_TEST = ROOT.join("tests", "cases", "comment_pollution_test.l")
 OPTIONAL_UNWRAP_CHAIN_TEST = ROOT.join("tests", "cases", "optional_unwrap_chain_test.l")
 OPTIONAL_IFACE_CHAIN_TEST = ROOT.join("tests", "cases", "optional_iface_chain.l")
+COALESCE_EXPR_POS_TEST = ROOT.join("tests", "cases", "coalesce_expr_pos_test.l")
+ARRAY_STRING_EQ_TEST = ROOT.join("tests", "cases", "array_string_eq_test.l")
 CAST_TEST = ROOT.join("tests", "cases", "cast_test.l")
 DOWNCAST_TEST = ROOT.join("tests", "cases", "downcast_test.l")
 PARTIAL_TEST = ROOT.join("tests", "cases", "partial_test.l")
@@ -2192,6 +2194,67 @@ def test_optional_iface_chain_e2e!
   puts "  OK optional_iface_chain e2e (Optional<IPlugin>.unwrap().method() via vtable)"
 end
 
+def test_coalesce_expr_pos_e2e!
+  assert!(File.exist?(COALESCE_EXPR_POS_TEST),
+          "coalesce_expr_pos_test not found: #{COALESCE_EXPR_POS_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("coalesce_expr_pos_test.exe")
+  FileUtils.rm_f(exe)
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_VARIANT, STDLIB_MAP,
+                       STDLIB_PROPERTIES, COALESCE_EXPR_POS_TEST)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile coalesce_expr_pos_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "coalesce_expr_pos_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "coalesce_expr_pos_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "value\nRET\nvalue\nDECL\n42\n-1\nvalue\nARG\nconcat: value\nvalue\n\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # The regression produced a `sext ptr %coalesce` — the PHI must be a pointer here.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm coalesce_expr_pos failed\n#{ir_err}\n#{ir}")
+  assert!(!ir.include?("sext ptr %coalesce"),
+          "'??' on Optional<Variant> must not lower to a pointer sext")
+
+  puts "  OK coalesce_expr_pos e2e (?? in decl/arg position, print(Optional<Variant>))"
+end
+
+def test_array_string_eq_e2e!
+  assert!(File.exist?(ARRAY_STRING_EQ_TEST),
+          "array_string_eq_test not found: #{ARRAY_STRING_EQ_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("array_string_eq_test.exe")
+  FileUtils.rm_f(exe)
+
+  files = with_runtime(STDLIB_STRING, ARRAY_STRING_EQ_TEST)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile array_string_eq_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "array_string_eq_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "array_string_eq_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "true\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\n" \
+             "true\nfalse\n2\nfalse\n0\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # The regression lowered the comparison of an Array<String> element to a
+  # `getelementptr` on a `%string_String` value; it must now pass verification.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm array_string_eq_test failed\n#{ir_err}\n#{ir}")
+  assert!(!ir.include?("getelementptr inbounds nuw %string_String, %string_String %"),
+          "String equality must spill value elements before taking a field address")
+
+  puts "  OK array_string_eq e2e (Array<String> element == via l_str_eq)"
+end
+
 def test_cast_e2e!
   assert!(File.exist?(CAST_TEST), "cast_test case not found: #{CAST_TEST}")
   assert!(File.exist?(STDLIB_OPTIONAL), "stdlib optional not found: #{STDLIB_OPTIONAL}")
@@ -3583,7 +3646,25 @@ def test_cli_run_plugin_framework_e2e!
              "[start] logger ready\n[start] auth ready\n" \
              "[start] logger ready\n" \
              "auth\n" \
-             "logger\nauth\n"
+             "logger\nauth\n" \
+             "-- config tree --\n" \
+             "localhost\n" \
+             "16\n" \
+             "8\n" \
+             "3\n" \
+             "2\n" \
+             "2\n" \
+             "7\n" \
+             "  db/\n" \
+             "  db.port = 5432\n" \
+             "  db.host = localhost\n" \
+             "  db.pool/\n" \
+             "  db.pool.max = 16\n" \
+             "  db.pool.idle = 4\n" \
+             "  http/\n" \
+             "  http.retries = 3\n" \
+             "  http.timeout = 30\n" \
+             "  app_version = 0.1.0\n"
   assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
   puts "  OK l run plugin_framework.l (one-file DX, no explicit stdlib args)"
 end
@@ -3986,6 +4067,8 @@ def main
     test_comment_pollution_e2e!
     test_optional_unwrap_chain_e2e!
     test_optional_iface_chain_e2e!
+    test_coalesce_expr_pos_e2e!
+    test_array_string_eq_e2e!
     test_cast_e2e!
     test_downcast_e2e!
     test_partial_e2e!

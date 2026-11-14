@@ -54,7 +54,7 @@ pub fun parse_headers(String response) -> CPropertys {
                 name := line.slice(0, colon).trim()
                 tail := colon + 1
                 value := line.slice(tail, line.length() - tail).trim()
-                props.set(name, Variant.from_string(value))
+                props.set(name, value)
             }
             i! = i + 1
         }
@@ -65,7 +65,7 @@ pub fun parse_headers(String response) -> CPropertys {
 // Header value as text; "" when the header is absent or not a String.
 // Uses `?? ""` on the two Optional layers: the lookup and the Variant tag.
 pub fun header_text(CPropertys props, String name) -> String {
-    hit := props.get(name) ?? Variant.from_string(String(""))
+    hit := props.get(name) ?? String("")
     return hit.as_string() ?? String("")
 }
 

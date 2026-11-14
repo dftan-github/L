@@ -3,6 +3,7 @@
 // callers combine it with `??` for defaults ([coalesce]).
 
 pub class CPropertys {
+    
     Map<Variant> props
 
     fun init() {
@@ -15,5 +16,14 @@ pub class CPropertys {
 
     pub fun get(String key) -> Optional<Variant> {
         return props.get(key)
+    }
+
+    // All stored keys (order undefined). Used to enumerate subtrees by prefix.
+    pub fun keys() -> Array<String> {
+        return props.keys()
+    }
+
+    pub fun len() -> i32 {
+        return props.len()
     }
 }

@@ -44,9 +44,9 @@ pub fun tokenize(String src) -> Array<Variant> {
     while i < parts.len() {
         part := parts.get(i)
         if is_number_token(part) {
-            tokens.push(Variant.from_i32(part.to_i32()))
+            tokens.push(part.to_i32())
         } else {
-            tokens.push(Variant.from_string(part))
+            tokens.push(part)
         }
         i! = i + 1
     }

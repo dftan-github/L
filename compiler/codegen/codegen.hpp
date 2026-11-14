@@ -391,9 +391,23 @@ private:
   bool current_method_is_static_ = false;
   // Enclosing function return type name (e.g. Result<i32,String>) for `expr?`.
   std::string current_fn_return_type_;
-  // Contextual unboxing: `return v` where v:Variant and the function returns
-  // String/i32/i64/f64/bool → `v.as_<t>()`, panicking when the tag mismatches.
-  llvm::Value* emitContextualVariantUnbox(const ast::Expr& expr, llvm::Type* rty);
+  // Contextual unboxing: an expression of type `Variant` used where the
+  // context expects String/i32/i64/f64/bool → `v.as_<t>()`, panicking when the
+  // tag mismatches. `expected` is either an L type name or an LLVM type (for
+  // inferred `:=` / builtin call sites pass the name; for typed formals pass
+  // both). Returns nullptr when no unboxing applies (caller falls back).
+  llvm::Value* emitContextualVariantUnbox(const ast::Expr& expr,
+                                          const std::string& expected_type,
+                                          llvm::Type* rty,
+                                          bool immediate = false);
+  // `print(v)` where v:Variant — branch on `type_tag_` and call the matching
+  // l_print_* helper, so a dynamically tagged value prints its payload.
+  llvm::Value* emitPrintVariant(const ast::Expr& arg_expr, llvm::Value* var_val,
+                                const ast::SourceLocation& loc);
+  // `print(opt)` where opt:Optional<Variant> — same dispatch, using the
+  // Variant payload when present and a marker when the Optional is empty.
+  llvm::Value* emitPrintOptionalVariant(const ast::Expr& arg_expr, llvm::Value* opt_val,
+                                        const ast::SourceLocation& loc);
   // Logical source name for `__FUNC__` (not IR-mangled).
   std::string current_fn_name_;
   unsigned lambda_seq_ = 0;
