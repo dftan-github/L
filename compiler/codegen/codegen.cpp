@@ -623,6 +623,43 @@ std::string Codegen::methodReturnTypeOn(const std::string& recv_ty,
 }
 
 std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kind()) {
+    case ast::ExprKind::Match: {
+      // Determine the result type from the arms. `some(x)` bindings are not in
+      // `local_types_` during inference, so fall back to the payload type of the
+      // scrutinee's Optional, and treat String literals as String.
+      const auto& m = static_cast<const ast::MatchExpr&>(expr);
+      const std::string scrut = m.scrutinee ? exprTypeOf(*m.scrutinee) : std::string();
+      const bool scrut_opt = scrut.rfind("Optional<", 0) == 0;
+      const std::string payload =
+          scrut_opt ? scrut.substr(9, scrut.size() - 10) : std::string();
+      std::string fallback;
+      for (const ast::MatchBranch& br : m.branches) {
+        if (!br.value) {
+          continue;
+        }
+        if (br.value->kind() == ast::ExprKind::StringLiteral) {
+          return "String";
+        }
+        // `some(x) => x` — the arm just forwards the payload.
+        bool is_binding = false;
+        if (br.value->kind() == ast::ExprKind::Identifier) {
+          is_binding = !br.binding.empty() &&
+                       static_cast<const ast::IdentifierExpr&>(*br.value).name == br.binding;
+        }
+        const std::string ty =
+            is_binding ? payload : exprTypeOf(*br.value);
+        if (ty.empty()) {
+          continue;
+        }
+        if (ty != "ptr") {
+          return ty;
+        }
+        if (fallback.empty()) {
+          fallback = ty;
+        }
+      }
+      return fallback.empty() ? "i32" : fallback;
+    }
     case ast::ExprKind::IntLiteral:
       return "i32";
     case ast::ExprKind::FloatLiteral:
@@ -746,8 +783,12 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
     }
     case ast::ExprKind::MethodCall: {
       const auto& call = static_cast<const ast::MethodCallExpr&>(expr);
+      // Bare method call `get(i)` inside a method body = implicit `this.get(i)`.
       if (!call.object) {
-        return {};
+        if (current_class_.empty()) {
+          return {};
+        }
+        return methodReturnTypeOn(resolveTypeName(current_class_), call.method);
       }
       // Receiver type: a bare identifier may name a class (static/assoc call),
       // otherwise take the expression's own static type. Chained calls such as
@@ -760,6 +801,10 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
         return methodReturnTypeOn(recv_ty, call.method);
       }
       const auto& oid = static_cast<const ast::IdentifierExpr&>(*call.object);
+      // `this.method(...)` inside a method body: resolve against the enclosing class.
+      if (oid.name == "this" && !current_class_.empty()) {
+        return methodReturnTypeOn(resolveTypeName(current_class_), call.method);
+      }
       auto lit = local_types_.find(oid.name);
       // ---------------------------------------------------------------
       // [field receiver] `field.method(...)` inside a method body: fields are
@@ -3092,7 +3137,7 @@ bool Codegen::initClassAtPtr(llvm::Value* base, const ClassInfo& info,
       llvm::Type* expected = init_fn->getFunctionType()->getParamType(ai);
       std::string expected_name;
       if (init_ast && ai - 1 < init_ast->params.size()) {
-        expected_name = resolveTypeName(init_ast->params[ai - 1].type_name);
+        expected_name = instantiateMemberType(init_ast->params[ai - 1].type_name, info);
       }
       ++ai;
       llvm::Value* v = emitValueForParam(*arg.value, expected, expected_name);
@@ -3137,6 +3182,12 @@ bool Codegen::initClassAtPtr(llvm::Value* base, const ClassInfo& info,
         v = toI1(v);
       } else if (fty->isIntegerTy(32) && !v->getType()->isPointerTy()) {
         v = toI32(v);
+      } else if (isInterfaceType(info.field_types[i])) {
+        // Interface field (e.g. Optional<IPlugin>.value): box Class → fat pointer.
+        v = emitValueForParam(*neu.args[i].value, fty, info.field_types[i]);
+        if (!v) {
+          return false;
+        }
       } else if (fty->isStructTy() && v->getType()->isPointerTy()) {
         // Nested class field (e.g. Optional<String>.value_): NewExpr yields Class*.
         v = builder_.CreateLoad(fty, v, "ctor.field.copy");
@@ -5246,6 +5297,109 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
   return true;
 }
 
+// [variant] `return v` where `v : Variant` and the enclosing function
+// returns String/i32/i64/f64/bool. Lowers to `v.as_<t>()` plus a runtime tag
+// check that panics on mismatch — the return type is a promise the tag must keep.
+llvm::Value* Codegen::emitContextualVariantUnbox(const ast::Expr& expr, llvm::Type* rty) {
+  const std::string want = resolveTypeName(current_fn_return_type_);
+  if (want.empty() || want == "Variant") {
+    return nullptr;
+  }
+  std::string kind;
+  if (want == "String") {
+    kind = "String";
+  } else if (want == "i32" || want == "i64") {
+    kind = "i32";
+  } else if (want == "f64") {
+    kind = "f64";
+  } else if (want == "bool") {
+    kind = "bool";
+  } else {
+    return nullptr;
+  }
+  // Only `Variant` sources unbox implicitly.
+  if (resolveTypeName(exprTypeOf(expr)) != "Variant") {
+    return nullptr;
+  }
+  const std::string opt_ty = "Optional<" + kind + ">";
+  if (!ensureTypeAvailable("Variant") || !ensureTypeAvailable(opt_ty)) {
+    return nullptr;
+  }
+  llvm::Value* val = emitExpr(expr);
+  if (!val) {
+    return nullptr;
+  }
+  const ClassInfo* vinfo = findClass("Variant");
+  const ClassInfo* oinfo = findClass(opt_ty);
+  if (!vinfo || !vinfo->type || !oinfo || !oinfo->type) {
+    return nullptr;
+  }
+  // Class values travel as pointers in this backend; normalize to a value.
+  if (val->getType()->isPointerTy()) {
+    val = builder_.CreateLoad(vinfo->type, val, "unbox.variant");
+  }
+  // Materialize the Variant so `as_<t>()` can take its address.
+  const std::string tmp_name = "__unbox_" + std::to_string(coalesce_tmp_counter_++);
+  llvm::Function* cur_fn = builder_.GetInsertBlock()->getParent();
+  llvm::AllocaInst* slot = createEntryAlloca(cur_fn, vinfo->type, tmp_name);
+  builder_.CreateStore(val, slot);
+  local_types_[tmp_name] = "Variant";
+  named_values_[tmp_name] = slot;
+
+  ast::MethodCallExpr as_call;
+  as_call.loc = expr.loc;
+  auto id = std::make_unique<ast::IdentifierExpr>();
+  id->loc = expr.loc;
+  id->name = tmp_name;
+  as_call.object = std::move(id);
+  as_call.method = "as_" + std::string(kind == "String" ? "string" : kind.c_str());
+  llvm::Value* opt = emitMethodCall(as_call);
+  named_values_.erase(tmp_name);
+  local_types_.erase(tmp_name);
+  if (!opt) {
+    return nullptr;
+  }
+  if (opt->getType()->isPointerTy()) {
+    opt = builder_.CreateLoad(oinfo->type, opt, "unbox.opt");
+  }
+  if (opt->getType() != oinfo->type) {
+    error(expr.loc, "contextual Variant unbox produced an unexpected " + opt_ty);
+    return nullptr;
+  }
+  // has_value_ is field 0; value_ follows it.
+  llvm::Value* has = builder_.CreateExtractValue(opt, 0, "unbox.has");
+  llvm::Value* payload = builder_.CreateExtractValue(opt, 1, "unbox.val");
+
+  llvm::BasicBlock* ok_bb = llvm::BasicBlock::Create(globalContext(), "unbox.ok", cur_fn);
+  llvm::BasicBlock* bad_bb = llvm::BasicBlock::Create(globalContext(), "unbox.bad", cur_fn);
+  builder_.CreateCondBr(toI1(has), ok_bb, bad_bb);
+
+  builder_.SetInsertPoint(bad_bb);
+  llvm::Function* panic_fn = requireExtern("l_panic");
+  if (!panic_fn) {
+    return nullptr;
+  }
+  llvm::Function* str_fn = requireExtern("l_str_concat");
+  llvm::Value* msg = llvm::ConstantPointerNull::get(
+      llvm::cast<llvm::PointerType>(ptrTy()));
+  if (str_fn) {
+    // "[PANIC] Variant does not hold a <kind> value"
+    llvm::Value* head = builder_.CreateGlobalStringPtr("[PANIC] Variant does not hold a ",
+                                                       "unbox.panic.head");
+    llvm::Value* tail = builder_.CreateGlobalStringPtr(kind.c_str(), "unbox.panic.tail");
+    msg = builder_.CreateCall(str_fn, {head, tail}, "unbox.panic.msg");
+  }
+  builder_.CreateCall(panic_fn, {msg});
+  builder_.CreateUnreachable();
+
+  builder_.SetInsertPoint(ok_bb);
+  // Primitives may need widening; String stays a pointer to the String object.
+  if (rty && rty->isIntegerTy(32) && !payload->getType()->isPointerTy()) {
+    payload = toI32(payload);
+  }
+  return payload;
+}
+
 bool Codegen::emitReturn(const ast::ReturnStmt& ret) {
   llvm::Function* fn = builder_.GetInsertBlock()->getParent();
   llvm::Value* v = nullptr;
@@ -5281,7 +5435,9 @@ bool Codegen::emitReturn(const ast::ReturnStmt& ret) {
     }
     // Escaping a heap local via return (often `as ptr`) must not auto-free it.
     cancelAutoFreeEscaping(*ret.value);
-    v = emitExpr(*ret.value);
+    // [variant] `return v` with v:Variant into a primitive/String signature.
+    llvm::Value* unboxed = emitContextualVariantUnbox(*ret.value, fn->getReturnType());
+    v = unboxed ? unboxed : emitExpr(*ret.value);
     if (!v) {
       return false;
     }
@@ -5473,6 +5629,275 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
   branchTo(merge_bb);
   builder_.SetInsertPoint(merge_bb);
   return true;
+}
+
+llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
+  if (!expr.scrutinee) {
+    error(expr.loc, "match missing expression");
+    return nullptr;
+  }
+  if (expr.branches.empty()) {
+    error(expr.loc, "match requires at least one arm");
+    return nullptr;
+  }
+
+  llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+  const std::string scrut_ty = exprTypeOf(*expr.scrutinee);
+  const bool is_opt = scrut_ty.rfind("Optional<", 0) == 0;
+
+  // Evaluate the scrutinee exactly once and materialize it in an entry slot.
+  llvm::Value* scrut_val = emitExpr(*expr.scrutinee);
+  if (!scrut_val) {
+    return nullptr;
+  }
+  llvm::Type* slot_ty = scrut_val->getType();
+  if (is_opt) {
+    ensureTypeAvailable(scrut_ty);
+    const ClassInfo* opt_info = findClass(scrut_ty);
+    if (!opt_info || !opt_info->type) {
+      error(expr.loc, "unknown Optional type in match: " + scrut_ty);
+      return nullptr;
+    }
+    slot_ty = opt_info->type;
+    if (scrut_val->getType()->isPointerTy()) {
+      scrut_val = builder_.CreateLoad(opt_info->type, scrut_val, "match.opt");
+    }
+  } else if (scrut_ty == "String" ||
+             (isClassType(scrut_ty) && scrut_val->getType()->isPointerTy())) {
+    slot_ty = ptrTy();
+  } else if (scrut_ty == "bool") {
+    slot_ty = i1Ty();
+    scrut_val = toI1(scrut_val);
+  } else if (!scrut_val->getType()->isPointerTy()) {
+    slot_ty = i32Ty();
+    scrut_val = toI32(scrut_val);
+  }
+  llvm::AllocaInst* slot = createEntryAlloca(fn, slot_ty, "match.scrut");
+  builder_.CreateStore(scrut_val, slot);
+
+  llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(globalContext(), "matchx.merge", fn);
+  std::vector<std::pair<llvm::Value*, llvm::BasicBlock*>> incoming;
+  llvm::Type* result_ty = nullptr;
+
+  auto arm_matched = [&](llvm::Value* v, const ast::Expr* src) -> bool {
+    if (!v) {
+      return false;
+    }
+    // String literals arrive as raw `ptr`; normalize to the String object pointer
+    // (same representation `??` uses) so every arm shares one PHI type.
+    if (src && src->kind() == ast::ExprKind::StringLiteral && v->getType()->isPointerTy()) {
+      llvm::Value* obj = emitStringObjectPtr(*src);
+      if (!obj) {
+        return false;
+      }
+      v = obj;
+    }
+    llvm::BasicBlock* end_bb = builder_.GetInsertBlock();
+    if (!result_ty) {
+      result_ty = v->getType();
+    } else if (result_ty != v->getType()) {
+      std::string want_desc;
+      std::string got_desc;
+      llvm::raw_string_ostream wo(want_desc);
+      llvm::raw_string_ostream go(got_desc);
+      result_ty->print(wo);
+      v->getType()->print(go);
+      error(expr.loc, "match arms have mismatched types: expected " + wo.str() + ", got " +
+                          go.str());
+      return false;
+    }
+    incoming.emplace_back(v, end_bb);
+    builder_.CreateBr(merge_bb);
+    return true;
+  };
+
+  bool chain_terminated = false;  // a `_` / `none` arm ended the chain
+  for (size_t i = 0; i < expr.branches.size(); ++i) {
+    const ast::MatchBranch& br = expr.branches[i];
+    if (br.pattern_kind == ast::MatchPatternKind::Wildcard ||
+        br.pattern_kind == ast::MatchPatternKind::None) {
+      // `_` and `none` both terminate the chain: every following arm is dead.
+      if (i + 1 < expr.branches.size()) {
+        error(expr.branches[i + 1].loc, "unreachable match arm after exhaustive pattern");
+        return nullptr;
+      }
+      if (br.pattern_kind == ast::MatchPatternKind::None && !is_opt) {
+        error(br.loc, "'none' pattern requires an Optional scrutinee, got '" + scrut_ty + "'");
+        return nullptr;
+      }
+      if (!br.value) {
+        error(br.loc, "match arm must yield an expression");
+        return nullptr;
+      }
+      llvm::Value* v = emitExpr(*br.value);
+      if (!v) {
+        return nullptr;
+      }
+      if (!arm_matched(v, br.value.get())) {
+        return nullptr;
+      }
+      chain_terminated = true;
+      break;
+    }
+
+    llvm::BasicBlock* then_bb =
+        llvm::BasicBlock::Create(globalContext(), "matchx.arm", fn);
+    llvm::BasicBlock* else_bb =
+        llvm::BasicBlock::Create(globalContext(), "matchx.next", fn);
+    llvm::Value* cond = nullptr;
+
+    if (br.pattern_kind == ast::MatchPatternKind::Some) {
+      if (!is_opt) {
+        error(br.loc, "'some(...)' pattern requires an Optional scrutinee, got '" + scrut_ty +
+                          "'");
+        return nullptr;
+      }
+      const ClassInfo* opt_info = findClass(scrut_ty);
+      auto hv = opt_info->field_index.find(physicalFieldName("has_value"));
+      if (hv == opt_info->field_index.end()) {
+        error(br.loc, "Optional layout missing 'has_value'");
+        return nullptr;
+      }
+      llvm::Value* loaded = builder_.CreateLoad(opt_info->type, slot, "match.opt.v");
+      cond = builder_.CreateExtractValue(loaded, static_cast<unsigned>(hv->second),
+                                         "match.has");
+
+      // Bind the payload inside the arm block.
+      builder_.CreateCondBr(cond, then_bb, else_bb);
+      builder_.SetInsertPoint(then_bb);
+      auto vi = opt_info->field_index.find(physicalFieldName("value"));
+      if (vi == opt_info->field_index.end()) {
+        error(br.loc, "Optional layout missing 'value'");
+        return nullptr;
+      }
+      if (br.binding.empty()) {
+        error(br.loc, "'some' pattern requires a binding name");
+        return nullptr;
+      }
+      llvm::Value* payload_gep =
+          builder_.CreateInBoundsGEP(opt_info->type, slot,
+                                     {builder_.getInt32(0),
+                                      builder_.getInt32(static_cast<uint64_t>(vi->second))},
+                                     br.binding + ".slot");
+      // Payload type name: the T inside Optional<T>.
+      const std::string inner = scrut_ty.substr(9, scrut_ty.size() - 10);
+      llvm::Type* payload_ty = llvmTypeForTypeName(inner);
+      if (!payload_ty) {
+        payload_ty = llvm::cast<llvm::StructType>(opt_info->type)->getElementType(
+            static_cast<unsigned>(vi->second));
+      }
+      // Fresh slot so the binding behaves like an ordinary local.
+      llvm::AllocaInst* binding_slot = createEntryAlloca(fn, payload_ty, br.binding);
+      builder_.CreateStore(builder_.CreateLoad(payload_ty, payload_gep, br.binding + ".val"),
+                           binding_slot);
+      const bool prev = named_values_.count(br.binding) != 0;
+      llvm::AllocaInst* prev_slot = prev ? named_values_[br.binding] : nullptr;
+      const bool had_type = local_types_.count(br.binding) != 0;
+      std::string prev_type = had_type ? local_types_[br.binding] : std::string();
+      named_values_[br.binding] = binding_slot;
+      local_types_[br.binding] = inner;
+      llvm::Value* v = emitExpr(*br.value);
+      if (prev) {
+        named_values_[br.binding] = prev_slot;
+      } else {
+        named_values_.erase(br.binding);
+      }
+      if (had_type) {
+        local_types_[br.binding] = prev_type;
+      } else {
+        local_types_.erase(br.binding);
+      }
+      if (!v) {
+        return nullptr;
+      }
+      if (!arm_matched(v, br.value.get())) {
+        return nullptr;
+      }
+      builder_.SetInsertPoint(else_bb);
+      continue;
+    }
+
+    if (!br.pattern) {
+      error(br.loc, "match arm missing pattern");
+      return nullptr;
+    }
+    llvm::Value* loaded = builder_.CreateLoad(slot_ty, slot, "match.v");
+    if (br.pattern->kind() == ast::ExprKind::IntLiteral) {
+      llvm::Value* pat = toI32(emitExpr(*br.pattern));
+      if (!pat) {
+        return nullptr;
+      }
+      cond = builder_.CreateICmpEQ(toI32(loaded), pat, "match.eq");
+    } else if (br.pattern->kind() == ast::ExprKind::BoolLiteral) {
+      llvm::Value* pat = toI1(emitExpr(*br.pattern));
+      if (!pat) {
+        return nullptr;
+      }
+      cond = builder_.CreateICmpEQ(toI1(loaded), pat, "match.eq");
+    } else if (br.pattern->kind() == ast::ExprKind::StringLiteral) {
+      llvm::Function* str_eq = requireExtern("l_str_eq");
+      if (!str_eq) {
+        return nullptr;
+      }
+      llvm::Value* lhs = loaded;
+      if (scrut_ty == "String") {
+        ensureTypeAvailable("String");
+        const ClassInfo* info = findClass("String");
+        auto fit = info->field_index.find("data_");
+        if (fit == info->field_index.end()) {
+          error(br.loc, "String.data_ not found");
+          return nullptr;
+        }
+        llvm::Value* gep =
+            builder_.CreateStructGEP(info->type, loaded, fit->second, "match.str.data");
+        lhs = builder_.CreateLoad(ptrTy(), gep, "match.str.ptr");
+      }
+      llvm::Value* rhs = emitExpr(*br.pattern);
+      if (!lhs || !rhs) {
+        return nullptr;
+      }
+      llvm::Value* eq_i32 = builder_.CreateCall(str_eq, {lhs, rhs}, "match.streq");
+      cond = builder_.CreateICmpNE(eq_i32, llvm::ConstantInt::get(i32Ty(), 0), "match.eq");
+    } else {
+      error(br.loc, "match patterns must be literals, '_', 'some(...)' or 'none'");
+      return nullptr;
+    }
+
+    builder_.CreateCondBr(cond, then_bb, else_bb);
+    builder_.SetInsertPoint(then_bb);
+    if (!br.value) {
+      error(br.loc, "match arm must yield an expression");
+      return nullptr;
+    }
+    llvm::Value* v = emitExpr(*br.value);
+    if (!v) {
+      return nullptr;
+    }
+    if (!arm_matched(v, br.value.get())) {
+      return nullptr;
+    }
+    builder_.SetInsertPoint(else_bb);
+  }
+
+  if (!result_ty) {
+    error(expr.loc, "match has no value-producing arm");
+    return nullptr;
+  }
+  // Unmatched fallthrough (every arm tested and none matched) merges a typed
+  // placeholder so the PHI stays well-formed. A terminating arm already jumped.
+  if (!chain_terminated) {
+    llvm::Value* fallback = llvm::Constant::getNullValue(result_ty);
+    incoming.emplace_back(fallback, builder_.GetInsertBlock());
+    builder_.CreateBr(merge_bb);
+  }
+
+  builder_.SetInsertPoint(merge_bb);
+  llvm::PHINode* phi = builder_.CreatePHI(result_ty, static_cast<unsigned>(incoming.size()),
+                                          "match.val");
+  for (const auto& inc : incoming) {
+    phi->addIncoming(inc.first, inc.second);
+  }
+  return phi;
 }
 
 bool Codegen::emitWhile(const ast::WhileStmt& stmt) {
@@ -7173,6 +7598,9 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
 
 llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
   switch (expr.kind()) {
+    case ast::ExprKind::Match: {
+      return emitMatchExpr(static_cast<const ast::MatchExpr&>(expr));
+    }
     case ast::ExprKind::IntLiteral: {
       const auto& lit = static_cast<const ast::IntLiteralExpr&>(expr);
       long long n = 0;
@@ -7594,10 +8022,17 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       // None arm: the fallback expression.
       builder_.SetInsertPoint(none_bb);
       llvm::Value* none_val = nullptr;
-      if (payload_is_class && co.right->kind() == ast::ExprKind::StringLiteral) {
-        none_val = emitStringObjectPtr(*co.right);
-      } else {
-        none_val = emitExpr(*co.right);
+      // `Optional<Variant> ?? <primitive|String>`: implicitly box the fallback so
+      // both arms merge as `%Variant` values (read-side counterpart to auto-boxing).
+      if (resolveTypeName(payload_ty) == "Variant") {
+        none_val = emitImplicitVariantBox(*co.right, nullptr);
+      }
+      if (!none_val) {
+        if (payload_is_class && co.right->kind() == ast::ExprKind::StringLiteral) {
+          none_val = emitStringObjectPtr(*co.right);
+        } else {
+          none_val = emitExpr(*co.right);
+        }
       }
       if (!none_val) {
         named_values_.erase(tmp_name);
@@ -7905,13 +8340,99 @@ llvm::Value* Codegen::emitNamedFunctionPointer(const std::string& name,
   return fn;  // Function* decays to ptr in LLVM
 }
 
+// Implicit auto-boxing: build `Variant.from_<kind>(value)` for a primitive or
+// String argument. Returns nullptr when the value is already a Variant / class
+// object or when no matching factory exists (caller then takes the normal path).
+llvm::Value* Codegen::emitImplicitVariantBox(const ast::Expr& expr, llvm::Type* expected) {
+  // Already a Variant: pass through untouched.
+  // Only `exprTypeOf` is trustworthy here: `inferTypeFromExpr` falls back to
+  // `i32` for unresolved MethodCalls, which would mis-box a Variant value.
+  std::string src_ty = exprTypeOf(expr);
+  if (expr.kind() == ast::ExprKind::StringLiteral) {
+    src_ty = "String";
+  } else if (src_ty.empty() && (expr.kind() == ast::ExprKind::FloatLiteral ||
+                                expr.kind() == ast::ExprKind::IntLiteral ||
+                                expr.kind() == ast::ExprKind::BoolLiteral)) {
+    src_ty = inferTypeFromExpr(expr);
+  }
+  if (resolveTypeName(src_ty) == "Variant") {
+    return nullptr;
+  }
+  // The callee already expects a Variant by value (`fun(Variant)`): the argument
+  // is a Variant-producing expression, so no boxing applies.
+  if (expected) {
+    const ClassInfo* vinfo = findClass("Variant");
+    if (vinfo && vinfo->type && expected == vinfo->type) {
+      return nullptr;
+    }
+  }
+  // Map source type → factory suffix declared in the Variant class.
+  std::string suffix;
+  if (src_ty == "String") {
+    suffix = "string";
+  } else if (src_ty == "i32" || src_ty == "i64") {
+    suffix = "i32";
+  } else if (src_ty == "f64") {
+    suffix = "f64";
+  } else if (src_ty == "bool") {
+    suffix = "bool";
+  } else {
+    return nullptr;
+  }
+  const std::string factory = "from_" + suffix;
+  auto fit = concrete_funcs_.find(factory);
+  if (fit == concrete_funcs_.end() || !fit->second) {
+    return nullptr;  // Variant stdlib not loaded — let the normal path diagnose.
+  }
+  llvm::Function* fn = module_->getFunction(resolveFuncIrName(factory));
+  if (!fn) {
+    return nullptr;
+  }
+  llvm::Value* arg = nullptr;
+  // String payloads must arrive as String* (class by-reference ABI), not raw C chars.
+  if (suffix == "string") {
+    arg = emitValueForParam(expr, fn->getFunctionType()->getParamType(0), "String");
+  } else {
+    arg = emitExpr(expr);
+  }
+  if (!arg) {
+    return nullptr;
+  }
+  llvm::Type* want = fn->getFunctionType()->getParamType(0);
+  if (want->isIntegerTy(32) && !arg->getType()->isPointerTy()) {
+    arg = toI32(arg);
+  }
+  if (arg->getType() != want) {
+    return nullptr;  // Representation mismatch: fall back to the explicit path.
+  }
+  llvm::Value* boxed = builder_.CreateCall(fn, {arg}, "variant.box");
+  // Class formals take a pointer (by-reference ABI): spill so the caller can GEP.
+  if (expected && expected->isPointerTy() && !boxed->getType()->isPointerTy()) {
+    llvm::Function* cur = builder_.GetInsertBlock()->getParent();
+    llvm::AllocaInst* tmp = createEntryAlloca(cur, boxed->getType(), "variant.box.tmp");
+    builder_.CreateStore(boxed, tmp);
+    return tmp;
+  }
+  return boxed;
+}
+
 llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expected,
-                                        const std::string& expected_type_name) {
-  // Class formals are ABI pointers: coerce string literals → temporary String*.
+                                        const std::string& expected_type_name) {  // Class formals are ABI pointers: coerce string literals → temporary String*.
   if (expected_type_name == "String" && expr.kind() == ast::ExprKind::StringLiteral) {
     return emitStringObjectPtr(expr);
   }
 
+  // Implicit auto-boxing: a primitive/String literal or value passed to a `Variant`
+  // formal is lowered to the corresponding `Variant.from_*` factory. The mapping is
+  // discovered from the declared factories, never hardcoded in codegen.
+  // Only a bare `Variant` formal qualifies: `fun(Variant)` / `Array<Variant>` have
+  // different representations and must keep their normal path.
+  if (expected_type_name == "Variant") {
+    llvm::Value* boxed = emitImplicitVariantBox(expr, expected);
+    if (boxed) {
+      return boxed;
+    }
+  }
   // Trailing block / lambda / bare function name → function pointer matching fun(...).
   if (!expected_type_name.empty() && isFunTypeName(expected_type_name)) {
     if (expr.kind() == ast::ExprKind::Lambda) {

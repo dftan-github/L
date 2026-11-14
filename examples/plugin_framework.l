@@ -124,7 +124,7 @@ class App {
 
     fun init() {
         plugins = Array<IPlugin>()
-        this.set("app_version", Variant.from_string(String("0.1.0")))
+        this.set("app_version", "0.1.0")
     }
 
     pub fun register(IPlugin p) {
@@ -151,8 +151,7 @@ class App {
     }
 
     pub fun version() -> String {
-        v := this.get("app_version") ?? Variant.from_string(String("unset"))
-        return v.as_string() ?? String("unset")
+        return this.get("app_version") ?? "0.1.0"
     }
 }
 

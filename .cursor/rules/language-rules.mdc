@@ -701,9 +701,8 @@ alwaysApply: true
 
 ## 105. Prompt Tracking Protocol
 <!-- id:prompt-tracking -->
-- **Echo Prompt ID**: Every user prompt will begin with a tag like `[A042]`. You MUST extract this ID.
-- **Report Header**: Your `Turn Change Report` MUST start with this exact ID. For example: `=== [A042] Turn Change Report ===`
-- **Context Binding**: If a prompt does not have an ID (like casual chat), do not add one.
+- **Echo Prompt ID**: If the human prompt begins with a tag like `[A042]`, you MUST extract this ID and start your report with `=== [A042] Turn Change Report ===`.
+- **Manual Fallback**: If the human prompt does NOT contain a tag, you MUST still use the standard "Turn Change Report" format, and start it with `=== [MANUAL] Turn Change Report ===`. Never drop the report formatting just because the ID is missing.
 
 
 ## 999. AI Collaboration Discipline (CRITICAL)

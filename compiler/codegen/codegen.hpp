@@ -251,6 +251,11 @@ private:
   bool emitExprStmt(const ast::ExprStmt& stmt);
   bool emitIf(const ast::IfStmt& stmt);
   bool emitMatch(const ast::MatchStmt& stmt);
+  // Implicit auto-boxing into Variant (`set("k", 42)` → Variant.from_i32(42)).
+  // `expected` is the callee's LLVM parameter type (ptr for by-reference classes).
+  llvm::Value* emitImplicitVariantBox(const ast::Expr& expr, llvm::Type* expected);
+  // Value-producing match: arms yield expressions merged by a PHI node.
+  llvm::Value* emitMatchExpr(const ast::MatchExpr& expr);
   bool emitWhile(const ast::WhileStmt& stmt);
   bool emitBreak(const ast::BreakStmt& stmt);
   bool emitContinue(const ast::ContinueStmt& stmt);
@@ -386,6 +391,9 @@ private:
   bool current_method_is_static_ = false;
   // Enclosing function return type name (e.g. Result<i32,String>) for `expr?`.
   std::string current_fn_return_type_;
+  // Contextual unboxing: `return v` where v:Variant and the function returns
+  // String/i32/i64/f64/bool → `v.as_<t>()`, panicking when the tag mismatches.
+  llvm::Value* emitContextualVariantUnbox(const ast::Expr& expr, llvm::Type* rty);
   // Logical source name for `__FUNC__` (not IR-mangled).
   std::string current_fn_name_;
   unsigned lambda_seq_ = 0;

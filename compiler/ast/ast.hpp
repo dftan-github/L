@@ -34,6 +34,7 @@ enum class ExprKind {
   Try,  // expr? — Result error propagation
   Spawn,  // spawn { ... } → ptr thread handle
   AddrOf,  // &expr → ptr (address of lvalue)
+  Match,   // match expr { some(v) => ..., none => ... } — value-producing
 };
 
 enum class StmtKind {
@@ -341,18 +342,41 @@ struct IfStmt : Stmt {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
-// One arm of `match`: `1 => { ... }` or `_ => { ... }` (literal / wildcard only).
+// Pattern shape for one `match` arm.
+enum class MatchPatternKind {
+  Literal,  // 1 / true / "s"
+  Wildcard,  // _
+  Some,      // some(val) — Optional present
+  None,      // none      — Optional absent
+};
+
+// One arm of `match`, in either statement or expression form:
+//   `1 => { ... }` / `_ => { ... }`          (statement)
+//   `some(val) => expr` / `none => expr`     (expression)
 struct MatchBranch {
-  bool is_wildcard = false;
-  ExprPtr pattern;  // Int / String / Bool literal when !is_wildcard
-  std::vector<StmtPtr> body;
+  MatchPatternKind pattern_kind = MatchPatternKind::Literal;
+  bool is_wildcard = false;  // legacy alias for pattern_kind == Wildcard
+  ExprPtr pattern;  // Int / String / Bool literal when Literal
+  std::string binding;  // `some(val)` binds the payload to this name
+  std::vector<StmtPtr> body;  // statement form
   SourceLocation loc;
+  ExprPtr value;  // expression form: arm yields this
 };
 
 struct MatchStmt : Stmt {
   ExprPtr scrutinee;
   std::vector<MatchBranch> branches;
   StmtKind kind() const override { return StmtKind::Match; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
+// Value-producing `match`:
+//   x := match opt { some(v) => v.len(), none => 0 }
+// Branch values are merged with a PHI node.
+struct MatchExpr : Expr {
+  ExprPtr scrutinee;
+  std::vector<MatchBranch> branches;
+  ExprKind kind() const override { return ExprKind::Match; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
 

@@ -371,15 +371,55 @@ void MatchStmt::dump(std::ostream& out, int indent) const {
   }
   for (const MatchBranch& br : branches) {
     pad(out, indent + 1);
-    if (br.is_wildcard) {
-      out << "Branch _\n";
-    } else {
-      out << "Branch\n";
-      if (br.pattern) {
-        br.pattern->dump(out, indent + 2);
-      }
+    switch (br.pattern_kind) {
+      case MatchPatternKind::Wildcard:
+        out << "Branch _\n";
+        break;
+      case MatchPatternKind::Some:
+        out << "Branch some(" << br.binding << ")\n";
+        break;
+      case MatchPatternKind::None:
+        out << "Branch none\n";
+        break;
+      case MatchPatternKind::Literal:
+        out << "Branch\n";
+        if (br.pattern) {
+          br.pattern->dump(out, indent + 2);
+        }
+        break;
     }
     dumpStmts(out, indent + 2, br.body);
+  }
+}
+
+void MatchExpr::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "MatchExpr\n";
+  if (scrutinee) {
+    scrutinee->dump(out, indent + 1);
+  }
+  for (const MatchBranch& br : branches) {
+    pad(out, indent + 1);
+    switch (br.pattern_kind) {
+      case MatchPatternKind::Wildcard:
+        out << "Branch _\n";
+        break;
+      case MatchPatternKind::Some:
+        out << "Branch some(" << br.binding << ")\n";
+        break;
+      case MatchPatternKind::None:
+        out << "Branch none\n";
+        break;
+      case MatchPatternKind::Literal:
+        out << "Branch\n";
+        if (br.pattern) {
+          br.pattern->dump(out, indent + 2);
+        }
+        break;
+    }
+    if (br.value) {
+      br.value->dump(out, indent + 2);
+    }
   }
 }
 

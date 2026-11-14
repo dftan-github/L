@@ -96,6 +96,7 @@ private:
   ast::StmtPtr parseExprStmt();
   ast::StmtPtr parseIfStmt();
   ast::StmtPtr parseMatchStmt();
+  ast::ExprPtr parseMatchExpression();
   ast::StmtPtr parseWhileStmt();
   ast::StmtPtr parseBreakStmt();
   ast::StmtPtr parseContinueStmt();

@@ -5,6 +5,8 @@ extern module c_io {
     fun l_print_f64(f64 val) -> void
     fun l_print_bool(i32 val) -> void
     fun l_print_str(ptr s) -> void
+    // Fatal runtime error: prints the message and aborts the process.
+    fun l_panic(ptr message) -> void
     fun l_read_line() -> ptr
     fun l_str_concat(ptr a, ptr b) -> ptr
     fun l_int_to_str(i32 val) -> ptr

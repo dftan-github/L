@@ -68,6 +68,12 @@ ARRAY_SUGAR = ROOT.join("tests", "cases", "array_sugar.l")
 ARRAY_POLY_TEST = ROOT.join("tests", "cases", "array_poly_test.l")
 STDLIB_ARRAY = ROOT.join("stdlib", "array.l")
 MATCH_TEST = ROOT.join("tests", "cases", "match_test.l")
+MATCH_EXPR_TEST = ROOT.join("tests", "cases", "match_expr_test.l")
+IMPLICIT_BOXING_TEST = ROOT.join("tests", "cases", "implicit_boxing_test.l")
+COALESCE_BOXING_TEST = ROOT.join("tests", "cases", "coalesce_boxing_test.l")
+VARIANT_UNBOX_RETURN_TEST = ROOT.join("tests", "cases", "variant_unbox_return_test.l")
+COMMENT_POLLUTION_TEST = ROOT.join("tests", "cases", "comment_pollution_test.l")
+OPTIONAL_UNWRAP_CHAIN_TEST = ROOT.join("tests", "cases", "optional_unwrap_chain_test.l")
 CAST_TEST = ROOT.join("tests", "cases", "cast_test.l")
 DOWNCAST_TEST = ROOT.join("tests", "cases", "downcast_test.l")
 PARTIAL_TEST = ROOT.join("tests", "cases", "partial_test.l")
@@ -1943,6 +1949,188 @@ def test_match_e2e!
   puts "  OK match_test e2e (literal match → if-else)"
 end
 
+def test_match_expr_e2e!
+  assert!(File.exist?(MATCH_EXPR_TEST), "match_expr_test case not found: #{MATCH_EXPR_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("match_expr_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, MATCH_EXPR_TEST))
+  assert!(status.success?, "compile match_expr_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "match_expr_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "match_expr_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "43\n0\n84\nhello\nmissing\n42\n20\n20\none\nmany\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # The merged arms must go through a PHI node, not a stack slot round-trip.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, MATCH_EXPR_TEST))
+  assert!(ir_st.success?, "emit-llvm match_expr_test failed\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("match.val"), "expected PHI-merged match values in IR\n#{ir[0, 2000]}")
+
+  puts "  OK match_expr_test e2e (some/none destructuring, PHI merge)"
+end
+
+def test_implicit_boxing_e2e!
+  assert!(File.exist?(IMPLICIT_BOXING_TEST),
+          "implicit_boxing_test not found: #{IMPLICIT_BOXING_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("implicit_boxing_test.exe")
+  FileUtils.rm_f(exe)
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
+                       STDLIB_PROPERTIES, IMPLICIT_BOXING_TEST)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile implicit_boxing_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "implicit_boxing_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "implicit_boxing_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "demo\n42\n1.5\ntrue\n7\nvia-local\ntrue\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # The lowering must go through the declared factories, not a raw store.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm implicit_boxing_test failed\n#{ir_err}\n#{ir}")
+  %w[from_string from_i32 from_f64 from_bool].each do |factory|
+    assert!(ir.include?("call %Variant @#{factory}"),
+            "expected implicit #{factory} call in IR\n#{ir[0, 2000]}")
+  end
+
+  puts "  OK implicit_boxing_test e2e (String/i32/f64/bool → Variant.from_*)"
+end
+
+def test_coalesce_boxing_e2e!
+  assert!(File.exist?(COALESCE_BOXING_TEST),
+          "coalesce_boxing_test not found: #{COALESCE_BOXING_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("coalesce_boxing_test.exe")
+  FileUtils.rm_f(exe)
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
+                       STDLIB_PROPERTIES, COALESCE_BOXING_TEST)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile coalesce_boxing_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "coalesce_boxing_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "coalesce_boxing_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "demo\n42\n1.5\ntrue\nunset\n99\n2.5\ntrue\n7\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # The fallback must be boxed through the declared factories.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm coalesce_boxing_test failed\n#{ir_err}\n#{ir}")
+  %w[from_string from_i32 from_f64 from_bool].each do |factory|
+    assert!(ir.include?("call %Variant @#{factory}"),
+            "expected #{factory} boxing for the '??' fallback\n#{ir[0, 2000]}")
+  end
+
+  puts "  OK coalesce_boxing_test e2e (Optional<Variant> ?? String/i32/f64/bool)"
+end
+
+def test_variant_unbox_return_e2e!
+  assert!(File.exist?(VARIANT_UNBOX_RETURN_TEST),
+          "variant_unbox_return_test not found: #{VARIANT_UNBOX_RETURN_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("variant_unbox_return_test.exe")
+  FileUtils.rm_f(exe)
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
+                       STDLIB_PROPERTIES, VARIANT_UNBOX_RETURN_TEST)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile variant_unbox_return_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "variant_unbox_return_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "variant_unbox_return_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "demo\n42\n1.5\ntrue\nfallback\n42\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # Unboxing must go through the Optional factories and a guard branch.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm variant_unbox_return_test failed\n#{ir_err}\n#{ir}")
+  %w[as_string as_i32 as_f64 as_bool].each do |m|
+    assert!(ir.include?("@Variant_#{m}"),
+            "expected contextual unbox via #{m}\n#{ir[0, 2000]}")
+  end
+  assert!(ir.include?("unbox.bad"), "expected a panic guard for tag mismatch")
+
+  puts "  OK variant_unbox_return_test e2e (return Variant → String/i32/f64/bool)"
+end
+
+def test_comment_pollution_e2e!
+  assert!(File.exist?(COMMENT_POLLUTION_TEST),
+          "comment_pollution_test not found: #{COMMENT_POLLUTION_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("comment_pollution_test.exe")
+  FileUtils.rm_f(exe)
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
+                       STDLIB_PROPERTIES, COMMENT_POLLUTION_TEST)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile comment_pollution_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "comment_pollution_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "comment_pollution_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "Variant v = 0; return v.as_string()\n42\nshadow\ntext\n"
+  assert!(normalized == expected,
+          "comments/strings polluted codegen: expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # The local named `Variant` (actually a String) must not trigger Variant unboxing.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm comment_pollution_test failed\n#{ir_err}\n#{ir}")
+  shadowed_body = ir[/define [^\n]*Box_shadowed\([^\n]*\n(?:.*?\n)*?\}\n/m] || ""
+  assert!(!shadowed_body.empty?, "Box_shadowed not found in IR")
+  assert!(!shadowed_body.include?("unbox.") && !shadowed_body.include?("@Variant_as_"),
+         "identifier spelled `Variant` wrongly triggered Variant unboxing\n#{shadowed_body}")
+  # The genuine Variant source still unboxes through the declared factory.
+  assert!(ir.include?("@Variant_as_string"),
+          "expected a real Variant unbox via as_string\n#{ir[0, 2000]}")
+
+  puts "  OK comment_pollution_test e2e (comments/strings/LCMD text stay out of AST)"
+end
+
+def test_optional_unwrap_chain_e2e!
+  assert!(File.exist?(OPTIONAL_UNWRAP_CHAIN_TEST),
+          "optional_unwrap_chain_test not found: #{OPTIONAL_UNWRAP_CHAIN_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("optional_unwrap_chain_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status =
+    run_compiler("-o", exe.to_s, *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, OPTIONAL_UNWRAP_CHAIN_TEST))
+  assert!(status.success?,
+          "compile optional_unwrap_chain_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "optional_unwrap_chain_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "optional_unwrap_chain_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  # Interface payload: fat pointer unwrap + vtable dispatch; class payload: member call.
+  expected = "triangle\n3\ntriangle\n1\n7\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  puts "  OK optional_unwrap_chain_test e2e (unwrap().method() on class + interface)"
+end
+
 def test_cast_e2e!
   assert!(File.exist?(CAST_TEST), "cast_test case not found: #{CAST_TEST}")
   assert!(File.exist?(STDLIB_OPTIONAL), "stdlib optional not found: #{STDLIB_OPTIONAL}")
@@ -3729,6 +3917,12 @@ def main
     test_array_sugar_e2e!
     test_array_poly_e2e!
     test_match_e2e!
+    test_match_expr_e2e!
+    test_implicit_boxing_e2e!
+    test_coalesce_boxing_e2e!
+    test_variant_unbox_return_e2e!
+    test_comment_pollution_e2e!
+    test_optional_unwrap_chain_e2e!
     test_cast_e2e!
     test_downcast_e2e!
     test_partial_e2e!

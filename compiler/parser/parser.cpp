@@ -261,6 +261,10 @@ ast::StmtPtr Parser::parseStatement() {
 }
 
 ast::ExprPtr Parser::parseUnaryExpression() {
+  // Value-producing `match expr { ... }` — valid anywhere an expression is.
+  if (check(ast::TokenType::KwMatch)) {
+    return parseMatchExpression();
+  }
   // Prefix ++ / -- : `++a!` / `--a!` (mutable `!` required after target).
   if (check(ast::TokenType::PlusPlus) || check(ast::TokenType::MinusMinus)) {
     const bool is_inc = check(ast::TokenType::PlusPlus);
@@ -1386,6 +1390,17 @@ ast::MatchBranch Parser::parseMatchBranch() {
   if (check(ast::TokenType::Identifier) && peek().lexeme == "_") {
     advance();
     branch.is_wildcard = true;
+    branch.pattern_kind = ast::MatchPatternKind::Wildcard;
+  } else if (check(ast::TokenType::Identifier) && peek().lexeme == "none") {
+    advance();
+    branch.pattern_kind = ast::MatchPatternKind::None;
+  } else if (check(ast::TokenType::Identifier) && peek().lexeme == "some") {
+    advance();
+    branch.pattern_kind = ast::MatchPatternKind::Some;
+    consume(ast::TokenType::LParen, "expected '(' after 'some'");
+    ast::Token name = consume(ast::TokenType::Identifier, "expected binding name in 'some(...)'");
+    branch.binding = name.lexeme;
+    consume(ast::TokenType::RParen, "expected ')' after 'some' binding");
   } else if (check(ast::TokenType::IntLiteral)) {
     ast::Token tok = peek();
     advance();
@@ -1408,14 +1423,36 @@ ast::MatchBranch Parser::parseMatchBranch() {
     lit->value = tok.type == ast::TokenType::KwTrue;
     branch.pattern = std::move(lit);
   } else {
-    errorAt(peek(), "expected match pattern (literal or '_')");
+    errorAt(peek(), "expected match pattern (literal, '_', 'some(...)' or 'none')");
     synchronize();
     return branch;
   }
 
   consume(ast::TokenType::FatArrow, "expected '=>' after match pattern");
-  branch.body = parseBlockBody();
+  // `=> { ... }` is the statement form; anything else is an arm expression.
+  if (check(ast::TokenType::LBrace)) {
+    branch.body = parseBlockBody();
+  } else {
+    branch.value = parseExpression(0);
+  }
   return branch;
+}
+
+ast::ExprPtr Parser::parseMatchExpression() {
+  ast::Token kw = consume(ast::TokenType::KwMatch, "expected 'match'");
+  auto expr = std::make_unique<ast::MatchExpr>();
+  expr->loc = kw.loc;
+  expr->scrutinee = parseExpression(0);
+  consume(ast::TokenType::LBrace, "expected '{' after match expression");
+  while (!atEnd() && !check(ast::TokenType::RBrace)) {
+    // Arms may be separated by ASI ';' or an explicit ','.
+    if (match(ast::TokenType::Semicolon) || match(ast::TokenType::Comma)) {
+      continue;
+    }
+    expr->branches.push_back(parseMatchBranch());
+  }
+  consume(ast::TokenType::RBrace, "expected '}' after match arms");
+  return expr;
 }
 
 ast::StmtPtr Parser::parseMatchStmt() {
