@@ -37,6 +37,8 @@ COALESCE_TEST = ROOT.join("tests", "cases", "coalesce_test.l")
 COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_bad.l")
 PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
 STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
+STDLIB_PROPERTY_TREE = ROOT.join("stdlib", "property_tree.l")
+PROPERTY_TREE_TEST = ROOT.join("tests", "cases", "property_tree_test.l")
 HTTP_PARSE_TEST = ROOT.join("tests", "cases", "http_parse_test.l")
 BREAK_CONTINUE_TEST = ROOT.join("tests", "cases", "break_continue_test.l")
 BREAK_OUTSIDE_LOOP_BAD = ROOT.join("tests", "cases", "break_outside_loop_bad.l")
@@ -3092,6 +3094,39 @@ def test_properties_e2e!
   puts "  OK properties e2e (set/get via Variant + ?? defaults + 9 edge cases)"
 end
 
+def test_property_tree_e2e!
+  assert!(File.exist?(PROPERTY_TREE_TEST), "property_tree_test case not found: #{PROPERTY_TREE_TEST}")
+  assert!(File.exist?(STDLIB_PROPERTY_TREE), "stdlib property_tree not found: #{STDLIB_PROPERTY_TREE}")
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
+                       STDLIB_PROPERTY_TREE, PROPERTY_TREE_TEST)
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("property_tree_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile property_tree_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "property_tree_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "property_tree_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "42\n1\n0\nempty-has-no-value\nabsent-child-empty\nabsent-value-empty\n" \
+             "1\n7\n2\n9\nsiblings-isolated\n99\nnode2-is-leaf\nroot-not-leaf\n" \
+             "cleared-value-empty\nhi\npath-found\npath-missing-empty\n9\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # Recursive tree must stay a single pointer wide (no infinite-size struct).
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm property_tree_test failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("%PropertyTree = type { ptr }"),
+          "IR missing pointer-sized recursive PropertyTree\n#{ir}")
+
+  puts "  OK property_tree e2e (recursive tree, chained drill-down + 9 edge cases)"
+end
+
 # Minimal HTTP response parser: status code + CPropertys headers, pure string
 # processing (no sockets). Covers the adversarial edges: empty response, missing
 # CRLF, absent header, repeated header, ':' inside a value.
@@ -4104,6 +4139,7 @@ def main
     test_coalesce_e2e!
     test_coalesce_non_optional_bad!
     test_properties_e2e!
+    test_property_tree_e2e!
     test_http_parse_e2e!
     test_break_continue_e2e!
     test_break_outside_loop_rejected!

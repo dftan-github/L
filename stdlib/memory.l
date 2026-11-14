@@ -14,4 +14,9 @@ extern module c_memory {
     fun l_store_u8(ptr p, i32 index, i32 v) -> void
     fun l_store_ptr(ptr p, ptr v) -> void
     fun l_load_ptr(ptr p) -> ptr
+    fun l_null_ptr() -> ptr
+    fun l_store_i32_at(ptr p, i32 offset, i32 v) -> void
+    fun l_load_i32_at(ptr p, i32 offset) -> i32
+    fun l_store_ptr_at(ptr p, i32 offset, ptr v) -> void
+    fun l_load_ptr_at(ptr p, i32 offset) -> ptr
 }

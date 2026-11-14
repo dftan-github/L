@@ -97,6 +97,7 @@ private:
   bool classImplements(const std::string& class_name, const std::string& iface) const;
   const ClassInfo* findClass(const std::string& name) const;
   ClassInfo* findClassMut(const std::string& name);
+  void resettlePendingStructBodies();
   const InterfaceInfo* findInterface(const std::string& name) const;
 
   llvm::AllocaInst* createEntryAlloca(llvm::Function* fn, llvm::Type* ty,
@@ -187,6 +188,9 @@ private:
   void cancelAutoFreeLocal(const std::string& name);
   // If a returned expression aliases a heap local (e.g. `return c as ptr`), drop auto-free.
   void cancelAutoFreeEscaping(const ast::Expr& expr);
+  // Raw-pointer aliases of heap locals: `ptr p = obj as ptr` records p → obj so an
+  // escape through `p` also cancels the owning heap local's auto-free.
+  std::unordered_map<std::string, std::string> ptr_aliases_;
   void noteExplicitLFreeInDefer(const ast::DeferStmt& stmt);
   bool emitLFreeOfLocal(const std::string& name);
   bool flushCurrentScopeAutoFrees();
@@ -360,6 +364,14 @@ private:
   // Class params without trailing '!': reject field / index stores through them.
   std::unordered_set<std::string> readonly_refs_;
   std::unordered_map<std::string, ClassInfo> classes_;
+  // Generic specializations whose field list mentioned a class that was still
+  // mid-registration (opaque). Re-`setBody` them once the class bodies settle,
+  // otherwise LLVM keeps them unsized ("GEP into unsized type").
+  std::vector<std::pair<std::string, std::vector<llvm::Type*>>> pending_struct_bodies_;
+  // `true` while class struct bodies are being laid out: specializations may
+  // declare method signatures but must defer bodies until every body is sized.
+  bool in_struct_pass_ = false;
+  std::vector<std::string> pending_generic_bodies_;
   std::unordered_map<std::string, InterfaceInfo> interfaces_;
   std::unordered_map<std::string, const ast::FuncDeclStmt*> generic_templates_;
   std::unordered_map<std::string, const ast::FuncDeclStmt*> concrete_funcs_;  // for KW reorder

@@ -761,6 +761,16 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
           return "void";
         }
       }
+      // Plain function-pointer local invoke: `f := |x| x * 2` then `f(5)`.
+      // Without this, inference falls through to the free-function lookup and
+      // reports "cannot infer type" (regression seen by lambda_test).
+      if (auto lit = local_types_.find(call.callee); lit != local_types_.end()) {
+        const std::string ft = resolveTypeName(lit->second);
+        if (isFunTypeName(ft)) {
+          const auto arrow = ft.rfind("->");
+          return arrow != std::string::npos ? ft.substr(arrow + 2) : std::string("void");
+        }
+      }
       auto it = concrete_funcs_.find(call.callee);
       if (it == concrete_funcs_.end() && !current_module_.empty()) {
         it = concrete_funcs_.find(current_module_ + "::" + call.callee);
@@ -778,6 +788,13 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
           return "fun()->i32";
         }
         return resolveTypeName(it->second->return_type);
+      }
+      // Implicit `this`: a bare `name(...)` may be a method of the enclosing class.
+      if (!current_class_.empty()) {
+        const std::string t = methodReturnTypeOn(resolveTypeName(current_class_), call.callee);
+        if (!t.empty()) {
+          return t;
+        }
       }
       return {};
     }
@@ -1073,6 +1090,16 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
   info.ir_name = mangleSpecName(tmpl.name, args);
   info.type = llvm::StructType::create(globalContext(), info.ir_name);
 
+  // Register before filling fields so a nested specialization (`Map<T>` whose
+  // methods mention `Optional<T>`) sees this type as known instead of recursing.
+  classes_[instance_name] = std::move(info);
+  ClassInfo* mut = findClassMut(instance_name);
+  auto spec_failed = [this, &instance_name, &saved_subst]() {
+    classes_.erase(instance_name);
+    type_subst_ = std::move(saved_subst);
+    return false;
+  };
+
   std::vector<llvm::Type*> elements;
   unsigned idx = 0;
   for (const auto& field : tmpl.fields) {
@@ -1082,16 +1109,15 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
     const std::string fty_name = resolveTypeName(field->type_name);
     if (isClassType(fty_name)) {
       if (!ensureTypeAvailable(fty_name)) {
-        type_subst_ = std::move(saved_subst);
-        return false;
+        return spec_failed();
       }
     } else if (isInterfaceType(fty_name)) {
       // ok — fat pointer field
     }
     const std::string phys = physicalFieldName(field->name);
-    info.field_index[phys] = idx++;
-    info.field_types.push_back(fty_name);
-    info.field_is_pub[phys] = field->is_pub;
+    mut->field_index[phys] = idx++;
+    mut->field_types.push_back(fty_name);
+    mut->field_is_pub[phys] = field->is_pub;
     if (isClassType(fty_name)) {
       elements.push_back(findClass(fty_name)->type);
     } else if (isInterfaceType(fty_name)) {
@@ -1100,10 +1126,22 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
       elements.push_back(llvmTypeForTypeName(fty_name));
     }
   }
-  info.type->setBody(elements, /*isPacked=*/false);
-  classes_[instance_name] = std::move(info);
+  mut->type->setBody(elements, /*isPacked=*/false);
+  // A field may reference a class whose own body is still being built (e.g.
+  // `Optional<T>` while `T` registers). Re-apply bodies once types settle.
+  bool any_opaque = false;
+  for (llvm::Type* e : elements) {
+    auto* st = llvm::dyn_cast<llvm::StructType>(e);
+    if (st && st->isOpaque()) {
+      any_opaque = true;
+      break;
+    }
+  }
+  if (any_opaque) {
+    pending_struct_bodies_.emplace_back(instance_name, std::move(elements));
+  }
 
-  ClassInfo* cinfo = findClassMut(instance_name);
+  ClassInfo* cinfo = mut;
   ensureTypeId(*cinfo);
   for (const auto& method : tmpl.methods) {
     if (!method) {
@@ -1139,6 +1177,17 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
       fn->arg_begin()->setName("this");
     }
     cinfo->methods[method->name] = fn;
+  }
+
+  if (in_struct_pass_) {
+    // Bodies must wait: a referenced struct body (e.g. `%PropertyTree`) may still
+    // be opaque, and any GEP into this instance would fail verification.
+    if (std::find(pending_generic_bodies_.begin(), pending_generic_bodies_.end(),
+                  instance_name) == pending_generic_bodies_.end()) {
+      pending_generic_bodies_.push_back(instance_name);
+    }
+    type_subst_ = std::move(saved_subst);
+    return true;
   }
 
   // Specialization may run mid-function (e.g. first Array<i32> local); preserve IRBuilder.
@@ -1180,6 +1229,7 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
     builder_.SetInsertPoint(saved_insert, saved_point);
   }
   type_subst_ = std::move(saved_subst);
+  resettlePendingStructBodies();
   return ok;
 }
 
@@ -1246,6 +1296,12 @@ llvm::Value* Codegen::toI32(llvm::Value* v) {
   if (v->getType()->isIntegerTy(1)) {
     return builder_.CreateZExt(v, i32Ty(), "booltmp");
   }
+  if (!v->getType()->isIntegerTy()) {
+    // Never fabricate an integer from a struct/pointer: callers must convert
+    // explicitly (a silent `sext ptr` breaks module verification).
+    error("internal: cannot convert a non-integer value to i32");
+    return llvm::ConstantInt::get(i32Ty(), 0);
+  }
   return builder_.CreateIntCast(v, i32Ty(), /*isSigned=*/true, "casttmp");
 }
 
@@ -1301,6 +1357,12 @@ void Codegen::cancelAutoFreeEscaping(const ast::Expr& expr) {
     case ast::ExprKind::Identifier: {
       const auto& id = static_cast<const ast::IdentifierExpr&>(expr);
       cancelAutoFreeLocal(id.name);
+      // A raw-pointer alias escaping (`ptr p = obj as ptr` … `return p`) hands the
+      // owning heap local to the caller as well.
+      auto ait = ptr_aliases_.find(id.name);
+      if (ait != ptr_aliases_.end()) {
+        cancelAutoFreeLocal(ait->second);
+      }
       break;
     }
     case ast::ExprKind::Cast: {
@@ -1773,6 +1835,18 @@ bool Codegen::emitClassStruct(const ast::ClassDeclStmt& decl) {
   info.interfaces = decl.interfaces;
   info.ast = &decl;
 
+  // Register the (still opaque) struct BEFORE walking fields. A self-recursive
+  // shape like `Map<String, PropertyTree>` inside `PropertyTree` would otherwise
+  // recurse into specialization while this class is unknown, silently dropping
+  // the module. LLVM structs are identified types, so a later `setBody` is fine
+  // and the recursive reference stays a pointer-sized slot.
+  classes_[decl.name] = std::move(info);
+  auto register_failed = [this, &decl]() {
+    classes_.erase(decl.name);
+    return false;
+  };
+  ClassInfo* self = findClassMut(decl.name);
+
   std::vector<llvm::Type*> elements;
   unsigned idx = 0;
   for (const auto& field : decl.fields) {
@@ -1780,21 +1854,21 @@ bool Codegen::emitClassStruct(const ast::ClassDeclStmt& decl) {
       continue;
     }
     const std::string phys = physicalFieldName(field->name);
-    if (info.field_index.count(phys) != 0) {
+    if (self->field_index.count(phys) != 0) {
       error("duplicate field '" + field->name + "' in class " + decl.name);
-      return false;
+      return register_failed();
     }
     const std::string fty_name = field->type_name;
     // A field may name a generic instantiation (`Map<Variant>`) nobody has
     // materialized yet — materialize it so the field embeds the real struct.
     if (fty_name.find('<') != std::string::npos && !isClassType(fty_name)) {
       if (!ensureTypeAvailable(fty_name)) {
-        return false;
+        return register_failed();
       }
     }
     if (isClassType(fty_name)) {
       if (!ensureTypeAvailable(fty_name)) {
-        return false;
+        return register_failed();
       }
     }
     llvm::Type* fty = nullptr;
@@ -1805,15 +1879,42 @@ bool Codegen::emitClassStruct(const ast::ClassDeclStmt& decl) {
     } else {
       fty = llvmTypeForTypeName(fty_name);
     }
-    info.field_index[phys] = idx++;
-    info.field_types.push_back(fty_name);
-    info.field_is_pub[phys] = field->is_pub;
+    self->field_index[phys] = idx++;
+    self->field_types.push_back(fty_name);
+    self->field_is_pub[phys] = field->is_pub;
     elements.push_back(fty);
   }
-  info.type->setBody(elements, /*isPacked=*/false);
-  classes_[decl.name] = std::move(info);
-  ensureTypeId(*findClassMut(decl.name));
+  self->type->setBody(elements, /*isPacked=*/false);
+  ensureTypeId(*self);
+  resettlePendingStructBodies();
   return true;
+}
+
+// Re-applies field lists captured while a referenced class was still opaque.
+// Cheap (no new types), and keeps recursive generic shapes sized.
+void Codegen::resettlePendingStructBodies() {
+  std::vector<std::pair<std::string, std::vector<llvm::Type*>>> still_pending;
+  for (auto& pending : pending_struct_bodies_) {
+    bool all_sized = true;
+    for (llvm::Type* e : pending.second) {
+      if (auto* st = llvm::dyn_cast<llvm::StructType>(e)) {
+        if (st->isOpaque()) {
+          all_sized = false;
+          break;
+        }
+      }
+    }
+    ClassInfo* info = findClassMut(pending.first);
+    if (!info || !info->type) {
+      continue;
+    }
+    if (!all_sized) {
+      still_pending.push_back(std::move(pending));
+      continue;
+    }
+    info->type->setBody(pending.second, /*isPacked=*/false);
+  }
+  pending_struct_bodies_ = std::move(still_pending);
 }
 
 bool Codegen::declareClassMethods(const ast::ClassDeclStmt& decl) {
@@ -2307,6 +2408,7 @@ bool Codegen::emit(const ast::Module& module) {
   // `String` is a dependency of nearly every stdlib module, so its struct +
   // methods go first. Only then can generic instantiations that use it
   // (`Map<Variant>` → `keys()`) emit method bodies cleanly.
+  in_struct_pass_ = true;
   for (const ast::StmtPtr& stmt : module.stmts) {
     if (!stmt || stmt->kind() != ast::StmtKind::ClassDecl) {
       continue;
@@ -2332,6 +2434,51 @@ bool Codegen::emit(const ast::Module& module) {
       continue;  // struct + methods already emitted above
     }
     if (!emitClassStruct(cls)) {
+      return false;
+    }
+  }
+
+  // Every non-generic body is sized now, so deferred specializations are safe.
+  in_struct_pass_ = false;
+  resettlePendingStructBodies();
+  while (!pending_generic_bodies_.empty()) {
+    std::string name = pending_generic_bodies_.back();
+    pending_generic_bodies_.pop_back();
+    ClassInfo* ninfo = findClassMut(name);
+    if (!ninfo) {
+      error("lost specialization for " + name);
+      return false;
+    }
+    auto it = generic_class_templates_.find(ninfo->template_name);
+    if (it == generic_class_templates_.end()) {
+      error("lost generic template for " + name);
+      return false;
+    }
+    for (auto& pending : pending_struct_bodies_) {
+      if (pending.first == name) {
+        ninfo->type->setBody(pending.second, /*isPacked=*/false);
+        break;
+      }
+    }
+    // Method bodies resolve `T` through type_subst_, same as inline specialization.
+    auto saved_subst = type_subst_;
+    std::unordered_map<std::string, std::string> subst;
+    for (size_t i = 0; i < it->second->generics.size() && i < ninfo->type_args.size(); ++i) {
+      subst[it->second->generics[i].name] = ninfo->type_args[i];
+    }
+    type_subst_ = subst;
+    bool bodies_ok = true;
+    for (const auto& method : it->second->methods) {
+      if (!method) {
+        continue;
+      }
+      if (!emitMethodBody(name, *method)) {
+        bodies_ok = false;
+        break;
+      }
+    }
+    type_subst_ = std::move(saved_subst);
+    if (!bodies_ok) {
       return false;
     }
   }
@@ -4118,6 +4265,19 @@ std::string Codegen::inferTypeFromExpr(const ast::Expr& expr) {
     }
     return {};
   }
+  if (expr.kind() == ast::ExprKind::MethodCall ||
+      expr.kind() == ast::ExprKind::Call ||
+      expr.kind() == ast::ExprKind::Index ||
+      expr.kind() == ast::ExprKind::MemberAccess) {
+    // These carry a precise static type (see exprTypeOf). The generic fallback
+    // below reports i32 for anything unknown, which would make e.g. a `ptr`
+    // returning method look like an integer at cast / declaration sites.
+    std::string t = exprTypeOf(expr);
+    if (!t.empty()) {
+      return t;
+    }
+    return {};
+  }
   if (expr.kind() == ast::ExprKind::ArrayLiteral) {
     const auto& lit = static_cast<const ast::ArrayLiteralExpr&>(expr);
     std::string elem = "i32";
@@ -4822,6 +4982,16 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   }
 
   llvm::Type* lty = llvmTypeForTypeName(type_name);
+  // `ptr p = <heapLocal> as ptr` keeps a raw alias of the owning heap local.
+  if (type_name == "ptr" && decl.init && decl.init->kind() == ast::ExprKind::Cast) {
+    const auto& cast = static_cast<const ast::CastExpr&>(*decl.init);
+    if (cast.value && cast.value->kind() == ast::ExprKind::Identifier) {
+      const auto& src = static_cast<const ast::IdentifierExpr&>(*cast.value);
+      if (heap_locals_.count(src.name) != 0) {
+        ptr_aliases_[decl.name] = src.name;
+      }
+    }
+  }
   llvm::AllocaInst* alloca = createEntryAlloca(fn, lty, decl.name);
   llvm::Value* init = nullptr;
   if (decl.init) {
@@ -5452,7 +5622,10 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
         }
       }
     }
-    if (dest_ty && dest_ty->isStructTy() && v->getType() == dest_ty->getPointerTo()) {
+    if (dest_ty && v->getType() == dest_ty) {
+      // Exact match (e.g. an inline `Variant` field assigned from a `%Variant`
+      // value) — store as-is; no integer coercion applies.
+    } else if (dest_ty && dest_ty->isStructTy() && v->getType() == dest_ty->getPointerTo()) {
       // Inline struct field/element: ABI passes classes by pointer; store by value.
       // Only deref when the value really points at that struct (not a raw cstr).
       v = builder_.CreateLoad(dest_ty, v, "store.struct.copy");
@@ -5468,9 +5641,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
       }
     } else if (dest_ty && dest_ty->isIntegerTy(1)) {
       v = toI1(v);
-    } else if (!v->getType()->isPointerTy() &&
-               !(dest_ty && dest_ty->isIntegerTy(64)) &&
-               !(dest_ty && dest_ty->isDoubleTy())) {
+    } else if (dest_ty && dest_ty->isIntegerTy(32) && v->getType()->isIntegerTy()) {
       v = toI32(v);
     }
   }

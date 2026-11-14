@@ -18,6 +18,14 @@ COMPILER = ENV.fetch(
 STDLIB_MEMORY = ROOT.join("stdlib", "memory.l")
 STDLIB_IO = ROOT.join("stdlib", "io.l")
 LOOP_BENCH = BENCH_DIR.join("loop_bench.l")
+TREE_BENCH = BENCH_DIR.join("property_tree_bench.l")
+STDLIB_STRING = ROOT.join("stdlib", "string.l")
+STDLIB_ARRAY = ROOT.join("stdlib", "array.l")
+STDLIB_OPTIONAL = ROOT.join("stdlib", "optional.l")
+STDLIB_MAP = ROOT.join("stdlib", "map.l")
+STDLIB_VARIANT = ROOT.join("stdlib", "variant.l")
+STDLIB_PROPERTY_TREE = ROOT.join("stdlib", "property_tree.l")
+STDLIB_ENV = ROOT.join("stdlib", "env.l")
 
 def die!(msg)
   warn "FAIL: #{msg}"
@@ -57,4 +65,22 @@ ms, out = time_exe!(exe)
 normalized = out.to_s.gsub("\r\n", "\n")
 puts normalized
 puts format("wall_time_ms=%.3f", ms)
+
+# PropertyTree: recursive tree with a lazily created `Map<ptr>` child index.
+tree_exe = OUT_DIR.join("property_tree_bench.exe")
+puts "Compiling property_tree_bench.l with -O3 ..."
+compile_o3!([STDLIB_ARRAY, STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
+             STDLIB_PROPERTY_TREE, STDLIB_ENV, TREE_BENCH], tree_exe)
+
+%w[build lookup deep].each do |mode|
+  puts "Running #{tree_exe} #{mode} ..."
+  t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  out, err, status = Open3.capture3(tree_exe.to_s, mode)
+  t1 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  die!("property_tree #{mode} failed (#{status.exitstatus})\n#{err}\n#{out}") unless status.success?
+  puts out.to_s.gsub("\r\n", "\n")
+  puts format("wall_time_ms=%.3f", (t1 - t0) * 1000.0)
+end
+
 puts "PASS"
+

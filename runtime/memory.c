@@ -66,6 +66,34 @@ void l_store_u8(void* p, int32_t index, int32_t v) {
   }
 }
 
+/* Byte-offset accessors: let L code model a small record without pointer
+ * arithmetic (raw `ptr + i32` is rejected by the type checker). */
+void l_store_i32_at(void* p, int32_t offset, int32_t v) {
+  if (p != NULL && offset >= 0) {
+    *(int32_t*)((unsigned char*)p + offset) = v;
+  }
+}
+
+int32_t l_load_i32_at(void* p, int32_t offset) {
+  if (p == NULL || offset < 0) {
+    return 0;
+  }
+  return *(const int32_t*)((const unsigned char*)p + offset);
+}
+
+void l_store_ptr_at(void* p, int32_t offset, void* v) {
+  if (p != NULL && offset >= 0) {
+    *(void**)((unsigned char*)p + offset) = v;
+  }
+}
+
+void* l_load_ptr_at(void* p, int32_t offset) {
+  if (p == NULL || offset < 0) {
+    return NULL;
+  }
+  return *(void* const*)((const unsigned char*)p + offset);
+}
+
 int32_t l_load_i32(void* p) {
   if (p == NULL) {
     return 0;
@@ -98,6 +126,9 @@ void* l_load_ptr(void* p) {
   }
   return *(void* const*)p;
 }
+
+/* A well-typed null pointer value for L code (L has no `0 as ptr` cast). */
+void* l_null_ptr(void) { return NULL; }
 
 /* Bump allocator: one malloc'd slab, freed all at once via l_arena_free. */
 void* l_arena_new(size_t size) {
