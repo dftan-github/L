@@ -205,6 +205,12 @@ ast::StmtPtr Parser::parseStatement() {
   if (check(ast::TokenType::KwWhile)) {
     return parseWhileStmt();
   }
+  if (check(ast::TokenType::KwBreak)) {
+    return parseBreakStmt();
+  }
+  if (check(ast::TokenType::KwContinue)) {
+    return parseContinueStmt();
+  }
   if (check(ast::TokenType::KwFor)) {
     return parseForInStmt();
   }
@@ -305,6 +311,41 @@ ast::ExprPtr Parser::parseUnaryExpression() {
     expr->loc = amp.loc;
     expr->operand = std::move(operand);
     return expr;
+  }
+  // Unary minus: `-expr`. Literals fold into a negative constant so `?? -1`
+  // works at argument position; anything else desugars to `0 - expr`.
+  if (check(ast::TokenType::Minus)) {
+    ast::Token minus = peek();
+    advance();
+    ast::ExprPtr operand = parseUnaryExpression();
+    if (!operand) {
+      return nullptr;
+    }
+    if (operand->kind() == ast::ExprKind::IntLiteral) {
+      auto& lit = static_cast<ast::IntLiteralExpr&>(*operand);
+      lit.loc = minus.loc;
+      if (lit.value.empty() || lit.value[0] != '-') {
+        lit.value = "-" + lit.value;
+      }
+      return operand;
+    }
+    if (operand->kind() == ast::ExprKind::FloatLiteral) {
+      auto& lit = static_cast<ast::FloatLiteralExpr&>(*operand);
+      lit.loc = minus.loc;
+      if (lit.value.empty() || lit.value[0] != '-') {
+        lit.value = "-" + lit.value;
+      }
+      return operand;
+    }
+    auto zero = std::make_unique<ast::IntLiteralExpr>();
+    zero->loc = minus.loc;
+    zero->value = "0";
+    auto binary = std::make_unique<ast::BinaryExpr>();
+    binary->loc = minus.loc;
+    binary->op = "-";
+    binary->left = std::move(zero);
+    binary->right = std::move(operand);
+    return binary;
   }
   ast::ExprPtr left = parsePrimaryExpression();
   if (!left) {
@@ -608,6 +649,7 @@ bool Parser::maybeConsumeStmtSemicolon() {
       check(ast::TokenType::KwReturn) || check(ast::TokenType::KwIf) ||
       check(ast::TokenType::KwMatch) || check(ast::TokenType::KwWhile) ||
       check(ast::TokenType::KwFor) || check(ast::TokenType::KwDefer) ||
+      check(ast::TokenType::KwBreak) || check(ast::TokenType::KwContinue) ||
       check(ast::TokenType::KwSync) || check(ast::TokenType::KwSpawn) ||
       check(ast::TokenType::KwConst) || check(ast::TokenType::KwConstd) ||
       check(ast::TokenType::KwFun) || check(ast::TokenType::KwClass) ||
@@ -1392,7 +1434,31 @@ ast::StmtPtr Parser::parseWhileStmt() {
   auto stmt = std::make_unique<ast::WhileStmt>();
   stmt->loc = kw.loc;
   stmt->cond = std::move(cond);
+  ++loop_depth_;
   stmt->body = parseBlockBody();
+  --loop_depth_;
+  return stmt;
+}
+
+ast::StmtPtr Parser::parseBreakStmt() {
+  ast::Token kw = consume(ast::TokenType::KwBreak, "expected 'break'");
+  if (loop_depth_ == 0) {
+    errorAt(kw, "'break' is only allowed inside a loop");
+  }
+  maybeConsumeStmtSemicolon();
+  auto stmt = std::make_unique<ast::BreakStmt>();
+  stmt->loc = kw.loc;
+  return stmt;
+}
+
+ast::StmtPtr Parser::parseContinueStmt() {
+  ast::Token kw = consume(ast::TokenType::KwContinue, "expected 'continue'");
+  if (loop_depth_ == 0) {
+    errorAt(kw, "'continue' is only allowed inside a loop");
+  }
+  maybeConsumeStmtSemicolon();
+  auto stmt = std::make_unique<ast::ContinueStmt>();
+  stmt->loc = kw.loc;
   return stmt;
 }
 
@@ -1406,7 +1472,9 @@ ast::StmtPtr Parser::parseForInStmt() {
   stmt->loc = kw.loc;
   stmt->item_name = item.lexeme;
   stmt->iterable = std::move(iterable);
+  ++loop_depth_;
   stmt->body = parseBlockBody();
+  --loop_depth_;
   return stmt;
 }
 
@@ -1797,6 +1865,8 @@ void Parser::synchronize() {
       case ast::TokenType::KwMatch:
       case ast::TokenType::KwWhile:
       case ast::TokenType::KwFor:
+      case ast::TokenType::KwBreak:
+      case ast::TokenType::KwContinue:
       case ast::TokenType::KwDefer:
       case ast::TokenType::KwSync:
       case ast::TokenType::KwSpawn:

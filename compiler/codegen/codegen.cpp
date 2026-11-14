@@ -2510,6 +2510,10 @@ bool Codegen::emitStmt(const ast::Stmt& stmt) {
       return emitMatch(static_cast<const ast::MatchStmt&>(stmt));
     case ast::StmtKind::While:
       return emitWhile(static_cast<const ast::WhileStmt&>(stmt));
+    case ast::StmtKind::Break:
+      return emitBreak(static_cast<const ast::BreakStmt&>(stmt));
+    case ast::StmtKind::Continue:
+      return emitContinue(static_cast<const ast::ContinueStmt&>(stmt));
     case ast::StmtKind::ForIn:
       return emitForIn(static_cast<const ast::ForInStmt&>(stmt));
     case ast::StmtKind::Defer:
@@ -5438,13 +5442,75 @@ bool Codegen::emitWhile(const ast::WhileStmt& stmt) {
   builder_.CreateCondBr(cond, body_bb, end_bb);
 
   builder_.SetInsertPoint(body_bb);
-  if (!emitStmtListScoped(stmt.body)) {
+  loop_stack_.push_back(LoopTargets{cond_bb, end_bb, defer_scopes_.size()});
+  const bool body_ok = emitStmtListScoped(stmt.body);
+  loop_stack_.pop_back();
+  if (!body_ok) {
     return false;
   }
+  // `break` already terminates the block; only branch back when still open.
   branchTo(cond_bb);
 
   builder_.SetInsertPoint(end_bb);
   return true;
+}
+
+bool Codegen::emitBreak(const ast::BreakStmt& stmt) {
+  (void)stmt;
+  if (loop_stack_.empty()) {
+    error("'break' outside a loop");
+    return false;
+  }
+  flushLoopJumpScopes();
+  branchTo(loop_stack_.back().end_bb);
+  return true;
+}
+
+bool Codegen::emitContinue(const ast::ContinueStmt& stmt) {
+  (void)stmt;
+  if (loop_stack_.empty()) {
+    error("'continue' outside a loop");
+    return false;
+  }
+  flushLoopJumpScopes();
+  branchTo(loop_stack_.back().cond_bb);
+  return true;
+}
+
+// Flush `defer` bodies and auto-frees for blocks we are jumping out of.
+// Only instrumentation is emitted; the scope stacks are left untouched and are
+// unwound by the enclosing emitStmtListScoped / loop epilogue. flushCurrent*
+// clears the entries it emits, so nothing can be double-freed.
+void Codegen::flushLoopJumpScopes() {
+  if (loop_stack_.empty()) {
+    return;
+  }
+  const size_t base = loop_stack_.back().base_scope_depth;
+  if (defer_scopes_.size() <= base) {
+    return;
+  }
+  // Emit from the innermost scope outwards by temporarily walking a copy of the
+  // tail, without mutating the stack depth.
+  const size_t extra = defer_scopes_.size() - base;
+  for (size_t k = 0; k < extra; ++k) {
+    const size_t idx = defer_scopes_.size() - 1 - k;
+    auto& scope = defer_scopes_[idx];
+    for (auto it = scope.rbegin(); it != scope.rend(); ++it) {
+      const ast::DeferStmt* def = *it;
+      if (!def) {
+        continue;
+      }
+      for (const ast::StmtPtr& s : def->body) {
+        if (s && !emitStmt(*s)) {
+          return;
+        }
+      }
+    }
+    scope.clear();
+    if (idx < auto_free_scopes_.size()) {
+      auto_free_scopes_[idx].clear();
+    }
+  }
 }
 
 bool Codegen::emitForInRange(const ast::ForInStmt& stmt, const ast::BinaryExpr& range) {
@@ -5473,6 +5539,7 @@ bool Codegen::emitForInRange(const ast::ForInStmt& stmt, const ast::BinaryExpr& 
 
   llvm::BasicBlock* cond_bb = llvm::BasicBlock::Create(globalContext(), "for.range.cond", fn);
   llvm::BasicBlock* body_bb = llvm::BasicBlock::Create(globalContext(), "for.range.body", fn);
+  llvm::BasicBlock* inc_bb = llvm::BasicBlock::Create(globalContext(), "for.range.inc", fn);
   llvm::BasicBlock* end_bb = llvm::BasicBlock::Create(globalContext(), "for.range.end", fn);
 
   branchTo(cond_bb);
@@ -5491,7 +5558,10 @@ bool Codegen::emitForInRange(const ast::ForInStmt& stmt, const ast::BinaryExpr& 
   heap_locals_.erase(stmt.item_name);
 
   enterDeferScope();
+  // `continue` must run the increment, not jump straight back to the condition.
+  loop_stack_.push_back(LoopTargets{inc_bb, end_bb, defer_scopes_.size()});
   const bool body_ok = emitStmtList(stmt.body);
+  loop_stack_.pop_back();
   if (body_ok) {
     exitDeferScope();
   } else {
@@ -5511,7 +5581,9 @@ bool Codegen::emitForInRange(const ast::ForInStmt& stmt, const ast::BinaryExpr& 
     return false;
   }
 
-  if (builder_.GetInsertBlock() && !builder_.GetInsertBlock()->getTerminator()) {
+  branchTo(inc_bb);
+  builder_.SetInsertPoint(inc_bb);
+  {
     llvm::Value* v = builder_.CreateLoad(i32Ty(), item_slot, "for.range.i.inc");
     llvm::Value* next = builder_.CreateAdd(v, llvm::ConstantInt::get(i32Ty(), 1), "for.range.next");
     builder_.CreateStore(next, item_slot);
@@ -5581,6 +5653,7 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
 
   llvm::BasicBlock* cond_bb = llvm::BasicBlock::Create(globalContext(), "for.cond", fn);
   llvm::BasicBlock* body_bb = llvm::BasicBlock::Create(globalContext(), "for.body", fn);
+  llvm::BasicBlock* inc_bb = llvm::BasicBlock::Create(globalContext(), "for.inc", fn);
   llvm::BasicBlock* end_bb = llvm::BasicBlock::Create(globalContext(), "for.end", fn);
 
   branchTo(cond_bb);
@@ -5612,7 +5685,10 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
   heap_locals_.erase(stmt.item_name);
 
   enterDeferScope();
+  // `continue` must run the index increment before re-testing.
+  loop_stack_.push_back(LoopTargets{inc_bb, end_bb, defer_scopes_.size()});
   const bool body_ok = emitStmtList(stmt.body);
+  loop_stack_.pop_back();
   if (body_ok) {
     exitDeferScope();
   } else {
@@ -5632,7 +5708,9 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
     return false;
   }
 
-  if (builder_.GetInsertBlock() && !builder_.GetInsertBlock()->getTerminator()) {
+  branchTo(inc_bb);
+  builder_.SetInsertPoint(inc_bb);
+  {
     llvm::Value* cur = builder_.CreateLoad(i32Ty(), idx_slot, "for.i.inc");
     llvm::Value* next = builder_.CreateAdd(cur, llvm::ConstantInt::get(i32Ty(), 1), "for.i.next");
     builder_.CreateStore(next, idx_slot);

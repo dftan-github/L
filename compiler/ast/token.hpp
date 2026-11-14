@@ -41,6 +41,8 @@ enum class TokenType {
   KwWhile,
   KwFor,
   KwIn,
+  KwBreak,
+  KwContinue,
   KwTrue,
   KwFalse,
   KwHeap,

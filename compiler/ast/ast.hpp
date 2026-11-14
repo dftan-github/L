@@ -47,6 +47,8 @@ enum class StmtKind {
   Match,
   While,
   ForIn,
+  Break,
+  Continue,
   ClassDecl,
   FieldDecl,
   InterfaceDecl,
@@ -351,6 +353,17 @@ struct WhileStmt : Stmt {
   ExprPtr cond;
   std::vector<StmtPtr> body;
   StmtKind kind() const override { return StmtKind::While; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
+// `break` / `continue` — only valid inside a loop body.
+struct BreakStmt : Stmt {
+  StmtKind kind() const override { return StmtKind::Break; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
+struct ContinueStmt : Stmt {
+  StmtKind kind() const override { return StmtKind::Continue; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
 

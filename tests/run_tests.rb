@@ -38,6 +38,8 @@ COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_b
 PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
 STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
 HTTP_PARSE_TEST = ROOT.join("tests", "cases", "http_parse_test.l")
+BREAK_CONTINUE_TEST = ROOT.join("tests", "cases", "break_continue_test.l")
+BREAK_OUTSIDE_LOOP_BAD = ROOT.join("tests", "cases", "break_outside_loop_bad.l")
 SYNC_TRY_RELEASE = ROOT.join("tests", "cases", "sync_try_release.l")
 DELEGATE_OPTIONAL_TEST = ROOT.join("tests", "cases", "delegate_optional_test.l")
 DELEGATE_PRIVATE_BAD = ROOT.join("tests", "cases", "delegate_private_bad.l")
@@ -2812,6 +2814,40 @@ def test_http_parse_e2e!
   puts "  OK http_parse e2e (status + CPropertys headers, 7 edge cases)"
 end
 
+def test_break_continue_e2e!
+  assert!(File.exist?(BREAK_CONTINUE_TEST), "break_continue_test not found: #{BREAK_CONTINUE_TEST}")
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, BREAK_CONTINUE_TEST)
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("break_continue_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?, "compile break_continue_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "break_continue_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "18\n7\n" \
+             "4\n" \
+             "0\n1\n3\n4\n" \
+             "2\n12\n" \
+             "cleanup\n2\n" \
+             "-1\n42\n" \
+             "-7\n-2.5\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+  puts "  OK break/continue e2e (while, Array for-in, range for-in, nested, defer, ?? -1)"
+end
+
+def test_break_outside_loop_rejected!
+  assert!(File.exist?(BREAK_OUTSIDE_LOOP_BAD),
+          "break_outside_loop_bad not found: #{BREAK_OUTSIDE_LOOP_BAD}")
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, BREAK_OUTSIDE_LOOP_BAD)
+  stdout, stderr, status = run_compiler("--emit-llvm", *files)
+  assert!(!status.success?, "break outside a loop must not compile")
+  combined = (stdout || "") + (stderr || "")
+  assert!(combined.include?("'break' is only allowed inside a loop"),
+          "missing loop-context diagnostic\n#{combined}")
+  puts "  OK break outside loop rejected"
+end
+
 def test_delegate_optional_e2e!
   assert!(File.exist?(DELEGATE_OPTIONAL_TEST),
           "delegate_optional_test not found: #{DELEGATE_OPTIONAL_TEST}")
@@ -3649,6 +3685,8 @@ def main
     test_coalesce_non_optional_bad!
     test_properties_e2e!
     test_http_parse_e2e!
+    test_break_continue_e2e!
+    test_break_outside_loop_rejected!
     test_delegate_optional_e2e!
     test_delegate_private_bad_rejected!
     test_sync_try_release!

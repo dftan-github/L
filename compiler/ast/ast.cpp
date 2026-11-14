@@ -44,6 +44,8 @@ const char* toString(TokenType type) {
     case TokenType::KwWhile: return "KwWhile";
     case TokenType::KwFor: return "KwFor";
     case TokenType::KwIn: return "KwIn";
+    case TokenType::KwBreak: return "KwBreak";
+    case TokenType::KwContinue: return "KwContinue";
     case TokenType::KwTrue: return "KwTrue";
     case TokenType::KwFalse: return "KwFalse";
     case TokenType::KwHeap: return "KwHeap";
@@ -380,6 +382,16 @@ void WhileStmt::dump(std::ostream& out, int indent) const {
   out << "WhileStmt\n";
   if (cond) cond->dump(out, indent + 1);
   dumpStmts(out, indent + 1, body);
+}
+
+void BreakStmt::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "BreakStmt\n";
+}
+
+void ContinueStmt::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "ContinueStmt\n";
 }
 
 void ForInStmt::dump(std::ostream& out, int indent) const {

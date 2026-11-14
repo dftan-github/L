@@ -252,6 +252,9 @@ private:
   bool emitIf(const ast::IfStmt& stmt);
   bool emitMatch(const ast::MatchStmt& stmt);
   bool emitWhile(const ast::WhileStmt& stmt);
+  bool emitBreak(const ast::BreakStmt& stmt);
+  bool emitContinue(const ast::ContinueStmt& stmt);
+  void flushLoopJumpScopes();
   bool emitForIn(const ast::ForInStmt& stmt);
   bool emitForInRange(const ast::ForInStmt& stmt, const ast::BinaryExpr& range);
   bool emitDefer(const ast::DeferStmt& stmt);
@@ -366,6 +369,15 @@ private:
 
   // Defer scopes: outer -> inner. Each scope holds DeferStmt* in registration order.
   std::vector<std::vector<const ast::DeferStmt*>> defer_scopes_;
+  // Innermost-first loop targets: `continue` jumps to cond, `break` to end.
+  // `base_scope_depth` is defer_scopes_.size() at loop-body entry, so a jump can
+  // flush the blocks it skips without touching outer scopes.
+  struct LoopTargets {
+    llvm::BasicBlock* cond_bb = nullptr;
+    llvm::BasicBlock* end_bb = nullptr;
+    size_t base_scope_depth = 0;
+  };
+  std::vector<LoopTargets> loop_stack_;
   // Currently held `sync` mutexes (global lock ptrs); unlocked on scope exit / return.
   std::vector<llvm::Value*> held_sync_locks_;
 

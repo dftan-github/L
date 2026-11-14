@@ -365,6 +365,12 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "in") {
     return ast::TokenType::KwIn;
   }
+  if (text == "break") {
+    return ast::TokenType::KwBreak;
+  }
+  if (text == "continue") {
+    return ast::TokenType::KwContinue;
+  }
   if (text == "true") {
     return ast::TokenType::KwTrue;
   }

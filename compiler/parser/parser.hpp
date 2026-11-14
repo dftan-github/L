@@ -97,6 +97,8 @@ private:
   ast::StmtPtr parseIfStmt();
   ast::StmtPtr parseMatchStmt();
   ast::StmtPtr parseWhileStmt();
+  ast::StmtPtr parseBreakStmt();
+  ast::StmtPtr parseContinueStmt();
   ast::StmtPtr parseForInStmt();
   ast::MatchBranch parseMatchBranch();
   ast::StmtPtr parseClassDecl();
@@ -136,6 +138,8 @@ private:
   std::vector<ast::StmtPtr> pending_injections_;
   // Relative-init bases (`obj { .x = ... }`); leading `.name` binds to the top.
   std::vector<ast::ExprPtr> relative_bases_;
+  // Loop nesting depth: gates `break` / `continue` and drives codegen targets.
+  int loop_depth_ = 0;
 };
 
 }  // namespace l::parser

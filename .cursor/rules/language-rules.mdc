@@ -673,13 +673,16 @@ alwaysApply: true
 ## 102. Progressive Disclosure & Red-Flag Protocol
 <!-- id:diff-report -->
 - **Mandatory Report**: End your response with the standard "Turn Change Report".
-- **Single Copyable Block (CRITICAL)**: You MUST wrap the ENTIRE report inside ONE single ```text code block. 
-- **Markdown Inside**: You MAY use standard Markdown (like `#`, `-`, `**bold**`) inside this block for structure.
-- **Visual Status Indicators (MUST BE AT THE VERY BOTTOM)**:
-  - If everything is perfect: `👉 [STATUS] PASS`
-  - If human intervention is needed: `🚨 [STATUS] HUMAN ACTION REQUIRED (see notes above)`
-  - If tests failed: `❌ [STATUS] FAIL`
+- **Single Copyable Block (CRITICAL)**: You MUST wrap the ENTIRE report inside ONE single ```text code block. Do NOT output any trailing mini-blocks after this main block.
+- **Tier Structure (Markdown inside)**: Inside the block, you MUST use clear dividers to separate:
+  - **Tier 1 (Brief)**: Core Logic, Files Changed, Test Status, Human Action.
+  - **Tier 2 (Details)**: Deep reasoning, debugging steps, and edge cases.
+- **Visual Status Indicators (MUST BE AT THE VERY BOTTOM OF THE BLOCK)**:
+  - If everything is perfect: output exactly `👉 [STATUS] PASS`
+  - If human intervention is needed: output exactly `🚨 [STATUS] HUMAN ACTION REQUIRED (see notes above)`
+  - If tests failed: output exactly `❌ [STATUS] FAIL`
 - **No Unprompted Commits**: DO NOT run `git add` or `git commit` unless explicitly instructed.
+
 
 ## 103. Mandatory Fuzz & Edge Case Testing
 <!-- id:fuzz-edge -->
