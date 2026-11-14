@@ -37,6 +37,7 @@ COALESCE_TEST = ROOT.join("tests", "cases", "coalesce_test.l")
 COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_bad.l")
 PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
 STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
+HTTP_PARSE_TEST = ROOT.join("tests", "cases", "http_parse_test.l")
 SYNC_TRY_RELEASE = ROOT.join("tests", "cases", "sync_try_release.l")
 DELEGATE_OPTIONAL_TEST = ROOT.join("tests", "cases", "delegate_optional_test.l")
 DELEGATE_PRIVATE_BAD = ROOT.join("tests", "cases", "delegate_private_bad.l")
@@ -2773,6 +2774,44 @@ def test_properties_e2e!
   puts "  OK properties e2e (set/get via Variant + ?? defaults + 9 edge cases)"
 end
 
+# Minimal HTTP response parser: status code + CPropertys headers, pure string
+# processing (no sockets). Covers the adversarial edges: empty response, missing
+# CRLF, absent header, repeated header, ':' inside a value.
+def test_http_parse_e2e!
+  assert!(File.exist?(HTTP_PARSE_TEST), "http_parse_test not found: #{HTTP_PARSE_TEST}")
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
+                       STDLIB_PROPERTIES, HTTP_PARSE_TEST)
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("http_parse_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?, "compile http_parse_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "http_parse_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "http_parse_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "200\napplication/json\n18\n" \
+             "404\n\nL\n" \
+             "0\n\n" \
+             "500\n" \
+             "http://x/y:8080/z\n" \
+             "second\n" \
+             "padded\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # Headers must live in a real CPropertys (embedded Map<Variant>), not a local sweep.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm http_parse_test failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("%CPropertys = type { %Map_Variant }"),
+          "IR missing embedded Map<Variant> in CPropertys\n#{ir}")
+
+  puts "  OK http_parse e2e (status + CPropertys headers, 7 edge cases)"
+end
+
 def test_delegate_optional_e2e!
   assert!(File.exist?(DELEGATE_OPTIONAL_TEST),
           "delegate_optional_test not found: #{DELEGATE_OPTIONAL_TEST}")
@@ -3609,6 +3648,7 @@ def main
     test_coalesce_e2e!
     test_coalesce_non_optional_bad!
     test_properties_e2e!
+    test_http_parse_e2e!
     test_delegate_optional_e2e!
     test_delegate_private_bad_rejected!
     test_sync_try_release!
