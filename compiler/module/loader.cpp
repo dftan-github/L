@@ -92,7 +92,12 @@ struct Loader {
   ImportSearchPaths search_paths;
   std::unordered_set<std::string> loading;
   std::unordered_set<std::string> loaded;
-  std::vector<std::string> known_classes;
+  // Stdlib generic type names are known up-front: an entry file may `import` a
+  // stdlib module that uses `Array<String>` / `Map<V>` before the module is
+  // parsed, and `<` would otherwise lex as a comparison operator.
+  std::vector<std::string> known_classes = {"String",       "Array",  "Optional",
+                                            "Map",          "Variant", "PropertyTree",
+                                            "CPropertys"};
   std::vector<std::string> known_interfaces;
 
   // Resolve import path relative to import_base and package search paths.

@@ -260,7 +260,8 @@ void prependCoreStdlib(std::vector<l::module::SourceUnit>& units) {
   // Array<String>), Optional before Map/Variant (their lookups yield
   // Optional<T>), Variant before CPropertys, Property bag last.
   for (const char* name : {"memory.l", "io.l", "thread.l", "array.l", "string.l",
-                           "optional.l", "map.l", "variant.l", "properties.l"}) {
+                           "optional.l", "map.l", "variant.l", "properties.l",
+                           "property_tree.l"}) {
     if (hasFilename(name)) {
       continue;
     }
@@ -686,6 +687,18 @@ int main(int argc, char** argv) {
       for (const fs::path& lib : resolved.link_libs) {
         extra_link_libs.push_back(lib.string());
       }
+    }
+  }
+
+  // Always search the stdlib directories so `import "stdlib/variant.l"` and
+  // `import variant` work from any working directory, with or without an l.toml.
+  // Order: real package paths first (they win), stdlib fallback last.
+  {
+    const fs::path src_stdlib = fs::path(L_SOURCE_DIR) / "stdlib";
+    std::error_code sec;
+    if (fs::exists(src_stdlib, sec)) {
+      import_paths.push_back(src_stdlib);
+      import_paths.push_back(src_stdlib.parent_path());  // `import "stdlib/x.l"`
     }
   }
 

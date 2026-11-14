@@ -36,6 +36,11 @@ void l_store_f64(void* p, double v);
 double l_load_f64(void* p);
 void l_store_ptr(void* p, void* v);
 void* l_load_ptr(void* p);
+void l_store_i32_at(void* p, int32_t offset, int32_t v);
+int32_t l_load_i32_at(void* p, int32_t offset);
+void l_store_ptr_at(void* p, int32_t offset, void* v);
+void* l_load_ptr_at(void* p, int32_t offset);
+void* l_null_ptr(void);
 
 void l_print_int(int32_t val);
 void l_print_i64(int64_t val);
@@ -149,6 +154,11 @@ llvm::Error defineRuntimeSymbols(llvm::orc::LLJIT& jit) {
   intern("l_load_f64", reinterpret_cast<void*>(&l_load_f64));
   intern("l_store_ptr", reinterpret_cast<void*>(&l_store_ptr));
   intern("l_load_ptr", reinterpret_cast<void*>(&l_load_ptr));
+  intern("l_store_i32_at", reinterpret_cast<void*>(&l_store_i32_at));
+  intern("l_load_i32_at", reinterpret_cast<void*>(&l_load_i32_at));
+  intern("l_store_ptr_at", reinterpret_cast<void*>(&l_store_ptr_at));
+  intern("l_load_ptr_at", reinterpret_cast<void*>(&l_load_ptr_at));
+  intern("l_null_ptr", reinterpret_cast<void*>(&l_null_ptr));
 
   intern("l_print_int", reinterpret_cast<void*>(&l_print_int));
   intern("l_print_i64", reinterpret_cast<void*>(&l_print_i64));

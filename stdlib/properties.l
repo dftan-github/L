@@ -1,6 +1,16 @@
 // CPropertys — a string-keyed bag of dynamically-typed values.
 // Values are boxed into Variant; retrieval goes through Optional<Variant> so
 // callers combine it with `??` for defaults ([coalesce]).
+//
+// Self-contained: importing this file alone pulls in everything it needs, so a
+// user file only writes `import "stdlib/properties.l"`.
+import "stdlib/memory.l"
+import "stdlib/io.l"
+import "stdlib/array.l"
+import "stdlib/string.l"
+import "stdlib/optional.l"
+import "stdlib/map.l"
+import "stdlib/variant.l"
 
 pub class CPropertys {
     

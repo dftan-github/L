@@ -14,6 +14,16 @@
 //
 // `sizeof(PropertyTree)` is one pointer, so the type is finite no matter how
 // deep the tree goes.
+//
+// Self-contained: importing this file alone pulls in everything it needs, so a
+// user file only writes `import "stdlib/property_tree.l"`.
+import "stdlib/memory.l"
+import "stdlib/io.l"
+import "stdlib/array.l"
+import "stdlib/string.l"
+import "stdlib/optional.l"
+import "stdlib/map.l"
+import "stdlib/variant.l"
 
 pub fun indent(i32 depth) -> String {
     String out = String("")
