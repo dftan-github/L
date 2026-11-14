@@ -132,6 +132,7 @@ TIME_TEST = ROOT.join("tests", "cases", "time_test.l")
 TIME_FORMAT_TEST = ROOT.join("tests", "cases", "time_format_test.l")
 TIMER_TEST = ROOT.join("tests", "cases", "timer_test.l")
 REGEX_TEST = ROOT.join("tests", "cases", "regex_test.l")
+REGEX_OVERFLOW_TEST = ROOT.join("tests", "cases", "regex_overflow_test.l")
 PROCESS_TEST = ROOT.join("tests", "cases", "process_test.l")
 CONCURRENCY_STRESS = ROOT.join("tests", "cases", "concurrency_stress.l")
 ATOMIC_STRESS = ROOT.join("tests", "cases", "atomic_stress.l")
@@ -1649,6 +1650,34 @@ def test_regex_e2e!
   )
 
   puts "  OK regex e2e (literal + [a-z]+@[a-z]+ mini-engine)"
+end
+
+def test_regex_overflow_e2e!
+  assert!(File.exist?(REGEX_OVERFLOW_TEST), "regex_overflow_test not found: #{REGEX_OVERFLOW_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("regex_overflow_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(STDLIB_STRING, STDLIB_REGEX, REGEX_OVERFLOW_TEST)
+  )
+  assert!(status.success?, "compile regex_overflow_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "regex_overflow_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  # Must abort: a silent "no match" would be a wrong answer, not a failure signal.
+  assert!(!st.success?, "overflow must abort, but the process exited #{st.exitstatus}\n#{out}")
+  combined = (out + err).gsub("\r\n", "\n")
+  assert!(combined.include?("start"),
+          "expected the program to run up to the regex call, got #{combined.inspect}")
+  assert!(combined.include?("regex: repetition too long"),
+          "expected the overflow panic message, got #{combined.inspect}")
+  assert!(!combined.include?("silently truncated"),
+          "overflow was silently reported as no-match")
+
+  puts "  OK regex_overflow e2e (stack overflow → panic, no silent truncation)"
 end
 
 def test_process_e2e!
@@ -3904,6 +3933,7 @@ def main
     test_log_config_e2e!
     test_http_stdlib_e2e!
     test_regex_e2e!
+    test_regex_overflow_e2e!
     test_process_e2e!
     test_cli_args_e2e!
     test_cli_flags_e2e!

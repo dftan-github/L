@@ -119,8 +119,12 @@ static int match_star(const char* atom, const char* atom_end, const char* rest,
                       const char* text) {
   /* Greedy: consume as many as possible, then backtrack. */
   const char* t = text;
+  /* Bounded position stack. Overflow is reported, never silently truncated:
+   * a truncated stack would backtrack over a prefix only and could report a
+   * wrong answer instead of an error. */
   const char* positions[256];
   int npos = 0;
+  int truncated = 0; /* 1 → the stack filled up before the atom stopped matching */
   positions[npos++] = t;
   while (npos < 256) {
     const char* next = NULL;
@@ -130,12 +134,25 @@ static int match_star(const char* atom, const char* atom_end, const char* rest,
     t = next;
     positions[npos++] = t;
   }
-  for (int i = npos - 1; i >= 0; --i) {
-    if (match_here(rest, positions[i])) {
-      return 1;
+  if (npos == 256) {
+    /* The loop may have exited because the stack is full rather than because
+     * the atom stopped matching; only the latter is a complete greedy scan. */
+    const char* probe = NULL;
+    if (match_atom_once(atom, atom_end, t, &probe)) {
+      truncated = 1;
     }
   }
-  return 0;
+  for (int i = npos - 1; i >= 0; --i) {
+    int r = match_here(rest, positions[i]);
+    if (r != 0) {
+      if (r > 0 && truncated) {
+        /* Matched at a position that may not be the greedy one: unreliable. */
+        return -1;
+      }
+      return r;
+    }
+  }
+  return truncated ? -1 : 0;
 }
 
 static int match_here(const char* pat, const char* text) {
@@ -171,8 +188,9 @@ static int match_here(const char* pat, const char* text) {
   if (quant == '?') {
     const char* next = NULL;
     if (match_atom_once(atom, atom_end, text, &next)) {
-      if (match_here(rest, next)) {
-        return 1;
+      int r = match_here(rest, next);
+      if (r != 0) {
+        return r;
       }
     }
     return match_here(rest, text);
@@ -194,8 +212,9 @@ int32_t l_regex_match(const char* pattern, const char* text) {
     return 1;
   }
   for (const char* t = text;; ++t) {
-    if (match_here(pattern, t)) {
-      return 1;
+    int r = match_here(pattern, t);
+    if (r != 0) {
+      return r; /* 1 = match, -1 = engine error (repetition stack overflow). */
     }
     if (*t == '\0') {
       break;
