@@ -65,7 +65,7 @@ interface IPlugin {
 
 class LoggerPlugin : IPlugin {
     fun on_start() {
-        print(String("[start] logger ready"))
+        print("[start] logger ready")
     }
 
     fun get_name() -> String {
@@ -89,7 +89,7 @@ class LoggerPlugin : IPlugin {
 
 class AuthPlugin : IPlugin {
     fun on_start() {
-        print(String("[start] auth ready"))
+        print("[start] auth ready")
     }
 
     fun get_name() -> String {
@@ -155,11 +155,6 @@ class App {
     // stored as flattened dotted keys: `db.host`, `db.pool.max`, ... The path
     // segments below walk that virtual tree without materializing nodes.
     // ------------------------------------------------------------------
-
-    // Write one leaf. Alias for `set` with a path-shaped name.
-    pub fun put(String path, Variant value) {
-        this.set(path, value)
-    }
 
     // Read a whole subtree as its own flat property bag (keys keep the full path).
     // An empty prefix means the whole tree.
@@ -230,22 +225,18 @@ class App {
     // object tag, so anything unknown falls back to a tag marker.
     pub fun render(Variant v) -> String {
         if v.is_i32() {
-            return String(l_int_to_str(v.as_i32() ?? 0))
+            return String.from(v.as_i32() ?? 0)
         }
         if v.is_string() {
-            return v.as_string() ?? String("")
+            return v.as_string() ?? ""
         }
         if v.is_f64() {
-            return String(l_f64_to_str(v.as_f64() ?? 0.0))
+            return str_from_f64(v.as_f64() ?? 0.0)
         }
         if v.is_bool() {
-            bool b = v.as_bool() ?? false
-            if b {
-                return String("true")
-            }
-            return String("false")
+            return str_from_bool(v.as_bool() ?? false)
         }
-        return String("<unknown>")
+        return "<unknown>"
     }
 
     // Recursive dump of a subtree, one "path = value" line per leaf.
@@ -261,10 +252,10 @@ class App {
             if branch.len() == 0 {
                 leaf := this.get(child)
                 if leaf.is_some() {
-                    print(String("  ") + child + String(" = ") + this.render(leaf.unwrap()))
+                    print("  " + child + " = " + this.render(leaf.unwrap()))
                 }
             } else {
-                print(String("  ") + child + String("/"))
+                print("  " + child + "/")
                 this.dump(child)
             }
         }
@@ -290,7 +281,7 @@ class App {
 fun main() -> i32 {
     app := App()
 
-    print(String("app version: ") + app.version())
+    print("app version: " + app.version())
 
     app.register(LoggerPlugin())
     app.register(AuthPlugin())
@@ -307,7 +298,7 @@ fun main() -> i32 {
     }
 
     // ---- Tree-shaped properties over dotted paths -------------------------
-    print(String("-- config tree --"))
+    print("-- config tree --")
 
     // `set` / `get` are promoted onto App by `delegate CPropertys`. A primitive or
     // String passed to the `Variant` formal is boxed automatically.
