@@ -674,11 +674,11 @@ alwaysApply: true
 <!-- id:diff-report -->
 - **Mandatory Report**: End your response with the standard "Turn Change Report".
 - **Single Copyable Block (CRITICAL)**: You MUST wrap the ENTIRE report inside ONE single ```text code block. 
-- **Format inside the Block**: You MAY use standard Markdown formatting (like `#`, `-`, `**bold**`) inside this block. It will render as plain text, which is perfect for the human to copy and paste anywhere.
-- **Status & Alerts (High Visibility)**: At the bottom of the block, append exactly one status line with emoji:
-  - `👉 [STATUS] PASS`
-  - `🚨 [STATUS] HUMAN ACTION REQUIRED (see notes above)`
-  - `❌ [STATUS] FAIL`
+- **Markdown Inside**: You MAY use standard Markdown (like `#`, `-`, `**bold**`) inside this block for structure.
+- **Visual Status Indicators (MUST BE AT THE VERY BOTTOM)**:
+  - If everything is perfect: `👉 [STATUS] PASS`
+  - If human intervention is needed: `🚨 [STATUS] HUMAN ACTION REQUIRED (see notes above)`
+  - If tests failed: `❌ [STATUS] FAIL`
 - **No Unprompted Commits**: DO NOT run `git add` or `git commit` unless explicitly instructed.
 
 ## 103. Mandatory Fuzz & Edge Case Testing
@@ -714,4 +714,4 @@ alwaysApply: true
 - **Strict Prohibition**: The AI MUST NEVER modify, edit, or overwrite the `.mdc` file, even if the human explicitly asks it to in a prompt.
 - **Proactive Suggestion (High Visibility)**: If the AI detects a missing or invalid anchor in `.mdc` (e.g., during a pre-commit check failure), it MUST NOT modify the file, but MUST immediately output the exact patch (e.g., `<!-- id:xxx -->`) the human needs to insert manually.
 - **Confirm New Rules**: After the human manually adds a new rule, the AI must read the file and acknowledge it before proceeding.
-- **Format Override**: The AI MAY output raw HTML and triple-backtick code blocks in its chat response, but it MUST NEVER write raw HTML or Markdown formatting into the `.mdc` file itself. The `.mdc` file is strictly for text rules.
+- **Format Override**: The AI MAY output triple-backtick code blocks in its chat response, but it MUST NEVER write raw Markdown formatting into the `.mdc` file itself. The `.mdc` file is strictly for plain text rules.
