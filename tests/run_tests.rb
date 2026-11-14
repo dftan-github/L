@@ -43,6 +43,7 @@ BREAK_OUTSIDE_LOOP_BAD = ROOT.join("tests", "cases", "break_outside_loop_bad.l")
 PLUGIN_FRAMEWORK_TEST = ROOT.join("tests", "cases", "plugin_framework_test.l")
 THIS_IN_STATIC_BAD = ROOT.join("tests", "cases", "this_in_static_bad.l")
 CHAINED_CALL_TEST = ROOT.join("tests", "cases", "chained_call_test.l")
+PLUGIN_FRAMEWORK_EXAMPLE = ROOT.join("examples", "plugin_framework.l")
 SYNC_TRY_RELEASE = ROOT.join("tests", "cases", "sync_try_release.l")
 DELEGATE_OPTIONAL_TEST = ROOT.join("tests", "cases", "delegate_optional_test.l")
 DELEGATE_PRIVATE_BAD = ROOT.join("tests", "cases", "delegate_private_bad.l")
@@ -3317,6 +3318,27 @@ def test_cli_run_e2e!
   puts "  OK l run hello_world.l (compile + execute → 42)"
 end
 
+def test_cli_run_plugin_framework_e2e!
+  assert!(File.exist?(PLUGIN_FRAMEWORK_EXAMPLE),
+          "plugin_framework example not found: #{PLUGIN_FRAMEWORK_EXAMPLE}")
+  # Deliberately NO stdlib args: this is the exact command a user types, so it
+  # guards the `run` one-file DX (prepended core stdlib) from regressing.
+  stdout, stderr, status = run_compiler("run", PLUGIN_FRAMEWORK_EXAMPLE.to_s)
+  assert!(status.success?,
+          "l run plugin_framework.l failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  combined = (stdout || "") + (stderr || "")
+  assert!(!combined.include?("[ERROR]"), "l run emitted diagnostics\n#{combined}")
+  normalized = stdout.gsub("\r\n", "\n")
+  expected = "app version: 0.1.0\n" \
+             "2\n" \
+             "[start] logger ready\n[start] auth ready\n" \
+             "[start] logger ready\n" \
+             "auth\n" \
+             "logger\nauth\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+  puts "  OK l run plugin_framework.l (one-file DX, no explicit stdlib args)"
+end
+
 def test_stdin_compile_e2e!
   FileUtils.mkdir_p(OUT_DIR)
   exe = OUT_DIR.join("test_eval.exe")
@@ -3778,6 +3800,7 @@ def main
     test_repl_e2e!
     test_eval_jit_e2e!
     test_cli_run_e2e!
+    test_cli_run_plugin_framework_e2e!
   ]
 
   force_all, filter = parse_runner_args!(ARGV)
