@@ -186,6 +186,10 @@ private:
   bool ensureTypeAvailable(const std::string& name);
   bool specializeClass(const ast::ClassDeclStmt& tmpl, const std::vector<std::string>& args,
                        const std::string& instance_name);
+  // Max nesting for `G<...>` instantiation (Array<Optional<i32>> = 2).
+  static constexpr unsigned kMaxGenericDepth = 2;
+  // Syntactic nesting count of a type name (`Array<Optional<i32>>` → 2).
+  static unsigned genericNestingDepth(const std::string& name);
   uint64_t allocSizeOfTypeName(const std::string& type_name);
   llvm::Type* elementTypeForPtrIndex() const;
   // Resolve elem type for `base[i]` (Map keys_/occupied_/values_, Array data_, …).

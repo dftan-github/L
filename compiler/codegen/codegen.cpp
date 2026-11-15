@@ -1123,6 +1123,12 @@ bool Codegen::ensureTypeAvailable(const std::string& name) {
   if (resolved != name) {
     return ensureTypeAvailable(resolved);
   }
+  // Reject over-nested declarations before specializing anything.
+  if (const unsigned depth = genericNestingDepth(name); depth > kMaxGenericDepth) {
+    error("generic instantiation depth limit exceeded (" + std::to_string(kMaxGenericDepth) +
+          "): '" + name + "' nests " + std::to_string(depth) + " generic types");
+    return false;
+  }
   if (isFunTypeName(name)) {
     std::vector<std::string> params;
     std::string ret;
@@ -1168,12 +1174,30 @@ bool Codegen::ensureTypeAvailable(const std::string& name) {
   return specializeClass(*it->second, args, name);
 }
 
+// Purely syntactic nesting count: `i32` = 0, `Array<i32>` = 1,
+// `Array<Optional<i32>>` = 2. Used to reject pathological declarations
+// (`A<A<A<A<...>>>>`) before any specialization work starts.
+unsigned Codegen::genericNestingDepth(const std::string& name) {
+  std::string base;
+  std::vector<std::string> args;
+  if (!splitGenericType(name, base, args)) {
+    return 0;
+  }
+  unsigned deepest = 0;
+  for (const std::string& a : args) {
+    deepest = std::max(deepest, genericNestingDepth(a));
+  }
+  return deepest + 1;
+}
+
 bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
                               const std::vector<std::string>& args,
                               const std::string& instance_name) {
   if (classes_.count(instance_name) != 0) {
     return true;
   }
+  // Over-nesting is rejected up front by ensureTypeAvailable's syntactic depth
+  // check; no runtime depth counter is needed here.
   if (tmpl.generics.size() != args.size()) {
     error("generic arity mismatch specializing " + tmpl.name);
     return false;
@@ -2637,6 +2661,8 @@ bool Codegen::emit(const ast::Module& module) {
   while (!pending_generic_bodies_.empty()) {
     std::string name = pending_generic_bodies_.back();
     pending_generic_bodies_.pop_back();
+    // Restore the nesting level this specialization was declared at, otherwise
+    // every deferred body would look like a top-level (depth-1) instantiation.
     ClassInfo* ninfo = findClassMut(name);
     if (!ninfo) {
       error("lost specialization for " + name);
@@ -4923,7 +4949,9 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   }
 
   if (!type_name.empty()) {
-    ensureTypeAvailable(type_name);
+    if (!ensureTypeAvailable(type_name)) {
+      return false;
+    }
   }
 
   if (type_name == "Arena") {

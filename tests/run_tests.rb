@@ -39,6 +39,8 @@ ERGONOMICS_TEST = ROOT.join("tests", "cases", "ergonomics_test.l")
 DROP_TEST = ROOT.join("tests", "cases", "drop_test.l")
 INCREMENTAL_TEST = ROOT.join("tests", "cases", "incremental_cache.l")
 DEBUG_INFO_TEST = ROOT.join("tests", "cases", "debug_info_test.l")
+GENERIC_DEPTH_OK = ROOT.join("tests", "cases", "generic_depth_ok.l")
+GENERIC_DEPTH_BAD = ROOT.join("tests", "cases", "generic_depth_bad.l")
 PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
 STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
 TREE_TEST = ROOT.join("tests", "cases", "property_tree_test.l")
@@ -3261,6 +3263,33 @@ def test_debug_info_e2e!
   puts "  OK -g debug info (compile unit + subprograms + line locations, same output)"
 end
 
+# Nested generic instantiation is capped at 2 levels: a legal
+# two-level type must still compile and run, a three-level one must be rejected.
+def test_generic_depth_limit!
+  assert!(File.exist?(GENERIC_DEPTH_OK), "case not found: #{GENERIC_DEPTH_OK}")
+  assert!(File.exist?(GENERIC_DEPTH_BAD), "case not found: #{GENERIC_DEPTH_BAD}")
+  FileUtils.mkdir_p(OUT_DIR)
+
+  exe = OUT_DIR.join("generic_depth_ok.exe")
+  FileUtils.rm_f(exe)
+  _o, err, st =
+    run_compiler("-o", exe.to_s,
+                 *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, GENERIC_DEPTH_OK))
+  assert!(st.success?, "two-level nesting must compile (#{st.exitstatus})\n#{err}")
+  out, rerr, rst = Open3.capture3(exe.to_s)
+  assert!(rst.success?, "two-level nesting run failed\n#{rerr}")
+  assert!(out.strip == "2", "expected 2 elements, got #{out.inspect}")
+
+  _bo, berr, bst =
+    run_compiler("-o", OUT_DIR.join("generic_depth_bad.exe").to_s,
+                 *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, GENERIC_DEPTH_BAD))
+  assert!(!bst.success?, "three-level nesting must be rejected, but it compiled")
+  assert!(berr.include?("generic instantiation depth limit exceeded"),
+         "expected depth-limit diagnostic, got:\n#{berr}")
+
+  puts "  OK generic depth limit (2 levels allowed, 3 rejected)"
+end
+
 def test_coalesce_non_optional_bad!
   assert!(File.exist?(COALESCE_NON_OPTIONAL_BAD), "case not found: #{COALESCE_NON_OPTIONAL_BAD}")
 
@@ -4466,6 +4495,7 @@ def main
     test_drop_e2e!
     test_incremental_cache_e2e!
     test_debug_info_e2e!
+    test_generic_depth_limit!
     test_coalesce_non_optional_bad!
     test_properties_e2e!
     test_property_tree_e2e!
