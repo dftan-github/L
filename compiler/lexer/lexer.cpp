@@ -30,6 +30,7 @@ bool Lexer::asiTrigger(ast::TokenType type) {
     case ast::TokenType::Question:  // `safe_div(...)?`
     case ast::TokenType::PlusPlus:    // `a!++` / statement form
     case ast::TokenType::MinusMinus:  // `a!--`
+    case ast::TokenType::KwReturn:    // bare `return` before '}' or '\n'
     // Type tokens end interface method signatures: `fun f() -> i32`
     case ast::TokenType::TyI32:
     case ast::TokenType::TyI64:

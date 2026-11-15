@@ -1501,7 +1501,13 @@ ast::StmtPtr Parser::parseFuncDecl() {
 
 ast::StmtPtr Parser::parseReturnStmt() {
   ast::Token kw = consume(ast::TokenType::KwReturn, "expected 'return'");
-  ast::ExprPtr value = parseExpression();
+  ast::ExprPtr value;
+  // Bare `return` — ASI inserted the ';' (or the next token starts a new
+  // statement / closes the block). No value expression to parse.
+  if (!check(ast::TokenType::Semicolon) && !check(ast::TokenType::RBrace) &&
+      !check(ast::TokenType::EndOfFile)) {
+    value = parseExpression();
+  }
   consume(ast::TokenType::Semicolon, "expected ';' after return");
 
   auto stmt = std::make_unique<ast::ReturnStmt>();

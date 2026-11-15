@@ -35,6 +35,7 @@ DELEGATE_SAME_TYPE_BAD = ROOT.join("tests", "cases", "delegate_same_type_bad.l")
 DELEGATE_SAME_TYPE_PARTIAL_BAD = ROOT.join("tests", "cases", "delegate_same_type_partial_bad.l")
 COALESCE_TEST = ROOT.join("tests", "cases", "coalesce_test.l")
 COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_bad.l")
+ERGONOMICS_TEST = ROOT.join("tests", "cases", "ergonomics_test.l")
 PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
 STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
 TREE_TEST = ROOT.join("tests", "cases", "property_tree_test.l")
@@ -3111,6 +3112,47 @@ def test_coalesce_e2e!
   puts "  OK coalesce e2e (opt ?? fallback, empty → default, some → payload)"
 end
 
+def test_ergonomics_e2e!
+  assert!(File.exist?(ERGONOMICS_TEST), "ergonomics case not found: #{ERGONOMICS_TEST}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("ergonomics_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status =
+    run_compiler("-o", exe.to_s,
+                 *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_RESULT, ERGONOMICS_TEST))
+  assert!(status.success?, "compile ergonomics_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "ergonomics_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "ergonomics_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = <<~OUT
+    ok result_bool_some
+    not positive
+    ok result_bool_recursive
+    not positive
+    4
+    3
+    2
+    1
+    0
+    small
+    zero
+    small
+    medium
+    large
+    early
+    normal
+    after early block
+    3
+  OUT
+  assert!(normalized == expected,
+          "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  puts "  OK ergonomics e2e (Result<bool,E>, else-if chain, bare return)"
+end
+
 def test_coalesce_non_optional_bad!
   assert!(File.exist?(COALESCE_NON_OPTIONAL_BAD), "case not found: #{COALESCE_NON_OPTIONAL_BAD}")
 
@@ -4312,6 +4354,7 @@ def main
     test_generic_inference_e2e!
     test_optional_e2e!
     test_coalesce_e2e!
+    test_ergonomics_e2e!
     test_coalesce_non_optional_bad!
     test_properties_e2e!
     test_property_tree_e2e!

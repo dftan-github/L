@@ -5767,7 +5767,26 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
   if (!ptr) {
     return false;
   }
-  llvm::Value* v = emitExpr(*assign.value);
+  // String slot assigned a literal: materialise a String object instead of
+  // handing emitExpr a bare cstr (the generic struct path below would load
+  // `%string_String` straight out of the literal's bytes).
+  llvm::Type* slot_ty = nullptr;
+  if (auto* ai = llvm::dyn_cast<llvm::AllocaInst>(ptr)) {
+    slot_ty = ai->getAllocatedType();
+  } else if (auto* gv = llvm::dyn_cast<llvm::GlobalVariable>(ptr)) {
+    slot_ty = gv->getValueType();
+  }
+  llvm::Value* v = nullptr;
+  if (slot_ty && slot_ty->isStructTy() && slot_ty->getStructName() == "string_String" &&
+      assign.value->kind() == ast::ExprKind::StringLiteral) {
+    llvm::Value* tmp = emitStringObjectPtr(*assign.value);
+    if (!tmp) {
+      return false;
+    }
+    v = builder_.CreateLoad(slot_ty, tmp, "store.string.copy");
+  } else {
+    v = emitExpr(*assign.value);
+  }
   if (!v) {
     return false;
   }
