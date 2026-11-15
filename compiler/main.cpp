@@ -25,6 +25,7 @@
 
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/MD5.h"
 
 #ifndef L_BUILD_DIR
 #define L_BUILD_DIR "."
@@ -43,6 +44,84 @@ namespace fs = std::filesystem;
 namespace {
 
 enum class CliCommand { Build, Run, Repl, Eval, GenInterface, Doc };
+
+// --- Module-level incremental compilation ---------------------------------
+// A whole-program build is keyed by everything that can change its output:
+// the contents of every source unit (including transitively imported stdlib),
+// the driver's flags, and the compiler binary itself. On a hit the cached
+// object is linked straight away (or its IR replayed for --emit-llvm).
+std::string fileStamp(const fs::path& p) {
+  std::error_code ec;
+  const auto size = fs::file_size(p, ec);
+  const auto mtime = fs::last_write_time(p, ec);
+  std::ostringstream os;
+  os << p.generic_string() << '|' << (ec ? 0 : size) << '|'
+     << (ec ? 0 : mtime.time_since_epoch().count());
+  return os.str();
+}
+
+std::string hashString(const std::string& s) {
+  llvm::MD5 md5;
+  md5.update(s);
+  llvm::MD5::MD5Result r;
+  md5.final(r);
+  std::string out;
+  llvm::raw_string_ostream ros(out);
+  ros << r.digest() << r.digest() << r.digest() << r.digest();
+  return out;
+}
+
+fs::path incrementalCacheDir() {
+  return fs::temp_directory_path() / "l-build-cache";
+}
+
+// Empty string when caching is not applicable (in-memory sources).
+std::string buildCacheKey(const std::vector<std::string>& unit_names,
+                          const std::vector<fs::path>& import_paths, bool shared, unsigned opt,
+                          const std::string& compiler_stamp) {
+  if (unit_names.empty()) {
+    return {};
+  }
+  std::ostringstream os;
+  os << "v1|shared=" << (shared ? 1 : 0) << "|O=" << opt << "|cc=" << compiler_stamp << '\n';
+  // Import roots decide which stdlib files an `import` resolves to: a key that
+  // ignored them could replay a build produced against a different tree.
+  for (const fs::path& p : import_paths) {
+    os << "path:" << p.generic_string() << '\n';
+  }
+  for (const std::string& name : unit_names) {
+    if (name.empty() || name[0] == '<') {
+      return {};
+    }
+    std::ifstream in(name, std::ios::binary);
+    if (!in) {
+      return {};
+    }
+    const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    os << name << ':' << hashString(src) << '\n';
+  }
+  return hashString(os.str());
+}
+
+bool readWholeFile(const fs::path& p, std::string& out) {
+  std::ifstream in(p, std::ios::binary);
+  if (!in) {
+    return false;
+  }
+  out.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  return true;
+}
+
+bool writeWholeFile(const fs::path& p, const std::string& data) {
+  std::error_code ec;
+  fs::create_directories(p.parent_path(), ec);
+  std::ofstream out(p, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    return false;
+  }
+  out.write(data.data(), static_cast<std::streamsize>(data.size()));
+  return out.good();
+}
 
 void printUsage(const char* argv0) {
   std::cerr << "Usage:\n"
@@ -723,14 +802,59 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  auto ast = l::compile::compileInputs(units, diags, import_paths);
-  if (!ast) {
-    diags.report(std::cerr);
-    return 1;
+  // Incremental cache: a hit skips parse + semantics + codegen entirely.
+  std::vector<std::string> cache_inputs;
+  for (const l::module::SourceUnit& unit : units) {
+    if (unit.from_memory) {
+      cache_inputs.clear();
+      break;
+    }
+    cache_inputs.push_back(unit.name);
   }
-  if (diags.hasErrors()) {
-    diags.report(std::cerr);
-    return 1;
+  fs::path self_exe;
+  {
+    const std::string exe_path =
+        llvm::sys::fs::getMainExecutable(argv[0], reinterpret_cast<void*>(&main));
+    if (!exe_path.empty()) {
+      self_exe = exe_path;
+    }
+  }
+  const bool cacheable = !dump_ast && !cache_inputs.empty() &&
+                         (emit_obj || emit_llvm || !output_path.empty() || cmd == CliCommand::Build ||
+                          cmd == CliCommand::Run);
+  const std::string cache_key =
+      cacheable ? buildCacheKey(cache_inputs, import_paths, shared_lib, opt_level,
+                                 self_exe.empty() ? std::string() : fileStamp(self_exe))
+                : std::string();
+  const fs::path cache_dir = incrementalCacheDir() / (cache_key.empty() ? "miss" : cache_key);
+  const fs::path cached_obj = cache_dir / "module.o";
+  const fs::path cached_ir = cache_dir / "module.ll";
+  bool cache_hit = false;
+  if (!cache_key.empty()) {
+    if (emit_obj || emit_llvm) {
+      cache_hit = fs::exists(cached_ir) && fs::exists(cached_obj);
+    } else {
+      cache_hit = fs::exists(cached_obj);
+    }
+  }
+  if (cache_hit && emit_llvm) {
+    std::string ir;
+    if (readWholeFile(cached_ir, ir)) {
+      llvm::outs() << ir;
+      return 0;
+    }
+  }
+
+  auto ast = cache_hit ? nullptr : l::compile::compileInputs(units, diags, import_paths);
+  if (!cache_hit) {
+    if (!ast) {
+      diags.report(std::cerr);
+      return 1;
+    }
+    if (diags.hasErrors()) {
+      diags.report(std::cerr);
+      return 1;
+    }
   }
 
   if (dump_ast) {
@@ -741,31 +865,51 @@ int main(int argc, char** argv) {
     return diags.hasErrors() ? 1 : 0;
   }
 
-  l::semantic::Analyzer analyzer;
-  analyzer.analyze(*ast, diags);
-
   std::unique_ptr<l::codegen::Codegen> codegen;
-  if (!diags.hasErrors()) {
-    codegen = std::make_unique<l::codegen::Codegen>(primary_name, &diags);
-    codegen->setOptLevel(opt_level);
-    codegen->setSharedMode(shared_lib);
-    (void)codegen->emit(*ast);
-  }
+  if (!cache_hit) {
+    l::semantic::Analyzer analyzer;
+    analyzer.analyze(*ast, diags);
 
-  if (diags.hasErrors()) {
-    diags.report(std::cerr);
-    return 1;
-  }
-  if (diags.hasWarnings()) {
-    diags.report(std::cerr);
-  }
+    if (!diags.hasErrors()) {
+      codegen = std::make_unique<l::codegen::Codegen>(primary_name, &diags);
+      codegen->setOptLevel(opt_level);
+      codegen->setSharedMode(shared_lib);
+      (void)codegen->emit(*ast);
+    }
 
-  if (!codegen) {
-    return 1;
+    if (diags.hasErrors()) {
+      diags.report(std::cerr);
+      return 1;
+    }
+    if (diags.hasWarnings()) {
+      diags.report(std::cerr);
+    }
+    if (!codegen) {
+      return 1;
+    }
   }
 
   if (emit_llvm) {
-    codegen->module().print(llvm::outs(), nullptr);
+    if (cache_hit) {
+      std::string ir;
+      if (readWholeFile(cached_ir, ir)) {
+        llvm::outs() << ir;
+        return 0;
+      }
+    }
+    std::string ir;
+    llvm::raw_string_ostream ros(ir);
+    codegen->module().print(ros, nullptr);
+    ros.flush();
+    llvm::outs() << ir;
+    if (!cache_key.empty()) {
+      std::error_code ec;
+      fs::create_directories(cache_dir, ec);
+      if (!fs::exists(cached_obj)) {
+        (void)codegen->emitObjectFile(cached_obj.string());
+      }
+      writeWholeFile(cached_ir, ir);
+    }
     return 0;
   }
 
@@ -777,9 +921,24 @@ int main(int argc, char** argv) {
         output_path = fs::path(primary_name).replace_extension(".o").string();
       }
     }
-    if (!codegen->emitObjectFile(output_path)) {
-      diags.report(std::cerr);
-      return 1;
+    if (!cache_hit) {
+      if (!codegen->emitObjectFile(output_path)) {
+        diags.report(std::cerr);
+        return 1;
+      }
+      if (!cache_key.empty()) {
+        std::error_code ec;
+        fs::create_directories(cache_dir, ec);
+        fs::copy_file(output_path, cached_obj, fs::copy_options::overwrite_existing, ec);
+        std::string ir;
+        llvm::raw_string_ostream ros(ir);
+        codegen->module().print(ros, nullptr);
+        ros.flush();
+        writeWholeFile(cached_ir, ir);
+      }
+    } else {
+      std::error_code ec;
+      fs::copy_file(cached_obj, output_path, fs::copy_options::overwrite_existing, ec);
     }
     std::cerr << "wrote " << output_path << '\n';
     return 0;
@@ -829,9 +988,21 @@ int main(int argc, char** argv) {
       stem = "a";
     }
     const fs::path obj = fs::temp_directory_path() / (stem + ".l.o");
-    if (!codegen->emitObjectFile(obj.string())) {
+    if (cache_hit) {
+      std::error_code cec;
+      fs::copy_file(cached_obj, obj, fs::copy_options::overwrite_existing, cec);
+    } else if (!codegen->emitObjectFile(obj.string())) {
       diags.report(std::cerr);
       return 1;
+    } else if (!cache_key.empty()) {
+      std::error_code cec;
+      fs::create_directories(cache_dir, cec);
+      fs::copy_file(obj, cached_obj, fs::copy_options::overwrite_existing, cec);
+      std::string ir;
+      llvm::raw_string_ostream ros(ir);
+      codegen->module().print(ros, nullptr);
+      ros.flush();
+      writeWholeFile(cached_ir, ir);
     }
     const bool ok = shared_lib
                         ? linkSharedLibrary(obj.string(), out.string(), opt_level, extra_link_libs)

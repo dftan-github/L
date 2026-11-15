@@ -37,6 +37,7 @@ COALESCE_TEST = ROOT.join("tests", "cases", "coalesce_test.l")
 COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_bad.l")
 ERGONOMICS_TEST = ROOT.join("tests", "cases", "ergonomics_test.l")
 DROP_TEST = ROOT.join("tests", "cases", "drop_test.l")
+INCREMENTAL_TEST = ROOT.join("tests", "cases", "incremental_cache.l")
 PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
 STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
 TREE_TEST = ROOT.join("tests", "cases", "property_tree_test.l")
@@ -3184,6 +3185,46 @@ def test_drop_e2e!
   puts "  OK drop e2e (user drop() hook + Map key/buffer cleanup, 0 leaked allocations)"
 end
 
+# Incremental compilation: a whole-program build is cached under an MD5 of the
+# source units + flags + compiler binary. A second identical build must reuse
+# the cached object (identical artifact), and editing a unit must invalidate it.
+def test_incremental_cache_e2e!
+  assert!(File.exist?(INCREMENTAL_TEST), "case not found: #{INCREMENTAL_TEST}")
+  FileUtils.mkdir_p(OUT_DIR)
+  work = OUT_DIR.join("inc_src")
+  FileUtils.rm_rf(work)
+  FileUtils.mkdir_p(work)
+  unit = work.join("main.l")
+  FileUtils.cp(INCREMENTAL_TEST, unit)
+  cache_dir = File.join(ENV["TEMP"] || ENV["TMPDIR"] || "/tmp", "l-build-cache")
+  FileUtils.rm_rf(cache_dir)
+
+  exe1 = OUT_DIR.join("inc_cold.exe")
+  exe2 = OUT_DIR.join("inc_warm.exe")
+  FileUtils.rm_f([exe1, exe2])
+
+  _o1, e1, s1 = run_compiler("-o", exe1.to_s, *with_runtime(unit))
+  assert!(s1.success?, "cold build failed (#{s1.exitstatus})\n#{e1}")
+  assert!(Dir.exist?(cache_dir), "cold build did not populate the build cache")
+
+  _o2, e2, s2 = run_compiler("-o", exe2.to_s, *with_runtime(unit))
+  assert!(s2.success?, "warm build failed (#{s2.exitstatus})\n#{e2}")
+  out1, = Open3.capture2(exe1.to_s)
+  out2, = Open3.capture2(exe2.to_s)
+  assert!(out1 == out2, "warm build diverged: #{out1.inspect} vs #{out2.inspect}")
+  assert!(out1.strip == "42", "expected 42, got #{out1.inspect}")
+
+  # Editing the unit must change the key: the next build has to observe it.
+  unit.write(File.read(unit).sub("print(42)", "print(7)"))
+  exe3 = OUT_DIR.join("inc_changed.exe")
+  _o3, e3, s3 = run_compiler("-o", exe3.to_s, *with_runtime(unit))
+  assert!(s3.success?, "post-edit build failed (#{s3.exitstatus})\n#{e3}")
+  out3, = Open3.capture2(exe3.to_s)
+  assert!(out3.strip == "7", "stale cache replayed, expected 7 got #{out3.inspect}")
+
+  puts "  OK incremental cache (hit replays identical object, edit invalidates)"
+end
+
 def test_coalesce_non_optional_bad!
   assert!(File.exist?(COALESCE_NON_OPTIONAL_BAD), "case not found: #{COALESCE_NON_OPTIONAL_BAD}")
 
@@ -4387,6 +4428,7 @@ def main
     test_coalesce_e2e!
     test_ergonomics_e2e!
     test_drop_e2e!
+    test_incremental_cache_e2e!
     test_coalesce_non_optional_bad!
     test_properties_e2e!
     test_property_tree_e2e!
