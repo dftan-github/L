@@ -61,6 +61,9 @@ const char* toString(TokenType type) {
     case TokenType::KwExtern: return "KwExtern";
     case TokenType::KwModule: return "KwModule";
     case TokenType::KwDelegate: return "KwDelegate";
+    case TokenType::KwAsync: return "KwAsync";
+    case TokenType::KwAwait: return "KwAwait";
+    case TokenType::ColonColon: return "ColonColon";
     case TokenType::TyI32: return "TyI32";
     case TokenType::TyI64: return "TyI64";
     case TokenType::TyF64: return "TyF64";
@@ -372,6 +375,28 @@ void IfStmt::dump(std::ostream& out, int indent) const {
   }
 }
 
+void MatchPattern::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  if (kind == MatchPatternKind::ClassDestructure) {
+    out << "Pattern " << class_name << " {\n";
+  } else {
+    out << "Pattern [\n";
+  }
+  for (const PatternField& f : fields) {
+    pad(out, indent + 1);
+    out << (f.name.empty() ? std::string("_") : f.name);
+    if (f.sub) {
+      out << ": ";
+      f.sub->dump(out, indent + 2);
+    } else if (!f.binding.empty() && f.binding != f.name) {
+      out << " as " << f.binding;
+    }
+    out << "\n";
+  }
+  pad(out, indent);
+  out << "]\n";
+}
+
 void MatchStmt::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "MatchStmt\n";
@@ -394,6 +419,13 @@ void MatchStmt::dump(std::ostream& out, int indent) const {
         out << "Branch\n";
         if (br.pattern) {
           br.pattern->dump(out, indent + 2);
+        }
+        break;
+      case MatchPatternKind::ClassDestructure:
+      case MatchPatternKind::ArrayDestructure:
+        out << "Branch\n";
+        if (br.destruct) {
+          br.destruct->dump(out, indent + 2);
         }
         break;
     }
@@ -423,6 +455,13 @@ void MatchExpr::dump(std::ostream& out, int indent) const {
         out << "Branch\n";
         if (br.pattern) {
           br.pattern->dump(out, indent + 2);
+        }
+        break;
+      case MatchPatternKind::ClassDestructure:
+      case MatchPatternKind::ArrayDestructure:
+        out << "Branch\n";
+        if (br.destruct) {
+          br.destruct->dump(out, indent + 2);
         }
         break;
     }
@@ -554,6 +593,14 @@ void AddrOfExpr::dump(std::ostream& out, int indent) const {
   out << "AddrOfExpr &\n";
   if (operand) {
     operand->dump(out, indent + 1);
+  }
+}
+
+void AwaitExpr::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "AwaitExpr await\n";
+  if (task) {
+    task->dump(out, indent + 1);
   }
 }
 

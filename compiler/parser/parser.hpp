@@ -95,7 +95,8 @@ private:
   // Deep-copy an lvalue expr for compound-assign desugar (`a += b` → `a = a + b`).
   static ast::ExprPtr cloneExpr(const ast::Expr& expr);
   ast::StmtPtr parseFuncDecl();
-  std::unique_ptr<ast::FuncDeclStmt> parseFunCommon(bool allow_body);
+  ast::StmtPtr parseAsyncDecl();
+  std::unique_ptr<ast::FuncDeclStmt> parseFunCommon(bool allow_body, bool is_async = false);
   ast::StmtPtr parseReturnStmt();
   ast::StmtPtr parseExprStmt();
   ast::StmtPtr parseIfStmt();
@@ -106,6 +107,11 @@ private:
   ast::StmtPtr parseContinueStmt();
   ast::StmtPtr parseForInStmt();
   ast::MatchBranch parseMatchBranch();
+  // Destructuring patterns: `User { name, age }` and `[a, b]`.
+  bool isClassPatternStart() const;
+  ast::MatchPatternPtr parseClassPattern();
+  ast::MatchPatternPtr parseClassPatternBody(ast::MatchPatternPtr out);
+  ast::MatchPatternPtr parseArrayPattern();
   ast::StmtPtr parseClassDecl();
   ast::StmtPtr parseInterfaceDecl();
   ast::StmtPtr parseDeferStmt();

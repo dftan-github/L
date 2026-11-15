@@ -111,6 +111,11 @@ private:
 
   llvm::AllocaInst* createEntryAlloca(llvm::Function* fn, llvm::Type* ty,
                                       const std::string& name);
+  // Local storage for a variable: a coroutine frame slot inside `async fun`
+  // bodies (survives `await`), a stack alloca everywhere else.
+  llvm::Value* createLocalStorage(llvm::Function* fn, llvm::Type* ty, const std::string& name);
+  // Pointee type of a local slot (alloca or coroutine frame GEP).
+  llvm::Type* localSlotType(llvm::Value* slot);
   // Look up a C ABI symbol previously declared via `extern module` (no auto-create).
   llvm::Function* requireExtern(const std::string& name);
   bool declareExternFunc(const ast::FuncDeclStmt& fn);
@@ -286,6 +291,58 @@ private:
   bool emitExprStmt(const ast::ExprStmt& stmt);
   bool emitIf(const ast::IfStmt& stmt);
   bool emitMatch(const ast::MatchStmt& stmt);
+  // `async fun` — hand-written stackless state machine (no LLVM CoroSplit).
+  //
+  //   f(params) -> ptr              ; entry: heap frame + task, drives state 0
+  //   f$step(ptr frame) -> void     ; the state machine (switch on frame.state)
+  //
+  // MVP: exactly one `await` per async function, never inside a loop. The
+  // awaited task is drained by `l_task_await`, which also keeps the frame and
+  // state machine exercised end to end.
+  bool emitAsyncFuncDecl(const ast::FuncDeclStmt& fn_ast);
+  bool emitCoroutineBody(const ast::FuncDeclStmt& fn_ast);
+  // True while lowering the body of an `async fun`: frame slots replace stack
+  // allocas and `return` publishes the frame's result slot.
+  bool in_coroutine_ = false;
+  // Frame layout `{ i32 state, ptr task, T result, <params + locals>, ptr await }`.
+  llvm::StructType* coro_frame_ty_ = nullptr;
+  unsigned coro_result_idx_ = 2;
+  // Frame slot holding the awaited task handle across the suspend point.
+  unsigned coro_await_task_idx_ = 0;
+  // `ptr` to the frame inside `f$step` (its single argument).
+  llvm::Value* coro_frame_ = nullptr;
+  // Frame slot index of every parameter/local of the current coroutine.
+  std::unordered_map<std::string, unsigned> coro_local_slots_;
+  // Cached `getelementptr frame, 0, idx` for each slot, created in the
+  // dispatch block so it dominates the body and the post-`await` continuation.
+  std::unordered_map<std::string, llvm::Value*> coro_slot_addrs_;
+  // Completion block: publishes the result and retires the task.
+  llvm::BasicBlock* coro_done_bb_ = nullptr;
+  // Resume block reached from state 1 of the dispatch switch.
+  llvm::BasicBlock* coro_resume_bb_ = nullptr;
+  // Dispatch `switch` on `frame.state`; state 1 is added when `await` is seen.
+  llvm::SwitchInst* coro_dispatch_sw_ = nullptr;
+  // Continuation block of the (single) `await`: where state 1 resumes.
+  llvm::BasicBlock* coro_await_cont_bb_ = nullptr;
+  // Set once an `await` has been lowered (second one is a compile error).
+  bool coro_await_emitted_ = false;
+  // `await expr` — drive the awaited task, yield its payload.
+  llvm::Value* emitAwaitExpr(const ast::AwaitExpr& expr);
+  // Copy the value into the frame's result slot and jump to completion.
+  void publishCoroResult(llvm::Value* value);
+  void emitCoroReturn();
+  // Destructuring patterns (`User { name }` / `[a, b]`): bind fields of `obj`
+  // to locals, recursing into nested patterns. `slot` holds the object pointer.
+  // Returns false on error; bindings are recorded in `bound` for later cleanup.
+  bool emitPatternBindings(const ast::MatchPattern& pat, llvm::Value* slot,
+                           std::vector<std::pair<std::string, llvm::Value*>>& bound);
+  // Scrutinee type name of the match currently being lowered (array patterns
+  // need `Array<T>` to find the element type).
+  std::string scrut_type_name_;
+  void restorePatternBindings(
+      const std::vector<std::pair<std::string, llvm::Value*>>& bound,
+      const std::unordered_map<std::string, std::string>& saved_types,
+      const std::unordered_set<std::string>& saved_heap);
   // Implicit auto-boxing into Variant (`set("k", 42)` → Variant.from_i32(42)).
   // `expected` is the callee's LLVM parameter type (ptr for by-reference classes).
   llvm::Value* emitImplicitVariantBox(const ast::Expr& expr, llvm::Type* expected);
@@ -357,7 +414,7 @@ private:
 
   std::unique_ptr<llvm::Module> module_;
   llvm::IRBuilder<> builder_;
-  std::unordered_map<std::string, llvm::AllocaInst*> named_values_;
+  std::unordered_map<std::string, llvm::Value*> named_values_;
   std::unordered_map<std::string, std::string> local_types_;  // Compile-time `const` — inlined, no GlobalVariable.
   // Unique suffix for `??` temporaries.
   std::size_t coalesce_tmp_counter_ = 0;

@@ -50,6 +50,7 @@ llvm_map_components_to_libnames(L_COMPILER_LLVM_LIBS
   irreader
   transformutils
   linker
+  coroutines
 )
 target_link_libraries(l_compiler PUBLIC ${L_COMPILER_LLVM_LIBS})
 

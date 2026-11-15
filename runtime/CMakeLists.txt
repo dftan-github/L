@@ -8,6 +8,7 @@ add_library(l_runtime STATIC
   sys.c
   regex.c
   tls.c
+  task.c
 )
 
 target_include_directories(l_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

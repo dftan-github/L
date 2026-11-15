@@ -18,6 +18,24 @@ void Analyzer::popScope() {
   }
 }
 
+// Every name a destructuring pattern introduces, including nested ones.
+// `_` skips a field and contributes no binding.
+static void collectPatternBindings(
+    const ast::MatchPattern& pat,
+    std::vector<std::pair<std::string, ast::SourceLocation>>& out) {
+  for (const ast::PatternField& pf : pat.fields) {
+    if (pf.sub) {
+      collectPatternBindings(*pf.sub, out);
+      continue;
+    }
+    const std::string bind = pf.binding.empty() ? pf.name : pf.binding;
+    if (bind.empty() || bind == "_") {
+      continue;
+    }
+    out.emplace_back(bind, pf.loc);
+  }
+}
+
 void Analyzer::declareLocal(const std::string& name, const std::string& type_name,
                             const ast::SourceLocation& loc) {
   if (scopes_.empty()) {
@@ -517,6 +535,19 @@ void Analyzer::checkExpr(ast::Expr& expr) {
       }
       break;
     }
+    case ast::ExprKind::Await: {
+      auto& aw = static_cast<ast::AwaitExpr&>(expr);
+      if (!in_async_fn_) {
+        error(aw.loc, "'await' is only allowed inside an 'async fun'");
+      }
+      if (in_loop_) {
+        error(aw.loc, "'await' inside a loop is not supported yet (async MVP)");
+      }
+      if (aw.task) {
+        checkExpr(*aw.task);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -667,6 +698,8 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
       auto saved_constraints = active_generic_constraints_;
       ast::FuncDeclStmt* saved_fn = current_fn_;
       current_fn_ = &fn;
+      const bool saved_async = in_async_fn_;
+      in_async_fn_ = fn.is_async;
       for (const ast::GenericParam& gp : fn.generics) {
         active_generic_constraints_[gp.name] = gp.constraint;
       }
@@ -682,6 +715,7 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
       mutable_vars_ = std::move(saved_mut);
       active_generic_constraints_ = std::move(saved_constraints);
       current_fn_ = saved_fn;
+      in_async_fn_ = saved_async;
       break;
     }
     case ast::StmtKind::If: {
@@ -705,6 +739,17 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
           checkExpr(*br.pattern);
         }
         pushScope();
+        // Destructuring arms introduce one local per bound field
+        // (`User { name, addr: Addr { city } }` binds name and city). `_` skips.
+        if (br.destruct) {
+          std::vector<std::pair<std::string, ast::SourceLocation>> names;
+          collectPatternBindings(*br.destruct, names);
+          for (const auto& nb : names) {
+            declareLocal(nb.first, kErrorType, nb.second);
+          }
+        } else if (br.pattern_kind == ast::MatchPatternKind::Some && !br.binding.empty()) {
+          declareLocal(br.binding, kErrorType, br.loc);
+        }
         checkStmtList(br.body);
         popScope();
       }
@@ -714,7 +759,10 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
       auto& wh = static_cast<ast::WhileStmt&>(stmt);
       if (wh.cond) checkExpr(*wh.cond);
       pushScope();
+      const bool saved_loop = in_loop_;
+      in_loop_ = true;
       checkStmtList(wh.body);
+      in_loop_ = saved_loop;
       popScope();
       break;
     }
@@ -723,7 +771,10 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
       if (fin.iterable) checkExpr(*fin.iterable);
       pushScope();
       declareLocal(fin.item_name, "i32", fin.loc);
+      const bool saved_loop = in_loop_;
+      in_loop_ = true;
       checkStmtList(fin.body);
+      in_loop_ = saved_loop;
       popScope();
       break;
     }

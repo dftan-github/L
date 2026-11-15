@@ -48,6 +48,10 @@ private:
   bool in_sync_ = false;
   // Data-race checks apply only inside `spawn { ... }` ([closure-integration]).
   bool in_spawn_ = false;
+  // `await` is only legal inside an `async fun` body.
+  bool in_async_fn_ = false;
+  // Inside a loop body: `await` there cannot be resumed in the async MVP.
+  bool in_loop_ = false;
   std::unordered_set<std::string> mutable_vars_;
   // Scoped symbol tables (outer → inner). Value may be kErrorType.
   std::vector<std::unordered_map<std::string, std::string>> scopes_;

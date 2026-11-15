@@ -185,6 +185,9 @@ ast::StmtPtr Parser::parseStatement() {
   if (check(ast::TokenType::KwFun)) {
     return parseFuncDecl();
   }
+  if (check(ast::TokenType::KwAsync)) {
+    return parseAsyncDecl();
+  }
   if (check(ast::TokenType::KwInterface)) {
     return parseInterfaceDecl();
   }
@@ -958,6 +961,19 @@ ast::ExprPtr Parser::parsePrimaryExpression() {
     expr->body = parseBlockBody();
     return expr;
   }
+  // `await expr` — suspend the enclosing async fun until the task completes.
+  // The operand is a unary-level expression so `await f()` / `await t.value`
+  // bind the call/member access, while `await a + b` awaits `a` then adds.
+  if (check(ast::TokenType::KwAwait)) {
+    ast::Token kw = consume(ast::TokenType::KwAwait, "expected 'await'");
+    auto expr = std::make_unique<ast::AwaitExpr>();
+    expr->loc = kw.loc;
+    expr->task = parseUnaryExpression();
+    if (!expr->task) {
+      errorAt(peek(), "expected expression after 'await'");
+    }
+    return expr;
+  }
   if (check(ast::TokenType::LParen)) {
     advance();
     ast::ExprPtr inner = parseExpression(0);
@@ -1437,13 +1453,14 @@ bool Parser::parseGenericParams(std::vector<ast::GenericParam>& out, bool allow_
   return true;
 }
 
-std::unique_ptr<ast::FuncDeclStmt> Parser::parseFunCommon(bool allow_body) {
+std::unique_ptr<ast::FuncDeclStmt> Parser::parseFunCommon(bool allow_body, bool is_async) {
   ast::Token kw = consume(ast::TokenType::KwFun, "expected 'fun'");
   ast::Token name = consume(ast::TokenType::Identifier, "expected function name");
 
   auto func = std::make_unique<ast::FuncDeclStmt>();
   func->loc = kw.loc;
   func->name = name.lexeme;
+  func->is_async = is_async;
   pushContext(func->name);
 
   const auto saved_generics = generic_type_names_;
@@ -1499,6 +1516,24 @@ ast::StmtPtr Parser::parseFuncDecl() {
   return parseFunCommon(/*allow_body=*/true);
 }
 
+// `async fun name(...)` / `pub async fun ...` — a coroutine declaration.
+ast::StmtPtr Parser::parseAsyncDecl() {
+  consume(ast::TokenType::KwAsync, "expected 'async'");
+  bool is_pub = false;
+  if (check(ast::TokenType::KwPub)) {
+    advance();
+    is_pub = true;
+  }
+  if (!check(ast::TokenType::KwFun)) {
+    errorAt(peek(), "expected 'fun' after 'async'");
+    synchronize();
+    return nullptr;
+  }
+  auto func = parseFunCommon(/*allow_body=*/true, /*is_async=*/true);
+  func->is_pub = is_pub;
+  return func;
+}
+
 ast::StmtPtr Parser::parseReturnStmt() {
   ast::Token kw = consume(ast::TokenType::KwReturn, "expected 'return'");
   ast::ExprPtr value;
@@ -1544,10 +1579,116 @@ ast::StmtPtr Parser::parseIfStmt() {
   return stmt;
 }
 
+// `User { ... }` — an Identifier (optionally `Name<T,...>`) directly followed by
+// `{`. A bare identifier is never a pattern today, so this lookahead is safe.
+bool Parser::isClassPatternStart() const {
+  if (!check(ast::TokenType::Identifier)) {
+    return false;
+  }
+  std::size_t k = 1;
+  if (peek(k).type == ast::TokenType::LAngle) {
+    int depth = 0;
+    for (;; ++k) {
+      const ast::Token& t = peek(k);
+      if (t.type == ast::TokenType::LAngle) {
+        ++depth;
+      } else if (t.type == ast::TokenType::RAngle) {
+        if (--depth == 0) {
+          ++k;
+          break;
+        }
+      } else if (t.type == ast::TokenType::EndOfFile || t.type == ast::TokenType::Comma ||
+                 t.type == ast::TokenType::FatArrow) {
+        return false;
+      }
+    }
+  }
+  return peek(k).type == ast::TokenType::LBrace;
+}
+
+// Parse `{ name, age, addr: Addr { city } }`. Fields bind by field name; `_`
+// skips a field; `field: SubPattern` recurses.
+ast::MatchPatternPtr Parser::parseClassPatternBody(ast::MatchPatternPtr out) {
+  consume(ast::TokenType::LBrace, "expected '{' in destructuring pattern");
+  while (!atEnd() && !check(ast::TokenType::RBrace)) {
+    if (match(ast::TokenType::Comma) || match(ast::TokenType::Semicolon)) {
+      continue;
+    }
+    ast::Token field = consume(ast::TokenType::Identifier, "expected field name in pattern");
+    ast::PatternField pf;
+    pf.loc = field.loc;
+    pf.name = field.lexeme;
+    if (match(ast::TokenType::Colon)) {
+      // `field: Sub` — nested destructuring, `_` skip, or a new binding name.
+      if (check(ast::TokenType::LBracket)) {
+        pf.sub = parseArrayPattern();
+      } else if (isClassPatternStart()) {
+        pf.sub = parseClassPattern();
+      } else if (check(ast::TokenType::Identifier) && peek().lexeme == "_") {
+        advance();
+        pf.binding = "_";
+      } else {
+        ast::Token name = consume(ast::TokenType::Identifier,
+                                  "expected nested pattern or binding name after ':'");
+        pf.binding = name.lexeme;
+      }
+    } else if (field.lexeme != "_") {
+      pf.binding = field.lexeme;
+    }
+    out->fields.push_back(std::move(pf));
+  }
+  consume(ast::TokenType::RBrace, "expected '}' after destructuring pattern");
+  return out;
+}
+
+ast::MatchPatternPtr Parser::parseClassPattern() {
+  auto pat = std::make_unique<ast::MatchPattern>();
+  pat->loc = peek().loc;
+  pat->kind = ast::MatchPatternKind::ClassDestructure;
+  // Class name, including a generic instantiation like `Box<i32>`.
+  pat->class_name = consume(ast::TokenType::Identifier, "expected class name in pattern").lexeme;
+  if (check(ast::TokenType::LAngle)) {
+    std::string text = pat->class_name;
+    int depth = 0;
+    do {
+      ast::Token t = peek();
+      advance();
+      if (t.type == ast::TokenType::LAngle) {
+        ++depth;
+      } else if (t.type == ast::TokenType::RAngle) {
+        --depth;
+      }
+      text += t.lexeme;
+    } while (depth > 0 && !atEnd());
+    pat->class_name = text;
+  }
+  return parseClassPatternBody(std::move(pat));
+}
+
+// `[a, b]` — leading elements of an Array. `_` skips an element.
+ast::MatchPatternPtr Parser::parseArrayPattern() {
+  auto pat = std::make_unique<ast::MatchPattern>();
+  pat->loc = peek().loc;
+  pat->kind = ast::MatchPatternKind::ArrayDestructure;
+  consume(ast::TokenType::LBracket, "expected '[' in array pattern");
+  while (!atEnd() && !check(ast::TokenType::RBracket)) {
+    if (match(ast::TokenType::Comma)) {
+      continue;
+    }
+    ast::PatternField pf;
+    pf.loc = peek().loc;
+    ast::Token name = consume(ast::TokenType::Identifier, "expected binding name in array pattern");
+    pf.name = name.lexeme;
+    pf.binding = name.lexeme == "_" ? std::string("_") : name.lexeme;
+    pat->fields.push_back(std::move(pf));
+  }
+  consume(ast::TokenType::RBracket, "expected ']' after array pattern");
+  return pat;
+}
+
 ast::MatchBranch Parser::parseMatchBranch() {
   ast::MatchBranch branch;
   branch.loc = peek().loc;
-
   if (check(ast::TokenType::Identifier) && peek().lexeme == "_") {
     advance();
     branch.is_wildcard = true;
@@ -1562,6 +1703,13 @@ ast::MatchBranch Parser::parseMatchBranch() {
     ast::Token name = consume(ast::TokenType::Identifier, "expected binding name in 'some(...)'");
     branch.binding = name.lexeme;
     consume(ast::TokenType::RParen, "expected ')' after 'some' binding");
+  } else if (check(ast::TokenType::LBracket)) {
+    // `[a, b]` — destructure an Array's leading elements.
+    branch.pattern_kind = ast::MatchPatternKind::ArrayDestructure;
+    branch.destruct = parseArrayPattern();
+  } else if (isClassPatternStart()) {
+    branch.pattern_kind = ast::MatchPatternKind::ClassDestructure;
+    branch.destruct = parseClassPattern();
   } else if (check(ast::TokenType::IntLiteral)) {
     ast::Token tok = peek();
     advance();
@@ -1909,6 +2057,7 @@ ast::StmtPtr Parser::parseClassDecl() {
     if (starts_method) {
       bool method_pub = false;
       bool method_static = false;
+      bool method_async = false;
       for (;;) {
         if (check(ast::TokenType::KwPub)) {
           advance();
@@ -1920,6 +2069,11 @@ ast::StmtPtr Parser::parseClassDecl() {
           method_static = true;
           continue;
         }
+        if (check(ast::TokenType::KwAsync)) {
+          advance();
+          method_async = true;
+          continue;
+        }
         break;
       }
       if (!check(ast::TokenType::KwFun)) {
@@ -1927,7 +2081,7 @@ ast::StmtPtr Parser::parseClassDecl() {
         synchronize();
         continue;
       }
-      auto method = parseFunCommon(/*allow_body=*/true);
+      auto method = parseFunCommon(/*allow_body=*/true, method_async);
       method->is_method = true;
       method->is_pub = method_pub;
       method->is_static = method_static;

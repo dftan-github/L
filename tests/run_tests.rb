@@ -34,6 +34,8 @@ DELEGATE_CONFLICT_BAD = ROOT.join("tests", "cases", "delegate_conflict_bad.l")
 DELEGATE_SAME_TYPE_BAD = ROOT.join("tests", "cases", "delegate_same_type_bad.l")
 DELEGATE_SAME_TYPE_PARTIAL_BAD = ROOT.join("tests", "cases", "delegate_same_type_partial_bad.l")
 COALESCE_TEST = ROOT.join("tests", "cases", "coalesce_test.l")
+ASYNC_AWAIT_TEST = ROOT.join("tests", "cases", "async_await_test.l")
+ASYNC_AWAIT_LOOP_BAD = ROOT.join("tests", "cases", "async_await_loop_bad.l")
 COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_bad.l")
 ERGONOMICS_TEST = ROOT.join("tests", "cases", "ergonomics_test.l")
 DROP_TEST = ROOT.join("tests", "cases", "drop_test.l")
@@ -79,6 +81,10 @@ SAFE_FIELD_TEST = ROOT.join("tests", "cases", "safe_field_test.l")
 STDLIB_ARRAY = ROOT.join("stdlib", "array.l")
 MATCH_TEST = ROOT.join("tests", "cases", "match_test.l")
 MATCH_EXPR_TEST = ROOT.join("tests", "cases", "match_expr_test.l")
+DESTRUCTURE_MATCH_TEST = ROOT.join("tests", "cases", "destructure_match.l")
+DESTRUCTURE_ARRAY_TEST = ROOT.join("tests", "cases", "destructure_array.l")
+DESTRUCTURE_TYPE_MISMATCH = ROOT.join("tests", "cases", "destructure_type_mismatch.l")
+DESTRUCTURE_UNKNOWN_FIELD = ROOT.join("tests", "cases", "destructure_unknown_field.l")
 IMPLICIT_BOXING_TEST = ROOT.join("tests", "cases", "implicit_boxing_test.l")
 COALESCE_BOXING_TEST = ROOT.join("tests", "cases", "coalesce_boxing_test.l")
 VARIANT_UNBOX_RETURN_TEST = ROOT.join("tests", "cases", "variant_unbox_return_test.l")
@@ -2079,6 +2085,67 @@ def test_match_expr_e2e!
   puts "  OK match_expr_test e2e (some/none destructuring, PHI merge)"
 end
 
+def test_destructure_match_e2e!
+  assert!(File.exist?(DESTRUCTURE_MATCH_TEST), "destructure_match case not found")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("destructure_match.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s, *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, DESTRUCTURE_MATCH_TEST)
+  )
+  assert!(status.success?, "compile destructure_match failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "destructure_match exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  # describe / city_of / skip_and_alias / name_of / age_plus / some(User) / some(Admin)
+  expected = "Ada\n36\nParis\n75001\nAda\nAda\n40\nAda\n36\nRoot\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # Field access must be raw GEP + load, never a getter call.
+  ir, ir_err, ir_st = run_compiler(
+    "--emit-llvm", *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, DESTRUCTURE_MATCH_TEST)
+  )
+  assert!(ir_st.success?, "emit-llvm destructure_match failed\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("pat.val.age") || ir.include?("pat.val."),
+         "expected GEP field bindings in IR\n#{ir[0, 2000]}")
+
+  puts "  OK destructure_match e2e (class + nested + Optional payload)"
+end
+
+def test_destructure_array_e2e!
+  assert!(File.exist?(DESTRUCTURE_ARRAY_TEST), "destructure_array case not found")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("destructure_array.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s, *with_runtime(STDLIB_ARRAY, STDLIB_STRING, STDLIB_OPTIONAL, DESTRUCTURE_ARRAY_TEST)
+  )
+  assert!(status.success?, "compile destructure_array failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "destructure_array exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "10\n20\nshort\nAda\n20\n-1\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  puts "  OK destructure_array e2e (prefix match, `_` skip, length guard)"
+end
+
+def test_destructure_errors!
+  [[DESTRUCTURE_TYPE_MISMATCH, "cannot match scrutinee of type 'Admin'"],
+   [DESTRUCTURE_UNKNOWN_FIELD, "unknown field 'email'"]].each do |path, needle|
+    assert!(File.exist?(path), "missing error case #{path}")
+    stdout, stderr, status = run_compiler(
+      "--emit-llvm", *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, path)
+    )
+    assert!(!status.success?, "#{File.basename(path)} should fail to compile\n#{stdout}\n#{stderr}")
+    combined = "#{stdout}\n#{stderr}"
+    assert!(combined.include?(needle), "expected '#{needle}' in diagnostics, got:\n#{combined}")
+  end
+  puts "  OK destructure errors (type mismatch, unknown field)"
+end
+
 def test_implicit_boxing_e2e!
   assert!(File.exist?(IMPLICIT_BOXING_TEST),
           "implicit_boxing_test not found: #{IMPLICIT_BOXING_TEST}")
@@ -3820,6 +3887,54 @@ def test_kw_bad_parse!
   puts "  OK kw_bad parse rejects positional-after-KW"
 end
 
+def test_async_await_e2e!
+  assert!(File.exist?(ASYNC_AWAIT_TEST), "async_await_test case not found: #{ASYNC_AWAIT_TEST}")
+
+  # The lowered IR must be a hand-written state machine: a frame struct plus a
+  # `switch` on the state tag, and no `coro.*` intrinsics at all.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *with_runtime(ASYNC_AWAIT_TEST))
+  assert!(ir_st.success?, "emit-llvm async_await_test failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(ir.include?(".frame = type { i32, ptr"), "IR missing the coroutine frame struct\n#{ir}")
+  assert!(ir.include?("$step"), "IR missing the `$step` state machine function\n#{ir}")
+  assert!(!ir.include?("llvm.coro."), "IR must not contain coro.* intrinsics\n#{ir}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("async_await_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(ASYNC_AWAIT_TEST))
+  assert!(status.success?, "compile async_await_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "async_await_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "async_await_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(
+    normalized.end_with?("43\n"),
+    "expected the awaited result 43, got #{normalized.inspect}"
+  )
+  assert!(
+    normalized.scan("main: spawned").size == 1,
+    "the async body must run exactly once, got #{normalized.inspect}"
+  )
+
+  puts "  OK async_await e2e (state machine frame + await)"
+end
+
+def test_async_await_loop_rejected!
+  assert!(File.exist?(ASYNC_AWAIT_LOOP_BAD), "async_await_loop_bad case not found")
+
+  stdout, stderr, status = run_compiler("-o", OUT_DIR.join("nope.exe").to_s,
+                                        *with_runtime(ASYNC_AWAIT_LOOP_BAD))
+  combined = "#{stdout}\n#{stderr}"
+  assert!(!status.success?, "await in loop must be rejected")
+  assert!(
+    combined.match?(/\[ERROR\] .+async_await_loop_bad\.l:\d+:\d+ - .*inside a loop is not supported/im),
+    "expected the loop-await diagnostic, got:\n#{combined}"
+  )
+
+  puts "  OK async_await loop rejected"
+end
+
 def test_input_readline_e2e!
   assert!(File.exist?(INPUT_TEST), "input_test case not found: #{INPUT_TEST}")
   assert!(File.exist?(STDLIB_STRING), "stdlib string not found: #{STDLIB_STRING}")
@@ -4450,6 +4565,9 @@ def main
     test_safe_field_e2e!
     test_match_e2e!
     test_match_expr_e2e!
+    test_destructure_match_e2e!
+    test_destructure_array_e2e!
+    test_destructure_errors!
     test_implicit_boxing_e2e!
     test_coalesce_boxing_e2e!
     test_variant_unbox_return_e2e!
@@ -4491,6 +4609,8 @@ def main
     test_generic_inference_e2e!
     test_optional_e2e!
     test_coalesce_e2e!
+    test_async_await_e2e!
+    test_async_await_loop_rejected!
     test_ergonomics_e2e!
     test_drop_e2e!
     test_incremental_cache_e2e!

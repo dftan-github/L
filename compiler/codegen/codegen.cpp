@@ -13,6 +13,8 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Type.h"
@@ -20,12 +22,16 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
+#include "llvm/Transforms/Utils/Mem2Reg.h"
 
 #include <algorithm>
 
@@ -544,6 +550,34 @@ llvm::AllocaInst* Codegen::createEntryAlloca(llvm::Function* fn, llvm::Type* ty,
   return tmp.CreateAlloca(ty, nullptr, name);
 }
 
+// Local storage for a variable: a frame slot inside an `async fun` body (so it
+// survives the suspend point), a plain stack alloca everywhere else.
+llvm::Value* Codegen::createLocalStorage(llvm::Function* fn, llvm::Type* ty,
+                                        const std::string& name) {
+  if (in_coroutine_ && coro_frame_ && coro_frame_ty_) {
+    auto it = coro_slot_addrs_.find(name);
+    if (it != coro_slot_addrs_.end()) {
+      return it->second;
+    }
+  }
+  return createEntryAlloca(fn, ty, name);
+}
+
+// Pointee type of a local slot: an `alloca` yields its stored type, a coroutine
+// frame `GEP` yields the struct field type.
+llvm::Type* Codegen::localSlotType(llvm::Value* slot) {
+  if (!slot) {
+    return nullptr;
+  }
+  if (auto* ai = llvm::dyn_cast<llvm::AllocaInst>(slot)) {
+    return ai->getAllocatedType();
+  }
+  if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(slot)) {
+    return gep->getResultElementType();
+  }
+  return nullptr;
+}
+
 llvm::Function* Codegen::requireExtern(const std::string& name) {
   if (llvm::Function* existing = module_->getFunction(name)) {
     return existing;
@@ -716,8 +750,36 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
           is_binding = !br.binding.empty() &&
                        static_cast<const ast::IdentifierExpr&>(*br.value).name == br.binding;
         }
+        // Destructuring arms bind field names; `User { name } => name` yields
+        // the field's declared type.
+        std::string destr_ty;
+        if (br.destruct && br.value->kind() == ast::ExprKind::Identifier) {
+          const std::string& name = static_cast<const ast::IdentifierExpr&>(*br.value).name;
+          if (br.destruct->kind == ast::MatchPatternKind::ArrayDestructure) {
+            std::string abase;
+            std::vector<std::string> aargs;
+            const std::string sty = m.scrutinee ? exprTypeOf(*m.scrutinee) : std::string();
+            if (splitGenericType(sty, abase, aargs) && abase == "Array" && aargs.size() == 1) {
+              destr_ty = aargs[0];
+            }
+          } else {
+            for (const ast::PatternField& pf : br.destruct->fields) {
+              const std::string bind = pf.binding.empty() ? pf.name : pf.binding;
+              if (bind != name) {
+                continue;
+              }
+              if (const ClassInfo* ci = findClass(resolveTypeName(br.destruct->class_name))) {
+                auto fit = ci->field_index.find(physicalFieldName(pf.name));
+                if (fit != ci->field_index.end() && fit->second < ci->field_types.size()) {
+                  destr_ty = ci->field_types[fit->second];
+                }
+              }
+              break;
+            }
+          }
+        }
         const std::string ty =
-            is_binding ? payload : exprTypeOf(*br.value);
+            is_binding ? payload : (!destr_ty.empty() ? destr_ty : exprTypeOf(*br.value));
         if (ty.empty()) {
           continue;
         }
@@ -846,6 +908,10 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
         it = concrete_funcs_.find(current_module_ + "::" + call.callee);
       }
       if (it != concrete_funcs_.end() && it->second) {
+        // `async fun` is called as a task handle; `await` then unwraps the payload.
+        if (it->second->is_async) {
+          return "ptr";
+        }
         // Escaping closure returns a fat ABI, but the L type remains the payload fun(...).
         if (it->second->returns_fat_closure) {
           const std::string rt = resolveTypeName(it->second->return_type);
@@ -1043,6 +1109,25 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
     }
     case ast::ExprKind::Spawn:
       return "ptr";
+    case ast::ExprKind::Await: {
+      // `await f()` yields f's declared return type (the task payload type),
+      // even though `f()` itself is a `ptr` task handle.
+      const auto& aw = static_cast<const ast::AwaitExpr&>(expr);
+      if (!aw.task) {
+        return {};
+      }
+      if (aw.task->kind() == ast::ExprKind::Call) {
+        const auto& call = static_cast<const ast::CallExpr&>(*aw.task);
+        auto it = concrete_funcs_.find(call.callee);
+        if (it == concrete_funcs_.end() && !current_module_.empty()) {
+          it = concrete_funcs_.find(current_module_ + "::" + call.callee);
+        }
+        if (it != concrete_funcs_.end() && it->second) {
+          return resolveTypeName(it->second->return_type);
+        }
+      }
+      return {};
+    }
     case ast::ExprKind::ScopedCall: {
       const auto& sc = static_cast<const ast::ScopedCallExpr&>(expr);
       auto mit = module_exports_.find(sc.module);
@@ -2784,6 +2869,11 @@ bool Codegen::emit(const ast::Module& module) {
     llvm::Type* ret_ty =
         fn.returns_fat_closure ? static_cast<llvm::Type*>(fatClosureTy())
                                : typeFromName(fn.return_type);
+    // `async fun f() -> T` is called as `f(): ptr` yielding a task handle; the
+    // coroutine still produces `T` internally (see emitAsyncFuncDecl).
+    if (fn.is_async) {
+      ret_ty = ptrTy();
+    }
     auto* fty = llvm::FunctionType::get(ret_ty, params, false);
     const auto linkage = (fn.is_pub || fn.name == "main") ? llvm::Function::ExternalLinkage
                                                           : llvm::Function::InternalLinkage;
@@ -3355,6 +3445,513 @@ void Codegen::emitLifecycleDeinitCall() {
   }
 }
 
+bool Codegen::emitAsyncFuncDecl(const ast::FuncDeclStmt& fn_ast) {
+  return emitCoroutineBody(fn_ast);
+}
+
+namespace {
+
+// Every local that needs a frame slot: `VarDecl` names reachable from the body.
+// The MVP frame is laid out from this static scan, so a local survives the
+// suspend point no matter where in the body it was declared.
+void collectCoroLocals(const std::vector<ast::StmtPtr>& stmts,
+                       std::vector<const ast::VarDeclStmt*>& out) {
+  for (const ast::StmtPtr& st : stmts) {
+    if (!st) {
+      continue;
+    }
+    switch (st->kind()) {
+      case ast::StmtKind::VarDecl:
+        out.push_back(&static_cast<const ast::VarDeclStmt&>(*st));
+        break;
+      case ast::StmtKind::If: {
+        const auto& iff = static_cast<const ast::IfStmt&>(*st);
+        collectCoroLocals(iff.then_body, out);
+        collectCoroLocals(iff.else_body, out);
+        break;
+      }
+      case ast::StmtKind::Block:
+        collectCoroLocals(static_cast<const ast::BlockStmt&>(*st).stmts, out);
+        break;
+      default:
+        break;  // `await` in loops is rejected before we get here
+    }
+  }
+}
+
+int countAwaits(const std::vector<ast::StmtPtr>& stmts) {
+  int n = 0;
+  for (const ast::StmtPtr& st : stmts) {
+    if (!st) {
+      continue;
+    }
+    switch (st->kind()) {
+      case ast::StmtKind::ExprStmt: {
+        const auto& es = static_cast<const ast::ExprStmt&>(*st);
+        if (es.expr && es.expr->kind() == ast::ExprKind::Await) {
+          ++n;
+        }
+        break;
+      }
+      case ast::StmtKind::Return: {
+        const auto& rs = static_cast<const ast::ReturnStmt&>(*st);
+        if (rs.value && rs.value->kind() == ast::ExprKind::Await) {
+          ++n;
+        }
+        break;
+      }
+      case ast::StmtKind::VarDecl: {
+        // `x := await f()` — the common shape of an awaited call.
+        const auto& vd = static_cast<const ast::VarDeclStmt&>(*st);
+        if (vd.init && vd.init->kind() == ast::ExprKind::Await) {
+          ++n;
+        }
+        break;
+      }
+      case ast::StmtKind::If: {
+        const auto& iff = static_cast<const ast::IfStmt&>(*st);
+        n += countAwaits(iff.then_body);
+        n += countAwaits(iff.else_body);
+        break;
+      }
+      case ast::StmtKind::Block:
+        n += countAwaits(static_cast<const ast::BlockStmt&>(*st).stmts);
+        break;
+      default:
+        break;
+    }
+  }
+  return n;
+}
+
+// `await` nested in a loop has no single resume state in the MVP.
+bool hasAwaitInLoop(const std::vector<ast::StmtPtr>& stmts) {
+  for (const ast::StmtPtr& st : stmts) {
+    if (!st) {
+      continue;
+    }
+    switch (st->kind()) {
+      case ast::StmtKind::While: {
+        const auto& wh = static_cast<const ast::WhileStmt&>(*st);
+        if (countAwaits(wh.body) > 0) {
+          return true;
+        }
+        if (hasAwaitInLoop(wh.body)) {
+          return true;
+        }
+        break;
+      }
+      case ast::StmtKind::ForIn: {
+        const auto& fi = static_cast<const ast::ForInStmt&>(*st);
+        if (countAwaits(fi.body) > 0) {
+          return true;
+        }
+        if (hasAwaitInLoop(fi.body)) {
+          return true;
+        }
+        break;
+      }
+      case ast::StmtKind::If: {
+        const auto& iff = static_cast<const ast::IfStmt&>(*st);
+        if (hasAwaitInLoop(iff.then_body) || hasAwaitInLoop(iff.else_body)) {
+          return true;
+        }
+        break;
+      }
+      case ast::StmtKind::Block:
+        if (hasAwaitInLoop(static_cast<const ast::BlockStmt&>(*st).stmts)) {
+          return true;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+// Lower `async fun f(...) -> T` into a hand-written stackless state machine.
+//
+// LLVM's CoroSplit pass silently refuses to split our IR (it leaves `coro.id`
+// and `coro.suspend` in place but never outlines `.resume`/`.destroy`), so the
+// frame, the state index and the suspend/resume jumps are emitted explicitly:
+//
+//   f(params) -> ptr              ; entry wrapper: heap frame + task, then step
+//   f$step(ptr frame) -> void     ; the state machine itself
+//
+//   f$step dispatch:  switch frame.state { 0 -> body }
+//   body:             <statements before `await`>
+//                     frame.state = 1
+//                     frame.await = <value>
+//                     ret            ; suspend: control returns to the caller
+//   await.resume:     <statements after `await`>
+//   done:             publish frame.result to the task, mark it complete, ret
+//
+// Every coroutine local (and every parameter) lives in the frame, so nothing
+// is lost across the suspend point. MVP: exactly one `await`, never in a loop.
+bool Codegen::emitCoroutineBody(const ast::FuncDeclStmt& fn_ast) {
+  const std::string ir_name = mangleName(fn_ast.module_name, fn_ast.name, fn_ast.is_pub);
+  llvm::Function* fn = module_->getFunction(ir_name);
+  if (!fn) {
+    error("missing function declaration: " + ir_name);
+    return false;
+  }
+  if (!fn->empty()) {
+    error("redefinition of function: " + ir_name);
+    return false;
+  }
+
+  // ---- MVP restrictions ----
+  if (hasAwaitInLoop(fn_ast.body)) {
+    error(fn_ast.loc, "'await' inside a loop is not supported yet (async MVP)");
+    return false;
+  }
+  if (countAwaits(fn_ast.body) > 1) {
+    error(fn_ast.loc, "'async fun " + fn_ast.name +
+                          "': only one 'await' per async function is supported (async MVP)");
+    return false;
+  }
+
+  llvm::Type* i8p = ptrTy();
+  llvm::Type* i32 = i32Ty();
+  llvm::Type* i64 = llvm::Type::getInt64Ty(globalContext());
+  llvm::Type* void_ty = llvm::Type::getVoidTy(globalContext());
+  llvm::PointerType* i8p_ty = llvm::dyn_cast<llvm::PointerType>(i8p);
+
+  // ---- Frame layout: { i32 state, ptr task, T result, <params + locals> } ----
+  std::string ret_name = fn_ast.return_type.empty() ? "i32" : fn_ast.return_type;
+  ret_name = resolveTypeName(ret_name);
+  llvm::Type* ret_ty = typeFromName(ret_name);
+  if (!ret_ty || ret_ty->isVoidTy()) {
+    ret_ty = i32;
+  }
+  constexpr unsigned kStateIdx = 0;
+  constexpr unsigned kTaskIdx = 1;
+  constexpr unsigned kResultIdx = 2;
+
+  std::vector<llvm::Type*> fields = {i32, i8p, ret_ty};
+  coro_local_slots_.clear();
+  for (const ast::Param& param : fn_ast.params) {
+    std::string tn = resolveTypeName(param.type_name);
+    llvm::Type* pt = (isClassType(tn) || isFunTypeName(tn)) ? ptrTy() : typeFromName(tn);
+    if (!pt) {
+      pt = i32;
+    }
+    coro_local_slots_[param.name] = static_cast<unsigned>(fields.size());
+    fields.push_back(pt);
+  }
+  std::vector<const ast::VarDeclStmt*> locals;
+  collectCoroLocals(fn_ast.body, locals);
+  for (const ast::VarDeclStmt* vd : locals) {
+    if (!vd || vd->decl_kind == ast::VarDeclKind::Const ||
+        vd->decl_kind == ast::VarDeclKind::Constd) {
+      continue;  // compile-time constants never need a frame slot
+    }
+    std::string tn = vd->type_name;
+    if (tn.empty() && vd->init) {
+      tn = inferTypeFromExpr(*vd->init);
+    }
+    tn = resolveTypeName(tn.empty() ? "i32" : tn);
+    llvm::Type* lt = (isClassType(tn) || isFunTypeName(tn)) ? ptrTy() : typeFromName(tn);
+    if (!lt) {
+      lt = i32;
+    }
+    coro_local_slots_[vd->name] = static_cast<unsigned>(fields.size());
+    fields.push_back(lt);
+  }
+
+  coro_frame_ty_ = llvm::StructType::create(globalContext(), fields, ir_name + ".frame");
+  coro_result_idx_ = kResultIdx;
+  // Slot reserved for the awaited task handle (filled in by `await`).
+  coro_await_task_idx_ = static_cast<unsigned>(coro_frame_ty_->getNumElements());
+  {
+    std::vector<llvm::Type*> with_await = fields;
+    with_await.push_back(i8p);
+    coro_frame_ty_->setBody(with_await, /*isPacked=*/false);
+  }
+
+  // ---- Runtime hooks (runtime/task.c) ----
+  llvm::FunctionCallee alloc_fn =
+      module_->getOrInsertFunction("l_alloc", llvm::FunctionType::get(i8p, {i64}, false));
+  llvm::FunctionCallee task_new_fn =
+      module_->getOrInsertFunction("l_task_new", llvm::FunctionType::get(i8p, {i8p, i8p}, false));
+  llvm::FunctionCallee set_frame_fn = module_->getOrInsertFunction(
+      "l_task_set_frame", llvm::FunctionType::get(void_ty, {i8p, i8p}, false));
+  llvm::FunctionCallee set_resume_fn = module_->getOrInsertFunction(
+      "l_task_set_resume", llvm::FunctionType::get(void_ty, {i8p, i8p}, false));
+  llvm::FunctionCallee set_result_fn = module_->getOrInsertFunction(
+      "l_task_set_result", llvm::FunctionType::get(void_ty, {i8p, i8p}, false));
+  llvm::FunctionCallee complete_fn = module_->getOrInsertFunction(
+      "l_task_complete", llvm::FunctionType::get(void_ty, {i8p}, false));
+  llvm::FunctionCallee enqueue_fn =
+      module_->getOrInsertFunction("l_task_enqueue", llvm::FunctionType::get(void_ty, {i8p}, false));
+
+  llvm::Constant* null_ptr = llvm::ConstantPointerNull::get(i8p_ty);
+  llvm::Function* step_fn = llvm::Function::Create(
+      llvm::FunctionType::get(void_ty, {i8p}, false), llvm::Function::InternalLinkage,
+      ir_name + "$step", module_.get());
+  step_fn->setCallingConv(llvm::CallingConv::C);
+
+  // ---- Entry wrapper: f(params) -> ptr ----
+  {
+    llvm::BasicBlock* entry_bb = llvm::BasicBlock::Create(globalContext(), "entry", fn);
+    llvm::IRBuilder<> eb(entry_bb);
+    llvm::Value* frame_mem =
+        eb.CreateCall(alloc_fn, {llvm::ConstantExpr::getSizeOf(coro_frame_ty_)}, "frame.mem");
+    llvm::Value* frame = eb.CreateBitCast(frame_mem, ptrTy(), "frame");
+    eb.CreateStore(llvm::ConstantInt::get(i32, 0),
+                   eb.CreateStructGEP(coro_frame_ty_, frame, kStateIdx, "state.ptr"));
+    unsigned arg_idx = 0;
+    for (auto& arg : fn->args()) {
+      const ast::Param& param = fn_ast.params[arg_idx++];
+      eb.CreateStore(&arg, eb.CreateStructGEP(coro_frame_ty_, frame,
+                                              coro_local_slots_[param.name],
+                                              param.name + ".slot"));
+    }
+    llvm::Value* task = eb.CreateCall(task_new_fn, {null_ptr, frame}, "task");
+    eb.CreateStore(task, eb.CreateStructGEP(coro_frame_ty_, frame, kTaskIdx, "task.slot"));
+    eb.CreateCall(set_frame_fn, {task, frame});
+    eb.CreateCall(set_resume_fn, {task, step_fn});
+    // Queue the first step; `l_executor_run_all()` / `l_task_await()` drives it.
+    eb.CreateCall(enqueue_fn, {task});
+    eb.CreateRet(task);
+  }
+
+  // ---- State machine: f$step(ptr frame) -> void ----
+  llvm::BasicBlock* dispatch_bb = llvm::BasicBlock::Create(globalContext(), "dispatch", step_fn);
+  llvm::BasicBlock* body_bb = llvm::BasicBlock::Create(globalContext(), "body", step_fn);
+  llvm::BasicBlock* resume_bb = llvm::BasicBlock::Create(globalContext(), "await.resume", step_fn);
+  llvm::BasicBlock* done_bb = llvm::BasicBlock::Create(globalContext(), "done", step_fn);
+
+  builder_.SetInsertPoint(dispatch_bb);
+  llvm::Value* frame = step_fn->arg_begin();
+  frame->setName("frame");
+  llvm::Value* state_ptr = builder_.CreateStructGEP(coro_frame_ty_, frame, kStateIdx, "state.ptr");
+  llvm::Value* st = builder_.CreateLoad(i32, state_ptr, "state");
+  // Cache every local's slot address in the dispatch block: it dominates all
+  // subsequent blocks (body, await continuation, done), so a slot created once
+  // here stays usable after the suspend/resume boundary.
+  coro_slot_addrs_.clear();
+  for (const auto& [name, idx] : coro_local_slots_) {
+    coro_slot_addrs_[name] =
+        builder_.CreateStructGEP(coro_frame_ty_, frame, idx, name + ".addr");
+  }
+  llvm::SwitchInst* sw = builder_.CreateSwitch(st, body_bb, 1);
+  coro_dispatch_sw_ = sw;
+
+  coro_frame_ = frame;
+  coro_done_bb_ = done_bb;
+  coro_resume_bb_ = resume_bb;
+  coro_await_emitted_ = false;
+  coro_await_cont_bb_ = nullptr;
+
+  // ---- Bind parameters and locals to their frame slots ----
+  named_values_.clear();
+  local_types_.clear();
+  closure_locals_.clear();
+  fat_closure_locals_.clear();
+  fat_closure_ctx_tys_.clear();
+  heap_locals_.clear();
+  owned_string_locals_.clear();
+  arena_locals_.clear();
+  readonly_refs_.clear();
+  defer_scopes_.clear();
+  auto_free_scopes_.clear();
+  held_sync_locks_.clear();
+  in_coroutine_ = true;
+  current_module_ = fn_ast.module_name;
+  current_fn_return_type_ = fn_ast.return_type;
+  current_fn_name_ = fn_ast.name;
+  inject_deinit_on_return_ = false;
+
+  // Locals are addressed through their frame slots; `createEntryAlloca` would
+  // otherwise put them on the stack where they die at the suspend point.
+
+  builder_.SetInsertPoint(body_bb);
+  enterDeferScope();
+  for (const ast::Param& param : fn_ast.params) {
+    auto it = coro_local_slots_.find(param.name);
+    if (it == coro_local_slots_.end()) {
+      continue;
+    }
+    const std::string ptn = resolveTypeName(param.type_name);
+    llvm::Value* slot = coro_slot_addrs_[param.name];
+    named_values_[param.name] = slot;
+    local_types_[param.name] = ptn;
+    if (isClassType(ptn)) {
+      heap_locals_.insert(param.name);
+    }
+  }
+
+  if (!emitStmtList(fn_ast.body)) {
+    in_coroutine_ = false;
+    coro_frame_ty_ = nullptr;
+    return false;
+  }
+  if (builder_.GetInsertBlock() && !builder_.GetInsertBlock()->getTerminator()) {
+    if (!finishCleanups()) {
+      in_coroutine_ = false;
+      coro_frame_ty_ = nullptr;
+      return false;
+    }
+    builder_.CreateBr(done_bb);
+  }
+
+  // ---- Completion: publish the result, retire the task ----
+  builder_.SetInsertPoint(done_bb);
+  llvm::Value* task = builder_.CreateLoad(
+      i8p, builder_.CreateStructGEP(coro_frame_ty_, frame, kTaskIdx, "task.slot"), "task");
+  llvm::Value* result_ptr =
+      builder_.CreateStructGEP(coro_frame_ty_, frame, kResultIdx, "result.ptr");
+  builder_.CreateCall(set_result_fn, {task, result_ptr});
+  builder_.CreateCall(complete_fn, {task});
+  builder_.CreateRetVoid();
+
+  // State 1 (post-`await`) resumes at the continuation of the awaited call.
+  if (coro_await_cont_bb_ && coro_resume_bb_) {
+    builder_.SetInsertPoint(coro_resume_bb_);
+    builder_.CreateBr(coro_await_cont_bb_);
+  }
+  // An async function with no `await` never enters the resume block.
+  if (resume_bb->use_empty()) {
+    resume_bb->eraseFromParent();
+  }
+
+  defer_scopes_.clear();
+  auto_free_scopes_.clear();
+  held_sync_locks_.clear();
+  in_coroutine_ = false;
+  coro_frame_ty_ = nullptr;
+  coro_frame_ = nullptr;
+  coro_done_bb_ = nullptr;
+  coro_resume_bb_ = nullptr;
+
+  if (!fn->empty() && llvm::verifyFunction(*step_fn, &llvm::errs())) {
+    error("async state machine verification failed: " + fn_ast.name);
+    return false;
+  }
+  if (llvm::verifyFunction(*fn, &llvm::errs())) {
+    error("async entry wrapper verification failed: " + fn_ast.name);
+    return false;
+  }
+  return true;
+}
+
+void Codegen::publishCoroResult(llvm::Value* value) {
+  // `return` inside an async body: copy the value into the frame's result slot
+  // (the `done` block publishes it) and jump there.
+  if (value && coro_frame_) {
+    llvm::Type* want = coro_frame_ty_->getElementType(coro_result_idx_);
+    llvm::Value* stored = value;
+    if (stored->getType() != want) {
+      if (want->isIntegerTy() && stored->getType()->isIntegerTy()) {
+        stored = builder_.CreateIntCast(stored, want, /*isSigned=*/true, "result.cast");
+      } else if (want->isPointerTy() && stored->getType()->isPointerTy()) {
+        stored = builder_.CreateBitCast(stored, want, "result.cast");
+      } else if (want->isDoubleTy() && stored->getType()->isIntegerTy()) {
+        stored = builder_.CreateSIToFP(stored, want, "result.cast");
+      } else if (want->isIntegerTy() && stored->getType()->isDoubleTy()) {
+        stored = builder_.CreateFPToSI(stored, want, "result.cast");
+      }
+    }
+    builder_.CreateStore(stored,
+                         builder_.CreateStructGEP(coro_frame_ty_, coro_frame_, coro_result_idx_,
+                                                  "result.ptr"));
+  }
+  emitCoroReturn();
+}
+
+void Codegen::emitCoroReturn() {
+  if (coro_done_bb_) {
+    builder_.CreateBr(coro_done_bb_);
+  }
+}
+
+llvm::Value* Codegen::emitAwaitExpr(const ast::AwaitExpr& expr) {
+  if (!in_coroutine_) {
+    error(expr.loc, "'await' is only allowed inside an 'async fun'");
+    return nullptr;
+  }
+  if (coro_await_emitted_) {
+    error(expr.loc, "only one 'await' per async function is supported (async MVP)");
+    return nullptr;
+  }
+  llvm::Type* i8p = ptrTy();
+  llvm::Type* i32 = i32Ty();
+
+  // 1) Start the awaited task (async calls return a task handle directly).
+  llvm::Value* inner = emitExpr(*expr.task);
+  if (!inner) {
+    return nullptr;
+  }
+  if (!inner->getType()->isPointerTy()) {
+    error(expr.loc, "'await' expects a task handle (ptr)");
+    return nullptr;
+  }
+  llvm::FunctionCallee enqueue_fn =
+      module_->getOrInsertFunction("l_task_enqueue",
+                                   llvm::FunctionType::get(llvm::Type::getVoidTy(globalContext()),
+                                                           {i8p}, false));
+
+  // 2) Payload type comes from the awaited call's declared return type.
+  std::string awaited_ty;
+  if (expr.task && expr.task->kind() == ast::ExprKind::Call) {
+    const auto& call = static_cast<const ast::CallExpr&>(*expr.task);
+    auto it = concrete_funcs_.find(call.callee);
+    if (it == concrete_funcs_.end() && !current_module_.empty()) {
+      it = concrete_funcs_.find(current_module_ + "::" + call.callee);
+    }
+    if (it != concrete_funcs_.end() && it->second) {
+      awaited_ty = resolveTypeName(it->second->return_type);
+    }
+  }
+  llvm::Type* val_ty = awaited_ty.empty() || awaited_ty == "void" ? i32 : typeFromName(awaited_ty);
+  if (!val_ty || val_ty->isVoidTy()) {
+    error(expr.loc, "cannot await a task with no result type");
+    return nullptr;
+  }
+
+  // 3) Suspend: save the resume state, end this step, and continue in the
+  //    continuation block when the executor resumes the frame at state 1.
+  //    A PHI in the continuation carries the awaited value across the boundary
+  //    (the value is produced *after* the resume, from the task's result slot).
+  llvm::Function* step_fn = builder_.GetInsertBlock()->getParent();
+  llvm::BasicBlock* cont_bb =
+      llvm::BasicBlock::Create(globalContext(), "await.cont", step_fn);
+  coro_await_cont_bb_ = cont_bb;
+  builder_.CreateStore(llvm::ConstantInt::get(i32, 1),
+                       builder_.CreateStructGEP(coro_frame_ty_, coro_frame_, 0, "state.ptr"));
+  if (coro_dispatch_sw_) {
+    coro_dispatch_sw_->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(i32, 1)),
+                               coro_resume_bb_);
+  }
+  // Park the awaited handle in a dedicated frame slot so the continuation (and
+  // the resumed state-1 step) can read it without needing SSA dominance.
+  llvm::Value* parked = builder_.CreateStructGEP(coro_frame_ty_, coro_frame_,
+                                                 coro_await_task_idx_, "await.task.ptr");
+  builder_.CreateStore(inner, parked);
+  builder_.CreateBr(cont_bb);
+
+  // ---- Continuation: state 1 lands here ----
+  builder_.SetInsertPoint(cont_bb);
+  llvm::Value* task_h =
+      builder_.CreateLoad(i8p,
+                          builder_.CreateStructGEP(coro_frame_ty_, coro_frame_,
+                                                   coro_await_task_idx_, "await.task.ptr"),
+                          "await.task");
+  llvm::FunctionCallee await_fn =
+      module_->getOrInsertFunction("l_task_await", llvm::FunctionType::get(i8p, {i8p}, false));
+  llvm::Value* res_ptr = builder_.CreateCall(await_fn, {task_h}, "await.result");
+  llvm::Value* slot =
+      builder_.CreateBitCast(res_ptr, llvm::PointerType::get(val_ty, 0), "await.slot");
+  llvm::Value* loaded = builder_.CreateLoad(val_ty, slot, "await.val");
+  coro_await_emitted_ = true;
+  (void)i32;
+  (void)enqueue_fn;
+  return loaded;
+}
 bool Codegen::emitFuncDecl(const ast::FuncDeclStmt& fn_ast) {
   if (fn_ast.is_method || fn_ast.is_extern) {
     return true;
@@ -3364,6 +3961,9 @@ bool Codegen::emitFuncDecl(const ast::FuncDeclStmt& fn_ast) {
   }
   if (!fn_ast.generics.empty()) {
     return true;  // template — specialized on demand
+  }
+  if (fn_ast.is_async) {
+    return emitAsyncFuncDecl(fn_ast);
   }
   const std::string ir_name = mangleName(fn_ast.module_name, fn_ast.name, fn_ast.is_pub);
   llvm::Function* fn = module_->getFunction(ir_name);
@@ -4004,7 +4604,7 @@ llvm::Value* Codegen::emitSpawnBody(const std::vector<ast::StmtPtr>& body,
     if (s) collectSpawnCaptures(*s, caps, seen, &body_locals);
   }
 
-  std::unordered_map<std::string, llvm::AllocaInst*> outer_slots;
+  std::unordered_map<std::string, llvm::Value*> outer_slots;
   std::unordered_map<std::string, std::string> outer_cap_types;
   for (const std::string& name : caps) {
     auto nit = named_values_.find(name);
@@ -4955,7 +5555,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   }
 
   if (type_name == "Arena") {
-    llvm::AllocaInst* slot = createEntryAlloca(fn, ptrTy(), decl.name);
+    llvm::Value* slot = createLocalStorage(fn, ptrTy(), decl.name);
     if (!decl.init) {
       error("Arena '" + decl.name + "' requires an initializer");
       return false;
@@ -4987,7 +5587,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
         error("class type mismatch in heap initialization of " + decl.name);
         return false;
       }
-      llvm::AllocaInst* slot = createEntryAlloca(fn, ptrTy(), decl.name);
+      llvm::Value* slot = createLocalStorage(fn, ptrTy(), decl.name);
       llvm::Value* heap_ptr = emitExpr(*decl.init);
       if (!heap_ptr) {
         return false;
@@ -5001,7 +5601,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
 
     // Arena bump-owned class* — accessible as heap local, but never individually l_free'd.
     if (decl.init && isArenaOwnedClassExpr(*decl.init)) {
-      llvm::AllocaInst* slot = createEntryAlloca(fn, ptrTy(), decl.name);
+      llvm::Value* slot = createLocalStorage(fn, ptrTy(), decl.name);
       llvm::Value* ptr = emitExpr(*decl.init);
       if (!ptr) {
         return false;
@@ -5018,7 +5618,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
 
     // String `a + b` (and similar) yields an owning heap String* — track for auto-free.
     if (decl.init && isOwnedHeapClassExpr(*decl.init)) {
-      llvm::AllocaInst* slot = createEntryAlloca(fn, ptrTy(), decl.name);
+      llvm::Value* slot = createLocalStorage(fn, ptrTy(), decl.name);
       llvm::Value* heap_ptr = emitExpr(*decl.init);
       if (!heap_ptr) {
         return false;
@@ -5046,7 +5646,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
           from_ty = exprTypeOf(*cast.value);
         }
         if (from_ty == "ptr") {
-          llvm::AllocaInst* slot = createEntryAlloca(fn, ptrTy(), decl.name);
+          llvm::Value* slot = createLocalStorage(fn, ptrTy(), decl.name);
           llvm::Value* obj = emitExpr(*decl.init);
           if (!obj) {
             return false;
@@ -5063,7 +5663,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
       }
     }
 
-    llvm::AllocaInst* alloca = createEntryAlloca(fn, info->type, decl.name);
+    llvm::Value* alloca = createLocalStorage(fn, info->type, decl.name);
     named_values_[decl.name] = alloca;
     heap_locals_.erase(decl.name);
     // Drop hook: a class declaring `drop()` owns external resources (buffers,
@@ -5087,7 +5687,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
       if (!initClassAtPtr(raw, *info, neu)) {
         return false;
       }
-      named_values_[decl.name] = createEntryAlloca(fn, ptrTy(), decl.name);
+      named_values_[decl.name] = createLocalStorage(fn, ptrTy(), decl.name);
       builder_.CreateStore(raw, named_values_[decl.name]);
       heap_locals_.insert(decl.name);
       noteAutoFreeLocal(decl.name);
@@ -5100,7 +5700,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
           error("class type mismatch in initialization of " + decl.name);
           return false;
         }
-        if (!initClassFromNew(alloca, *info, neu)) {
+        if (!initClassFromNew(llvm::dyn_cast<llvm::AllocaInst>(alloca), *info, neu)) {
           return false;
         }
         // Stack Array owns its data_ buffer (+ boxed iface elems) → free on scope exit.
@@ -5151,7 +5751,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   }
 
   if (isInterfaceType(type_name)) {
-    llvm::AllocaInst* alloca = createEntryAlloca(fn, fatPtrTy(), decl.name);
+    llvm::Value* alloca = createLocalStorage(fn, fatPtrTy(), decl.name);
     named_values_[decl.name] = alloca;
     local_types_[decl.name] = type_name;
 
@@ -5268,7 +5868,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
     }
 
     if (from_fat_return) {
-      llvm::AllocaInst* alloca = createEntryAlloca(fn, fatClosureTy(), decl.name);
+      llvm::Value* alloca = createLocalStorage(fn, fatClosureTy(), decl.name);
       named_values_[decl.name] = alloca;
       local_types_[decl.name] = payload_ty;
       llvm::Value* init = emitExpr(*decl.init);
@@ -5286,7 +5886,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
       return true;
     }
 
-    llvm::AllocaInst* alloca = createEntryAlloca(fn, ptrTy(), decl.name);
+    llvm::Value* alloca = createLocalStorage(fn, ptrTy(), decl.name);
     named_values_[decl.name] = alloca;
     local_types_[decl.name] = type_name;
     pending_closure_ctx_ = nullptr;
@@ -5328,7 +5928,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
       }
     }
   }
-  llvm::AllocaInst* alloca = createEntryAlloca(fn, lty, decl.name);
+  llvm::Value* alloca = createLocalStorage(fn, lty, decl.name);
   llvm::Value* init = nullptr;
   if (decl.init) {
     // [variant] `n := <Variant expr>` with an inferred primitive/String target.
@@ -6214,6 +6814,35 @@ llvm::Value* Codegen::emitContextualVariantUnbox(const ast::Expr& expr,
 
 bool Codegen::emitReturn(const ast::ReturnStmt& ret) {
   llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+  if (in_coroutine_) {
+    // `async fun` returns `ptr` (the task) at the LLVM level; the business
+    // return type lives in current_fn_return_type_ and is packed into the task.
+    llvm::Value* res = nullptr;
+    if (ret.value) {
+      cancelAutoFreeEscaping(*ret.value);
+      llvm::Type* biz_ty = typeFromName(current_fn_return_type_);
+      llvm::Value* rv = emitExpr(*ret.value);
+      if (!rv) {
+        return false;
+      }
+      if (biz_ty->isPointerTy() && rv->getType()->isPointerTy()) {
+        res = rv;
+      } else if (biz_ty->isStructTy() && rv->getType()->isPointerTy()) {
+        res = builder_.CreateLoad(biz_ty, rv, "ret.struct");
+      } else if (biz_ty->isIntegerTy(1)) {
+        res = toI1(rv);
+      } else if (biz_ty->isIntegerTy(32) && !rv->getType()->isPointerTy()) {
+        res = toI32(rv);
+      } else {
+        res = rv;
+      }
+    }
+    if (!finishCleanups()) {
+      return false;
+    }
+    publishCoroResult(res);
+    return true;
+  }
   llvm::Value* v = nullptr;
   if (ret.value) {
     // [closure-escape]: returning an escaping capturing lambda → fat closure {fn, ctx}.
@@ -6319,6 +6948,148 @@ bool Codegen::emitIf(const ast::IfStmt& stmt) {
   return true;
 }
 
+bool Codegen::emitPatternBindings(const ast::MatchPattern& pat, llvm::Value* slot,
+                                  std::vector<std::pair<std::string, llvm::Value*>>& bound) {
+  llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+  if (pat.kind == ast::MatchPatternKind::ClassDestructure) {
+    const std::string ty = resolveTypeName(pat.class_name);
+    if (!ensureTypeAvailable(ty)) {
+      return false;
+    }
+    const ClassInfo* info = findClass(ty);
+    if (!info) {
+      error(pat.loc, "unknown class type in destructuring pattern: '" + pat.class_name + "'");
+      return false;
+    }
+    if (!slot->getType()->isPointerTy()) {
+      error(pat.loc, "destructuring pattern requires a class value");
+      return false;
+    }
+    for (const ast::PatternField& pf : pat.fields) {
+      if (pf.name.empty() || pf.name == "_") {
+        continue;
+      }
+      // Field access mirrors property sugar: a getter is not a field, and
+      // destructuring must stay a raw GEP + load ([performance-first]).
+      const PropResolve res = resolveProperty(*info, pf.name, PropAccess::Read);
+      if (res.kind == PropResolveKind::Method) {
+        error(pf.loc, "cannot destructure '" + ty + "." + pf.name +
+                          "': it is exposed by a getter, not a field");
+        return false;
+      }
+      if (res.kind != PropResolveKind::Field) {
+        error(pf.loc, "unknown field '" + pf.name + "' in destructuring pattern for '" + ty + "'");
+        return false;
+      }
+      const unsigned idx = info->field_index.at(res.field_name);
+      if (idx >= info->field_types.size()) {
+        error(pf.loc, "internal: field '" + pf.name + "' has no recorded type");
+        return false;
+      }
+      const std::string field_ty = info->field_types[idx];
+      llvm::Value* field_slot = builder_.CreateStructGEP(info->type, slot, idx,
+                                                         "pat.field." + pf.name);
+      if (pf.sub) {
+        // Nested pattern: class fields are inline, so the child pattern walks
+        // the sub-struct in place (GEPs off the same base object).
+        if (!emitPatternBindings(*pf.sub, field_slot, bound)) {
+          return false;
+        }
+        continue;
+      }
+      const std::string bind = pf.binding.empty() ? pf.name : pf.binding;
+      if (bind == "_") {
+        continue;
+      }
+      const bool class_field = isClassType(field_ty) && findClass(field_ty) != nullptr;
+      llvm::AllocaInst* dst = nullptr;
+      if (class_field) {
+        // Class fields are stored inline; locals then hold a pointer to the copy.
+        dst = createEntryAlloca(fn, findClass(field_ty)->type, bind + ".inline");
+        llvm::Value* copy = builder_.CreateLoad(findClass(field_ty)->type, field_slot,
+                                                "pat.copy." + bind);
+        builder_.CreateStore(copy, dst);
+      } else {
+        llvm::Type* val_ty = llvmTypeForTypeName(field_ty);
+        if (!val_ty) {
+          val_ty = i32Ty();
+        }
+        dst = createEntryAlloca(fn, val_ty, bind);
+        builder_.CreateStore(builder_.CreateLoad(val_ty, field_slot, "pat.val." + bind), dst);
+      }
+      bound.emplace_back(bind, dst);
+      named_values_[bind] = dst;
+      local_types_[bind] = field_ty;
+    }
+    return true;
+  }
+
+  // `[a, b]` — binds the first N elements of an Array<T>. The match arm only
+  // runs when length >= N, so indices stay in bounds; the element type comes
+  // from the scrutinee (`Array<T>`), loaded off `data_[i]`.
+  if (pat.kind == ast::MatchPatternKind::ArrayDestructure) {
+    std::string base;
+    std::vector<std::string> args;
+    if (!splitGenericType(scrut_type_name_, base, args) || base != "Array" || args.size() != 1) {
+      error(pat.loc, "array pattern requires an Array scrutinee, got '" + scrut_type_name_ + "'");
+      return false;
+    }
+    const std::string elem_ty = args[0];
+    llvm::Type* elem_llvm = llvmTypeForTypeName(elem_ty);
+    if (!elem_llvm) {
+      elem_llvm = i32Ty();
+    }
+    const ClassInfo* arr_info = findClass(scrut_type_name_);
+    if (!arr_info) {
+      error(pat.loc, "unknown Array type in pattern: '" + scrut_type_name_ + "'");
+      return false;
+    }
+    auto dit = arr_info->field_index.find(physicalFieldName("data"));
+    if (dit == arr_info->field_index.end()) {
+      error(pat.loc, "Array layout missing 'data'");
+      return false;
+    }
+    llvm::Value* data_gep = builder_.CreateStructGEP(arr_info->type, slot, dit->second,
+                                                     "pat.arr.data");
+    llvm::Value* data = builder_.CreateLoad(ptrTy(), data_gep, "pat.arr.base");
+    for (size_t i = 0; i < pat.fields.size(); ++i) {
+      const ast::PatternField& pf = pat.fields[i];
+      const std::string bind = pf.binding.empty() ? ("_" + std::to_string(i)) : pf.binding;
+      if (bind == "_") {
+        continue;
+      }
+      llvm::Value* elem_ptr = builder_.CreateInBoundsGEP(
+          elem_llvm, data, builder_.getInt32(static_cast<uint64_t>(i)), "pat.arr.p");
+      llvm::AllocaInst* dst = createEntryAlloca(fn, elem_llvm, bind);
+      builder_.CreateStore(builder_.CreateLoad(elem_llvm, elem_ptr, "pat.arr.v"), dst);
+      bound.emplace_back(bind, dst);
+      named_values_[bind] = dst;
+      local_types_[bind] = elem_ty;
+    }
+    return true;
+  }
+
+  error(pat.loc, "unsupported destructuring pattern");
+  return false;
+}
+
+void Codegen::restorePatternBindings(
+    const std::vector<std::pair<std::string, llvm::Value*>>& bound,
+    const std::unordered_map<std::string, std::string>& saved_types,
+    const std::unordered_set<std::string>& saved_heap) {
+  for (const auto& kv : bound) {
+    named_values_.erase(kv.first);
+    local_types_.erase(kv.first);
+    heap_locals_.erase(kv.first);
+  }
+  for (const auto& kv : saved_types) {
+    local_types_[kv.first] = kv.second;
+  }
+  for (const auto& n : saved_heap) {
+    heap_locals_.insert(n);
+  }
+}
+
 bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
   // Desugar to if / else-if / else via icmp + br (evaluate scrutinee once).
   if (!stmt.scrutinee) {
@@ -6369,9 +7140,225 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
       continue;
     }
 
-    if (!br.pattern) {
+    // Destructuring arm: a class pattern is a runtime type test (TypeID), then
+    // the body runs with each named field bound to a fresh local.
+    if (br.pattern_kind == ast::MatchPatternKind::ClassDestructure ||
+        br.pattern_kind == ast::MatchPatternKind::ArrayDestructure) {
+      if (!br.destruct) {
+        error(br.loc, "match arm missing destructuring pattern");
+        return false;
+      }
+      scrut_type_name_ = scrut_ty;
+      llvm::BasicBlock* then_bb =
+          llvm::BasicBlock::Create(globalContext(), "match.destr", fn);
+      llvm::BasicBlock* else_bb =
+          llvm::BasicBlock::Create(globalContext(), "match.else", fn);
+      if (br.pattern_kind == ast::MatchPatternKind::ArrayDestructure) {
+        // `[a, b]` only matches when the array is long enough; longer arrays
+        // still match (prefix pattern).
+        std::string abase;
+        std::vector<std::string> aargs;
+        if (!splitGenericType(scrut_ty, abase, aargs) || abase != "Array") {
+          error(br.loc, "array pattern requires an Array scrutinee, got '" + scrut_ty + "'");
+          return false;
+        }
+        ensureTypeAvailable(scrut_ty);
+        const ClassInfo* arr_info = findClass(scrut_ty);
+        if (!arr_info) {
+          error(br.loc, "unknown Array type in match: " + scrut_ty);
+          return false;
+        }
+        auto lit = arr_info->field_index.find(physicalFieldName("length"));
+        if (lit == arr_info->field_index.end()) {
+          error(br.loc, "Array layout missing 'length'");
+          return false;
+        }
+        llvm::Value* arr = builder_.CreateLoad(ptrTy(), slot, "match.arr.obj");
+        llvm::Value* len_gep = builder_.CreateStructGEP(arr_info->type, arr, lit->second,
+                                                        "match.arr.len.f");
+        llvm::Value* len = builder_.CreateLoad(i32Ty(), len_gep, "match.arr.len");
+        llvm::Value* need =
+            llvm::ConstantInt::get(i32Ty(), static_cast<uint64_t>(br.destruct->fields.size()));
+        llvm::Value* ok = builder_.CreateICmpSGE(len, need, "match.arr.ok");
+        builder_.CreateCondBr(ok, then_bb, else_bb);
+        builder_.SetInsertPoint(then_bb);
+        std::vector<std::pair<std::string, llvm::Value*>> bound;
+        std::unordered_map<std::string, std::string> saved_types;
+        std::unordered_set<std::string> saved_heap;
+        for (const ast::PatternField& pf : br.destruct->fields) {
+          if (pf.binding.empty() || pf.binding == "_") {
+            continue;
+          }
+          auto it = named_values_.find(pf.binding);
+          if (it != named_values_.end()) {
+            bound.emplace_back(pf.binding, it->second);
+          }
+          auto ti = local_types_.find(pf.binding);
+          if (ti != local_types_.end()) {
+            saved_types[pf.binding] = ti->second;
+          }
+          if (heap_locals_.count(pf.binding) != 0) {
+            saved_heap.insert(pf.binding);
+          }
+        }
+        if (!emitPatternBindings(*br.destruct, arr, bound)) {
+          return false;
+        }
+        if (!emitStmtListScoped(br.body)) {
+          return false;
+        }
+        restorePatternBindings(bound, saved_types, saved_heap);
+        branchTo(merge_bb);
+        builder_.SetInsertPoint(else_bb);
+        continue;
+      }
+      const std::string want = resolveTypeName(br.destruct->class_name);
+      if (!ensureTypeAvailable(want) || !isClassType(want)) {
+        error(br.loc, "destructuring pattern requires a class type, got '" +
+                          br.destruct->class_name + "'");
+        return false;
+      }
+      if (resolveTypeName(scrut_ty) != want) {
+        error(br.loc, "match arm pattern '" + br.destruct->class_name +
+                          "' cannot match scrutinee of type '" + scrut_ty + "'");
+        return false;
+      }
+      builder_.CreateBr(then_bb);
+
+      builder_.SetInsertPoint(then_bb);
+      // Save bindings that the arm shadows so they come back after the body.
+      std::vector<std::pair<std::string, llvm::Value*>> bound;
+      std::unordered_map<std::string, std::string> saved_types;
+      std::unordered_set<std::string> saved_heap;
+      for (const ast::PatternField& pf : br.destruct->fields) {
+        const std::string n = pf.binding.empty() ? pf.name : pf.binding;
+        if (n.empty() || n == "_") {
+          continue;
+        }
+        auto it = named_values_.find(n);
+        if (it != named_values_.end()) {
+          bound.emplace_back(n, it->second);
+        }
+        auto ti = local_types_.find(n);
+        if (ti != local_types_.end()) {
+          saved_types[n] = ti->second;
+        }
+        if (heap_locals_.count(n) != 0) {
+          saved_heap.insert(n);
+        }
+      }
+      // `slot` holds the object pointer for class scrutinees; patterns GEP the object.
+      llvm::Value* obj_ptr = builder_.CreateLoad(ptrTy(), slot, "match.obj");
+      if (!emitPatternBindings(*br.destruct, obj_ptr, bound)) {
+        return false;
+      }
+      if (!emitStmtListScoped(br.body)) {
+        return false;
+      }
+      restorePatternBindings(bound, saved_types, saved_heap);
+      branchTo(merge_bb);
+      // A class pattern is not exhaustive on its own: following arms stay reachable.
+      builder_.SetInsertPoint(else_bb);
+      continue;
+    }
+
+    if (!br.pattern && br.pattern_kind != ast::MatchPatternKind::Some &&
+        br.pattern_kind != ast::MatchPatternKind::None) {
       error(br.loc, "match arm missing pattern");
       return false;
+    }
+
+    // `none => { ... }` terminates the chain: no Optional value can reach here.
+    if (br.pattern_kind == ast::MatchPatternKind::None) {
+      if (scrut_ty.rfind("Optional<", 0) != 0) {
+        error(br.loc, "'none' pattern requires an Optional scrutinee, got '" + scrut_ty + "'");
+        return false;
+      }
+      saw_wildcard = true;
+      if (!emitStmtListScoped(br.body)) {
+        return false;
+      }
+      branchTo(merge_bb);
+      continue;
+    }
+
+    // `some(x) => { ... }` in statement form: test has_value, bind the payload.
+    if (br.pattern_kind == ast::MatchPatternKind::Some) {
+      if (scrut_ty.rfind("Optional<", 0) != 0) {
+        error(br.loc, "'some(...)' pattern requires an Optional scrutinee, got '" + scrut_ty + "'");
+        return false;
+      }
+      ensureTypeAvailable(scrut_ty);
+      const ClassInfo* opt_info = findClass(scrut_ty);
+      if (!opt_info || !opt_info->type) {
+        error(br.loc, "unknown Optional type in match: " + scrut_ty);
+        return false;
+      }
+      auto hv = opt_info->field_index.find(physicalFieldName("has_value"));
+      auto vi = opt_info->field_index.find(physicalFieldName("value"));
+      if (hv == opt_info->field_index.end() || vi == opt_info->field_index.end()) {
+        error(br.loc, "Optional layout missing 'has_value'/'value'");
+        return false;
+      }
+      llvm::BasicBlock* some_bb =
+          llvm::BasicBlock::Create(globalContext(), "match.some", fn);
+      llvm::BasicBlock* skip_bb =
+          llvm::BasicBlock::Create(globalContext(), "match.else", fn);
+      // Optional is a plain class, so `slot` holds its object pointer; load the
+      // has_value field through a GEP when so.
+      llvm::Value* base = slot;
+      if (opt_info->type && slot->getType() != ptrTy()) {
+        base = slot;
+      } else {
+        base = builder_.CreateLoad(ptrTy(), slot, "match.opt.obj");
+      }
+      llvm::Value* hv_gep = builder_.CreateStructGEP(
+          opt_info->type, base, static_cast<unsigned>(hv->second), "match.has.f");
+      llvm::Value* has = builder_.CreateLoad(i1Ty(), hv_gep, "match.has");
+      builder_.CreateCondBr(has, some_bb, skip_bb);
+      builder_.SetInsertPoint(some_bb);
+      if (br.binding.empty() || br.binding == "_") {
+        if (!emitStmtListScoped(br.body)) {
+          return false;
+        }
+        branchTo(merge_bb);
+        builder_.SetInsertPoint(skip_bb);
+        continue;
+      }
+      llvm::Value* payload_gep = builder_.CreateStructGEP(
+          opt_info->type, base, static_cast<unsigned>(vi->second), "match.payload.f");
+      const std::string inner = scrut_ty.substr(9, scrut_ty.size() - 10);
+      llvm::Type* payload_ty = llvmTypeForTypeName(inner);
+      if (!payload_ty) {
+        payload_ty = llvm::cast<llvm::StructType>(opt_info->type)->getElementType(
+            static_cast<unsigned>(vi->second));
+      }
+      llvm::AllocaInst* binding_slot = createEntryAlloca(fn, payload_ty, br.binding);
+      builder_.CreateStore(builder_.CreateLoad(payload_ty, payload_gep, "match.payload"),
+                           binding_slot);
+      const bool prev = named_values_.count(br.binding) != 0;
+      llvm::Value* prev_slot = prev ? named_values_[br.binding] : nullptr;
+      const bool had_type = local_types_.count(br.binding) != 0;
+      std::string prev_type = had_type ? local_types_[br.binding] : std::string();
+      named_values_[br.binding] = binding_slot;
+      local_types_[br.binding] = inner;
+      const bool body_ok = emitStmtListScoped(br.body);
+      if (prev) {
+        named_values_[br.binding] = prev_slot;
+      } else {
+        named_values_.erase(br.binding);
+      }
+      if (had_type) {
+        local_types_[br.binding] = prev_type;
+      } else {
+        local_types_.erase(br.binding);
+      }
+      if (!body_ok) {
+        return false;
+      }
+      branchTo(merge_bb);
+      builder_.SetInsertPoint(skip_bb);
+      continue;
     }
 
     llvm::BasicBlock* then_bb =
@@ -6381,7 +7368,6 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
 
     llvm::Value* loaded = builder_.CreateLoad(slot_ty, slot, "match.v");
     llvm::Value* cond = nullptr;
-
     if (br.pattern->kind() == ast::ExprKind::IntLiteral) {
       llvm::Value* pat = toI32(emitExpr(*br.pattern));
       if (!pat) {
@@ -6558,7 +7544,6 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
     llvm::BasicBlock* else_bb =
         llvm::BasicBlock::Create(globalContext(), "matchx.next", fn);
     llvm::Value* cond = nullptr;
-
     if (br.pattern_kind == ast::MatchPatternKind::Some) {
       if (!is_opt) {
         error(br.loc, "'some(...)' pattern requires an Optional scrutinee, got '" + scrut_ty +
@@ -6604,7 +7589,7 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
       builder_.CreateStore(builder_.CreateLoad(payload_ty, payload_gep, br.binding + ".val"),
                            binding_slot);
       const bool prev = named_values_.count(br.binding) != 0;
-      llvm::AllocaInst* prev_slot = prev ? named_values_[br.binding] : nullptr;
+      llvm::Value* prev_slot = prev ? named_values_[br.binding] : nullptr;
       const bool had_type = local_types_.count(br.binding) != 0;
       std::string prev_type = had_type ? local_types_[br.binding] : std::string();
       named_values_[br.binding] = binding_slot;
@@ -6630,10 +7615,142 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
       continue;
     }
 
-    if (!br.pattern) {
+    if (!br.pattern && br.pattern_kind != ast::MatchPatternKind::ClassDestructure &&
+        br.pattern_kind != ast::MatchPatternKind::ArrayDestructure) {
       error(br.loc, "match arm missing pattern");
       return nullptr;
     }
+
+    // Destructuring arm in expression form: `User { name } => name`.
+    if (br.pattern_kind == ast::MatchPatternKind::ClassDestructure ||
+        br.pattern_kind == ast::MatchPatternKind::ArrayDestructure) {
+      if (!br.destruct) {
+        error(br.loc, "match arm missing destructuring pattern");
+        return nullptr;
+      }
+      scrut_type_name_ = scrut_ty;
+      if (br.pattern_kind == ast::MatchPatternKind::ArrayDestructure) {
+        // `[a, b] => expr` — prefix match on an Array<T> (length >= N).
+        std::string abase;
+        std::vector<std::string> aargs;
+        if (!splitGenericType(scrut_ty, abase, aargs) || abase != "Array") {
+          error(br.loc, "array pattern requires an Array scrutinee, got '" + scrut_ty + "'");
+          return nullptr;
+        }
+        ensureTypeAvailable(scrut_ty);
+        const ClassInfo* arr_info = findClass(scrut_ty);
+        if (!arr_info) {
+          error(br.loc, "unknown Array type in match: " + scrut_ty);
+          return nullptr;
+        }
+        auto lit = arr_info->field_index.find(physicalFieldName("length"));
+        if (lit == arr_info->field_index.end()) {
+          error(br.loc, "Array layout missing 'length'");
+          return nullptr;
+        }
+        llvm::Value* arr = builder_.CreateLoad(ptrTy(), slot, "matchx.arr.obj");
+        llvm::Value* len_gep = builder_.CreateStructGEP(arr_info->type, arr, lit->second,
+                                                        "matchx.arr.len.f");
+        llvm::Value* len = builder_.CreateLoad(i32Ty(), len_gep, "matchx.arr.len");
+        llvm::Value* need =
+            llvm::ConstantInt::get(i32Ty(), static_cast<uint64_t>(br.destruct->fields.size()));
+        llvm::Value* ok = builder_.CreateICmpSGE(len, need, "matchx.arr.ok");
+        builder_.CreateCondBr(ok, then_bb, else_bb);
+        builder_.SetInsertPoint(then_bb);
+        std::vector<std::pair<std::string, llvm::Value*>> bound;
+        std::unordered_map<std::string, std::string> saved_types;
+        std::unordered_set<std::string> saved_heap;
+        for (const ast::PatternField& pf : br.destruct->fields) {
+          if (pf.binding.empty() || pf.binding == "_") {
+            continue;
+          }
+          auto it = named_values_.find(pf.binding);
+          if (it != named_values_.end()) {
+            bound.emplace_back(pf.binding, it->second);
+          }
+          auto ti = local_types_.find(pf.binding);
+          if (ti != local_types_.end()) {
+            saved_types[pf.binding] = ti->second;
+          }
+          if (heap_locals_.count(pf.binding) != 0) {
+            saved_heap.insert(pf.binding);
+          }
+        }
+        if (!emitPatternBindings(*br.destruct, arr, bound)) {
+          return nullptr;
+        }
+        if (!br.value) {
+          error(br.loc, "match arm must yield an expression");
+          return nullptr;
+        }
+        llvm::Value* v = emitExpr(*br.value);
+        if (!v) {
+          return nullptr;
+        }
+        if (!arm_matched(v, br.value.get())) {
+          return nullptr;
+        }
+        restorePatternBindings(bound, saved_types, saved_heap);
+        builder_.SetInsertPoint(else_bb);
+        continue;
+      }
+      const std::string want = resolveTypeName(br.destruct->class_name);
+      if (!ensureTypeAvailable(want) || !isClassType(want)) {
+        error(br.loc, "destructuring pattern requires a class type, got '" +
+                          br.destruct->class_name + "'");
+        return nullptr;
+      }
+      if (resolveTypeName(scrut_ty) != want) {
+        error(br.loc, "match arm pattern '" + br.destruct->class_name +
+                          "' cannot match scrutinee of type '" + scrut_ty + "'");
+        return nullptr;
+      }
+      // Class pattern: not a runtime test on a typed scrutinee, so jump straight
+      // into the arm block (`then_bb`, which binds fields) and keep `else_bb`
+      // as the fall-through of the remaining arms.
+      builder_.CreateBr(then_bb);
+      builder_.SetInsertPoint(then_bb);
+
+      std::vector<std::pair<std::string, llvm::Value*>> bound;
+      std::unordered_map<std::string, std::string> saved_types;
+      std::unordered_set<std::string> saved_heap;
+      for (const ast::PatternField& pf : br.destruct->fields) {
+        const std::string n = pf.binding.empty() ? pf.name : pf.binding;
+        if (n.empty() || n == "_") {
+          continue;
+        }
+        auto it = named_values_.find(n);
+        if (it != named_values_.end()) {
+          bound.emplace_back(n, it->second);
+        }
+        auto ti = local_types_.find(n);
+        if (ti != local_types_.end()) {
+          saved_types[n] = ti->second;
+        }
+        if (heap_locals_.count(n) != 0) {
+          saved_heap.insert(n);
+        }
+      }
+      llvm::Value* obj_ptr = builder_.CreateLoad(ptrTy(), slot, "matchx.obj");
+      if (!emitPatternBindings(*br.destruct, obj_ptr, bound)) {
+        return nullptr;
+      }
+      if (!br.value) {
+        error(br.loc, "match arm must yield an expression");
+        return nullptr;
+      }
+      llvm::Value* v = emitExpr(*br.value);
+      if (!v) {
+        return nullptr;
+      }
+      if (!arm_matched(v, br.value.get())) {
+        return nullptr;
+      }
+      restorePatternBindings(bound, saved_types, saved_heap);
+      builder_.SetInsertPoint(else_bb);
+      continue;
+    }
+
     llvm::Value* loaded = builder_.CreateLoad(slot_ty, slot, "match.v");
     if (br.pattern->kind() == ast::ExprKind::IntLiteral) {
       llvm::Value* pat = toI32(emitExpr(*br.pattern));
@@ -9008,7 +10125,7 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
       llvm::Function::Create(fty, llvm::Function::InternalLinkage, fname, module_.get());
 
   // Snapshot outer locals needed to fill the context after the body is emitted.
-  std::unordered_map<std::string, llvm::AllocaInst*> outer_slots;
+  std::unordered_map<std::string, llvm::Value*> outer_slots;
   std::unordered_map<std::string, std::string> outer_cap_types;
   for (const std::string& name : caps) {
     outer_slots[name] = named_values_.at(name);
@@ -9023,7 +10140,7 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
     if (expr.escapes) {
       // Heap-promoted captures live by value inside the ctx block.
       for (const std::string& name : caps) {
-        fields.push_back(outer_slots[name]->getAllocatedType());
+        fields.push_back(localSlotType(outer_slots[name]));
       }
     } else {
       fields.assign(caps.size(), ptrTy());
@@ -9154,9 +10271,9 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
           llvm::ConstantInt::get(i64Ty(), static_cast<uint64_t>(ctx_bytes), /*isSigned=*/false);
       llvm::Value* ctx_heap = builder_.CreateCall(alloc_fn, {ctx_sz}, "lambda.ctx.heap");
       for (unsigned i = 0; i < caps.size(); ++i) {
-        llvm::AllocaInst* slot = outer_slots[caps[i]];
+        llvm::Value* slot = outer_slots[caps[i]];
         llvm::Value* val =
-            builder_.CreateLoad(slot->getAllocatedType(), slot, caps[i] + ".esc.ld");
+            builder_.CreateLoad(localSlotType(slot), slot, caps[i] + ".esc.ld");
         llvm::Value* gep =
             builder_.CreateStructGEP(ctx_ty, ctx_heap, i, caps[i] + ".slot");
         builder_.CreateStore(val, gep);
@@ -9292,8 +10409,8 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
 
       auto it = named_values_.find(id.name);
       if (it != named_values_.end()) {
-        llvm::AllocaInst* alloca = it->second;
-        llvm::Type* ty = alloca->getAllocatedType();
+        llvm::Value* alloca = it->second;
+        llvm::Type* ty = localSlotType(alloca);
         auto lit = local_types_.find(id.name);
         if (lit != local_types_.end() && isClassType(lit->second)) {
           return classObjectPtr(id.name);
@@ -9407,6 +10524,8 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
     }
     case ast::ExprKind::AddrOf:
       return emitAddrOf(static_cast<const ast::AddrOfExpr&>(expr));
+    case ast::ExprKind::Await:
+      return emitAwaitExpr(static_cast<const ast::AwaitExpr&>(expr));
     case ast::ExprKind::MethodCall:
       return emitMethodCall(static_cast<const ast::MethodCallExpr&>(expr));
     case ast::ExprKind::ScopedCall:

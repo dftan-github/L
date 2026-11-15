@@ -36,6 +36,7 @@ enum class ExprKind {
   AddrOf,  // &expr → ptr (address of lvalue)
   Match,   // match expr { some(v) => ..., none => ... } — value-producing
   ScopedCall,  // mod::fn(args) — module-qualified call
+  Await,   // await expr — suspend the coroutine until the awaited value is ready
 };
 
 enum class StmtKind {
@@ -274,6 +275,14 @@ struct AddrOfExpr : Expr {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
+// `await expr` — suspend the enclosing `async fun` until the awaited task
+// completes, yielding the task's result value.
+struct AwaitExpr : Expr {
+  ExprPtr task;  // expression producing a task handle (`ptr`)
+  ExprKind kind() const override { return ExprKind::Await; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
 enum class VarDeclKind { Const, Constd, ExplicitType, Infer };
 
 struct VarDeclStmt : Stmt {
@@ -343,6 +352,8 @@ struct FuncDeclStmt : Stmt {
   bool is_extern = false;  // C ABI: ExternalLinkage, unmangled name
   // Compiler-injected methods (e.g. auto `clone`) — body emitted by codegen, not AST.
   bool is_compiler_generated = false;
+  // `async fun` — lowered to a coroutine (LLVM coro intrinsics + CoroSplit).
+  bool is_async = false;
   // True when a capturing lambda is returned — LLVM ret is fat closure {fn,ctx} ([closure-escape]).
   bool returns_fat_closure = false;
   std::string module_name;  // file stem; used for private mangling
@@ -380,6 +391,30 @@ enum class MatchPatternKind {
   Wildcard,  // _
   Some,      // some(val) — Optional present
   None,      // none      — Optional absent
+  ClassDestructure,  // User { name, age }
+  ArrayDestructure,  // [a, b]
+};
+
+// One binding inside a destructuring pattern: `name` or `name: SubPattern`.
+// A bare `field` shorthand leaves `sub` null (binds the field to a local of
+// the same name). Nested patterns keep the tree: `User { addr: Addr { city } }`.
+struct MatchPattern;
+using MatchPatternPtr = std::unique_ptr<MatchPattern>;
+
+struct PatternField {
+  std::string name;        // field name (Class) or index placeholder (Array)
+  std::string binding;     // local name to bind when `sub` is null; "_" skips
+  MatchPatternPtr sub;     // nested destructuring pattern, may be null
+  SourceLocation loc;
+};
+
+// `User { name, addr: Addr { city } }` / `[a, b]`.
+struct MatchPattern {
+  MatchPatternKind kind = MatchPatternKind::Wildcard;
+  std::string class_name;            // ClassDestructure: expected class
+  std::vector<PatternField> fields;  // ClassDestructure / ArrayDestructure
+  SourceLocation loc;
+  void dump(std::ostream& out, int indent = 0) const;
 };
 
 // One arm of `match`, in either statement or expression form:
@@ -390,6 +425,7 @@ struct MatchBranch {
   bool is_wildcard = false;  // legacy alias for pattern_kind == Wildcard
   ExprPtr pattern;  // Int / String / Bool literal when Literal
   std::string binding;  // `some(val)` binds the payload to this name
+  MatchPatternPtr destruct;  // ClassDestructure / ArrayDestructure root
   std::vector<StmtPtr> body;  // statement form
   SourceLocation loc;
   ExprPtr value;  // expression form: arm yields this

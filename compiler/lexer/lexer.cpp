@@ -417,6 +417,12 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "delegate") {
     return ast::TokenType::KwDelegate;
   }
+  if (text == "async") {
+    return ast::TokenType::KwAsync;
+  }
+  if (text == "await") {
+    return ast::TokenType::KwAwait;
+  }
   if (text == "i32") {
     return ast::TokenType::TyI32;
   }
