@@ -128,6 +128,38 @@ private:
   bool rejectReadonlyMutation(const ast::Expr& target, const ast::SourceLocation& loc);
   // Best-effort expression type for operator lowering / := inference.
   std::string exprTypeOf(const ast::Expr& expr) const;
+  // Type of a destructuring `match` arm binding (array element or field type).
+  std::string matchDestructureArmType(const ast::MatchBranch& br,
+                                      const ast::MatchExpr& m) const;
+  // Return type of `ClassName.method(...)`, static methods before assoc funcs.
+  std::string staticMethodReturnType(const std::string& class_name,
+                                     const std::string& method) const;
+  // Declared type name of the first parameter of `name` in `cls`.
+  std::string firstParamTypeName(const ast::ClassDeclStmt& cls,
+                                 const std::string& name) const;
+  // Address of a field of the current class via `this` (nullptr if absent).
+  llvm::Value* fieldAddressOnThis(const std::string& field,
+                                  const ast::SourceLocation& loc);
+  // Address of one field slot on `receiver` (follows a pointer-typed field once).
+  llvm::Value* fieldSlotAddress(const ClassInfo& owner, llvm::Value* receiver,
+                                size_t field_idx, const std::string& name,
+                                llvm::Type* field_ty);
+  // Loads a field of the current class through `this`.
+  llvm::Value* loadFieldOnThis(const std::string& field_name);
+  // AST declaration of `name` inside `info`, if present.
+  const ast::FuncDeclStmt* findMethodAst(const ClassInfo& info,
+                                         const std::string& name) const;
+  // Converts each call argument to its parameter type, appending to `out`.
+  bool emitMethodArgs(const ast::MethodCallExpr& call,
+                      const ast::FuncDeclStmt* method_ast, const ClassInfo& callee_info,
+                      llvm::Function* target, unsigned first_param_consumed,
+                      std::vector<llvm::Value*>& out);
+  // Emits the call; returns the value (0 for void) or nullptr on error.
+  llvm::Value* finishMethodCall(llvm::Function* target, std::vector<llvm::Value*>& args,
+                                const std::string& what);
+  // `this.field.method(...)` where the receiver is an enclosing-class field.
+  llvm::Value* emitMethodCallOnField(const ast::MethodCallExpr& call,
+                                     const std::string& field_name);
   // Static return type of `recv_ty.method` (instance + single delegate promotion).
   std::string methodReturnTypeOn(const std::string& recv_ty,
                                  const std::string& method) const;
@@ -265,6 +297,9 @@ private:
   // `mod::fn(...)` — resolves through module_exports_ (pub-only) then issues the
   // same ABI call the unprefixed form would.
   llvm::Value* emitScopedCall(const ast::ScopedCallExpr& call);
+  // String operand → its raw C string pointer (spills value-typed operands).
+  llvm::Value* stringOperandToCStr(llvm::Value* v, const std::string& ty,
+                                   const ast::Expr& e);
   // Reorder positional+keyword CallArgs to match FuncDecl param order.
   bool resolveCallArgs(const ast::FuncDeclStmt& fn, const std::vector<ast::CallArg>& raw,
                        std::vector<const ast::Expr*>& ordered);

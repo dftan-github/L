@@ -280,45 +280,17 @@ void Analyzer::fillLambdaCaptures(ast::LambdaExpr& lambda) {
 
 void Analyzer::checkExpr(ast::Expr& expr) {
   switch (expr.kind()) {
-    case ast::ExprKind::Identifier: {
-      const auto& id = static_cast<const ast::IdentifierExpr&>(expr);
-      // Built-in context macros: always String, never look up as locals.
-      if (id.name == "__FILE__" || id.name == "__FUNC__" || id.name == "__LINE__") {
-        break;
-      }
-      if (current_fields_.count(id.name) != 0) {
-        break;  // bare field reference inside a method
-      }
-      std::string ty;
-      if (!lookupLocal(id.name, ty)) {
-        // Bare free-function name (e.g. pass `my_callback` to extern C).
-        if (free_funcs_.count(id.name) != 0 || classes_.count(id.name) != 0) {
-          break;
-        }
-        error(expr.loc, "undeclared identifier '" + id.name + "'");
-      } else if (ty == kErrorType) {
-        // Already poisoned — skip cascading diagnostics.
-      }
+    case ast::ExprKind::Identifier:
+      checkIdentifierRef(static_cast<const ast::IdentifierExpr&>(expr));
       break;
-    }
     case ast::ExprKind::ScopedCall: {
-      // `mod::fn(...)` — the callee must exist in `mod` AND be declared `pub`.
       auto& sc = static_cast<ast::ScopedCallExpr&>(expr);
       for (ast::CallArg& a : sc.args) {
         if (a.value) {
           checkExpr(*a.value);
         }
       }
-      auto mit = module_exports_.find(sc.module);
-      if (mit == module_exports_.end()) {
-        error(sc.loc, "unknown module '" + sc.module + "' in '" + sc.module + "::" +
-                          sc.callee + "'");
-        break;
-      }
-      if (mit->second.find(sc.callee) == mit->second.end()) {
-        error(sc.loc, "'" + sc.callee + "' is not a pub function of module '" +
-                          sc.module + "'");
-      }
+      checkScopedCallTarget(sc);
       break;
     }
     case ast::ExprKind::Coalesce: {
@@ -339,54 +311,8 @@ void Analyzer::checkExpr(ast::Expr& expr) {
       auto& bin = static_cast<ast::BinaryExpr&>(expr);
       if (bin.left) checkExpr(*bin.left);
       if (bin.right) checkExpr(*bin.right);
-      // Numeric ops: require both sides numeric (or leave to string-concat path).
-      if (bin.op == "+" || bin.op == "-" || bin.op == "*" || bin.op == "/") {
-        auto side_ty = [this](const ast::Expr& e) -> std::string {
-          if (e.kind() == ast::ExprKind::IntLiteral) {
-            return "i32";
-          }
-          if (e.kind() == ast::ExprKind::FloatLiteral) {
-            return "f64";
-          }
-          if (e.kind() == ast::ExprKind::StringLiteral) {
-            return "String";
-          }
-          if (e.kind() == ast::ExprKind::Identifier) {
-            const auto& id = static_cast<const ast::IdentifierExpr&>(e);
-            if (id.name == "__FILE__" || id.name == "__FUNC__") {
-              return "String";
-            }
-            if (id.name == "__LINE__") {
-              return "i32";
-            }
-            std::string ty;
-            if (lookupLocal(id.name, ty)) {
-              return ty;
-            }
-          }
-          if (e.kind() == ast::ExprKind::Binary) {
-            return "num";  // nested; refined in codegen
-          }
-          return {};
-        };
-        const std::string lt = side_ty(*bin.left);
-        const std::string rt = side_ty(*bin.right);
-        auto is_num = [](const std::string& t) {
-          return t == "i32" || t == "i64" || t == "f64" || t == "num";
-        };
-        auto is_str = [](const std::string& t) { return t == "String" || t == "ptr"; };
-        if (bin.op == "+" && (is_str(lt) || is_str(rt))) {
-          break;  // string concat / interpolation
-        }
-        if (!lt.empty() && !rt.empty() && !is_num(lt) && !is_str(lt)) {
-          error(expr.loc, "incompatible operand type '" + lt + "' for '" + bin.op + "'");
-        } else if (!lt.empty() && !rt.empty() && !is_num(rt) && !is_str(rt)) {
-          error(expr.loc, "incompatible operand type '" + rt + "' for '" + bin.op + "'");
-        } else if (!lt.empty() && !rt.empty() && is_num(lt) != is_num(rt) &&
-                   !(is_str(lt) || is_str(rt))) {
-          error(expr.loc, "incompatible types for '" + bin.op + "': '" + lt + "' and '" + rt +
-                              "'");
-        }
+      if (bin.left && bin.right) {
+        checkArithmeticOperands(*bin.left, *bin.right, bin.op, expr.loc);
       }
       break;
     }
@@ -423,18 +349,10 @@ void Analyzer::checkExpr(ast::Expr& expr) {
     case ast::ExprKind::MethodCall: {
       auto& call = static_cast<ast::MethodCallExpr&>(expr);
       // Receiver may be a local *or* a class name for associated calls (`Variant.from_i32`).
-      if (call.object) {
-        if (call.object->kind() == ast::ExprKind::Identifier) {
-          const auto& id = static_cast<const ast::IdentifierExpr&>(*call.object);
-          std::string ty;
-          if (!lookupLocal(id.name, ty) && classes_.count(id.name) == 0 &&
-              current_fields_.count(id.name) == 0 &&
-              imported_modules_.count(id.name) == 0) {
-            error(call.object->loc, "undeclared identifier '" + id.name + "'");
-          }
-        } else {
-          checkExpr(*call.object);
-        }
+      if (call.object && call.object->kind() == ast::ExprKind::Identifier) {
+        checkMethodCallReceiver(static_cast<const ast::IdentifierExpr&>(*call.object));
+      } else if (call.object) {
+        checkExpr(*call.object);
       }
       for (auto& arg : call.args) {
         if (arg.value) checkExpr(*arg.value);
@@ -492,25 +410,14 @@ void Analyzer::checkExpr(ast::Expr& expr) {
       }
       // Same mutability / race rules as assignment to the target.
       if (inc.target->kind() == ast::ExprKind::Identifier) {
-        const auto& id = static_cast<const ast::IdentifierExpr&>(*inc.target);
-        if (current_fields_.count(id.name) == 0) {
-          std::string ty;
-          if (!lookupLocal(id.name, ty)) {
-            error(inc.loc, "undeclared identifier '" + id.name + "'");
-          } else if (readonly_names_.count(id.name) != 0) {
-            error(inc.loc, "cannot modify constant '" + id.name + "'");
-          } else if (ty != kErrorType && in_spawn_ && mutable_vars_.count(id.name) != 0 &&
-                     !in_sync_) {
-            error(inc.loc, "Data race detected. Mutable variable '" + id.name +
-                               "!' accessed outside a 'sync' block inside 'spawn'.");
-          }
-        }
-      } else {
-        const bool prev_write = property_write_;
-        property_write_ = inc.target->kind() == ast::ExprKind::MemberAccess;
-        checkExpr(*inc.target);
-        property_write_ = prev_write;
+        checkMutableTarget(static_cast<const ast::IdentifierExpr&>(*inc.target), inc.loc,
+                           "increment");
+        break;
       }
+      const bool prev_write = property_write_;
+      property_write_ = inc.target->kind() == ast::ExprKind::MemberAccess;
+      checkExpr(*inc.target);
+      property_write_ = prev_write;
       break;
     }
     case ast::ExprKind::Try: {
@@ -561,6 +468,346 @@ void Analyzer::checkStmtList(std::vector<ast::StmtPtr>& stmts) {
   }
 }
 
+// A bare identifier in expression position: declared local, class, free
+// function, field, or a compile-time macro. Anything else is an error.
+void Analyzer::checkIdentifierRef(const ast::IdentifierExpr& id) {
+  if (id.name == "__FILE__" || id.name == "__FUNC__" || id.name == "__LINE__") {
+    return;
+  }
+  if (current_fields_.count(id.name) != 0) {
+    return;  // bare field reference inside a method
+  }
+  std::string ty;
+  if (lookupLocal(id.name, ty)) {
+    return;  // declared (kErrorType is already poisoned, so no cascade)
+  }
+  // Bare free-function name (e.g. pass `my_callback` to extern C).
+  if (free_funcs_.count(id.name) != 0 || classes_.count(id.name) != 0) {
+    return;
+  }
+  error(id.loc, "undeclared identifier '" + id.name + "'");
+}
+
+// `x.m()` where `x` is a bare identifier: it may be a local, a class name
+// (static / associated call), a field, or an imported module.
+void Analyzer::checkMethodCallReceiver(const ast::IdentifierExpr& id) {
+  std::string ty;
+  if (lookupLocal(id.name, ty)) {
+    return;
+  }
+  if (classes_.count(id.name) != 0) {
+    return;
+  }
+  if (current_fields_.count(id.name) != 0) {
+    return;
+  }
+  if (imported_modules_.count(id.name) != 0) {
+    return;
+  }
+  error(id.loc, "undeclared identifier '" + id.name + "'");
+}
+
+// `mod::fn(...)` — the callee must exist in `mod` AND be declared `pub`.
+void Analyzer::checkScopedCallTarget(const ast::ScopedCallExpr& sc) {
+  auto mit = module_exports_.find(sc.module);
+  if (mit == module_exports_.end()) {
+    error(sc.loc,
+          "unknown module '" + sc.module + "' in '" + sc.module + "::" + sc.callee + "'");
+    return;
+  }
+  if (mit->second.find(sc.callee) == mit->second.end()) {
+    error(sc.loc, "'" + sc.callee + "' is not a pub function of module '" + sc.module + "'");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Flattening helpers
+// ---------------------------------------------------------------------------
+
+// Type-checks one function body with its own scope, generics and async flag.
+// Frontend-only LCMD callbacks are skipped: they run compile-time builtins
+// (`uid_counter()`) that are illegal at runtime.
+void Analyzer::checkFuncBody(ast::FuncDeclStmt& fn) {
+  if (fn.name == "__compile_time_handler" || fn.name == "__on_class_parsed") {
+    return;
+  }
+
+  auto saved_mut = mutable_vars_;
+  auto saved_constraints = active_generic_constraints_;
+  ast::FuncDeclStmt* saved_fn = current_fn_;
+  const bool saved_async = in_async_fn_;
+  current_fn_ = &fn;
+  in_async_fn_ = fn.is_async;
+
+  for (const ast::GenericParam& gp : fn.generics) {
+    active_generic_constraints_[gp.name] = gp.constraint;
+  }
+  pushScope();
+  for (const ast::Param& p : fn.params) {
+    declareLocal(p.name, p.type_name.empty() ? "i32" : p.type_name, p.loc);
+    if (p.is_mutable) {
+      mutable_vars_.insert(p.name);
+    }
+  }
+  checkStmtList(fn.body);
+  popScope();
+
+  mutable_vars_ = std::move(saved_mut);
+  active_generic_constraints_ = std::move(saved_constraints);
+  current_fn_ = saved_fn;
+  in_async_fn_ = saved_async;
+}
+
+// One `match` arm: its own scope, plus one poisoned local per bound name.
+void Analyzer::checkMatchBranch(ast::MatchBranch& br) {
+  if (!br.is_wildcard && br.pattern) {
+    checkExpr(*br.pattern);
+  }
+  pushScope();
+  if (br.destruct) {
+    std::vector<std::pair<std::string, ast::SourceLocation>> names;
+    collectPatternBindings(*br.destruct, names);
+    for (const auto& nb : names) {
+      declareLocal(nb.first, kErrorType, nb.second);
+    }
+  } else if (br.pattern_kind == ast::MatchPatternKind::Some && !br.binding.empty()) {
+    declareLocal(br.binding, kErrorType, br.loc);
+  }
+  checkStmtList(br.body);
+  popScope();
+}
+
+// `return;` must only appear in a void function ([early-exit]). Also marks a
+// returned capturing lambda for the fat-closure ABI ([closure-escape]).
+void Analyzer::checkReturnStatement(ast::ReturnStmt& ret) {
+  if (!ret.value) {
+    const bool non_void = current_fn_ && !current_fn_->return_type.empty() &&
+                          current_fn_->return_type != "void";
+    if (non_void) {
+      error(ret.loc, "bare 'return;' is not allowed in a function returning '" +
+                         current_fn_->return_type + "'");
+    }
+    return;
+  }
+
+  checkExpr(*ret.value);
+  if (ret.value->kind() != ast::ExprKind::Lambda) {
+    return;
+  }
+  auto& lam = static_cast<ast::LambdaExpr&>(*ret.value);
+  if (lam.captures.empty()) {
+    return;
+  }
+  lam.escapes = true;
+  if (current_fn_) {
+    current_fn_->returns_fat_closure = true;
+  }
+}
+
+
+// Store target validation shared by `x = v`, `x!++` and `x!--`.
+// Returns false when the identifier does not resolve to a local/field.
+bool Analyzer::checkMutableTarget(const ast::IdentifierExpr& id,
+                                  const ast::SourceLocation& loc,
+                                  const char* message_context) {
+  if (current_fields_.count(id.name) != 0) {
+    return true;  // bare field reference inside a method
+  }
+  std::string ty;
+  if (!lookupLocal(id.name, ty)) {
+    error(loc, "undeclared identifier '" + id.name + "'");
+    declareLocal(id.name, kErrorType, loc);
+    return false;
+  }
+  if (ty == kErrorType) {
+    return false;  // already poisoned — skip cascading diagnostics
+  }
+  checkReadonlyStore(id.name, loc);
+  checkRaceViolation(id.name, loc);
+  (void)message_context;
+  return true;
+}
+
+void Analyzer::checkRaceViolation(const std::string& name,
+                                  const ast::SourceLocation& loc) const {
+  if (!in_spawn_ || in_sync_) {
+    return;
+  }
+  if (mutable_vars_.count(name) == 0) {
+    return;
+  }
+  diags_->error(loc, "Data race detected. Mutable variable '" + name +
+                         "!' accessed outside a 'sync' block inside 'spawn'.");
+}
+
+void Analyzer::checkReadonlyStore(const std::string& name,
+                                  const ast::SourceLocation& loc) const {
+  if (readonly_names_.count(name) == 0) {
+    return;
+  }
+  diags_->error(loc, "cannot assign to constant '" + name + "'");
+}
+
+const ast::ClassDeclStmt* Analyzer::destructureSourceClass(const ast::Expr& init) {
+  if (init.kind() == ast::ExprKind::New) {
+    const auto& neu = static_cast<const ast::NewExpr&>(init);
+    auto cit = classes_.find(neu.class_name);
+    return cit == classes_.end() ? nullptr : cit->second;
+  }
+  if (init.kind() != ast::ExprKind::Identifier) {
+    return nullptr;
+  }
+  const auto& id = static_cast<const ast::IdentifierExpr&>(init);
+  std::string ty;
+  if (!lookupLocal(id.name, ty)) {
+    return nullptr;
+  }
+  auto cit = classes_.find(ty);
+  return cit == classes_.end() ? nullptr : cit->second;
+}
+
+void Analyzer::bindDestructureNames(const ast::DestructureDeclStmt& decl,
+                                    const ast::ClassDeclStmt* cls) {
+  if (!cls) {
+    for (const ast::DestructureBinding& b : decl.bindings) {
+      declareLocal(b.name, "i32", b.loc);
+      if (b.is_mutable) {
+        mutable_vars_.insert(b.name);
+      }
+    }
+    return;
+  }
+
+  if (decl.bindings.size() != cls->fields.size()) {
+    error(decl.loc, "destructure binding count (" +
+                        std::to_string(decl.bindings.size()) +
+                        ") does not match field count of '" + cls->name + "' (" +
+                        std::to_string(cls->fields.size()) + ")");
+  }
+  for (std::size_t i = 0; i < decl.bindings.size(); ++i) {
+    const ast::DestructureBinding& b = decl.bindings[i];
+    std::string fty = "i32";
+    if (i < cls->fields.size() && cls->fields[i]) {
+      fty = cls->fields[i]->type_name.empty() ? "i32" : cls->fields[i]->type_name;
+    }
+    declareLocal(b.name, fty, b.loc);
+    if (b.is_mutable) {
+      mutable_vars_.insert(b.name);
+    }
+  }
+}
+
+// [dsl] `server { ... }` inside a typed config block retargets `this` to the
+// section type so bare `port = 8080` is checked against `Server`, not `App`.
+void Analyzer::enterConfigSection(const ast::BlockStmt& blk) {
+  if (blk.section_field.empty() || config_section_class_.empty()) {
+    return;
+  }
+  const std::string owner = config_section_class_;
+  auto cit = classes_.find(owner);
+  if (cit == classes_.end()) {
+    return;
+  }
+  const ast::ClassDeclStmt* cls = cit->second;
+  const ast::FieldDeclStmt* target = nullptr;
+  for (const auto& field : cls->fields) {
+    if (field && field->name == blk.section_field) {
+      target = field.get();
+      break;
+    }
+  }
+  if (!target) {
+    error(blk.loc, "unknown section '" + blk.section_field + "' on '" + owner + "'");
+    return;
+  }
+  auto sub = classes_.find(target->type_name);
+  if (sub == classes_.end()) {
+    error(blk.loc,
+          "section '" + blk.section_field + "' must be a class type, got '" +
+              target->type_name + "'");
+    return;
+  }
+  config_section_class_ = target->type_name;
+  current_fields_.clear();
+  pushConfigSectionFields(*sub->second);
+}
+
+void Analyzer::pushConfigSectionFields(const ast::ClassDeclStmt& cls) {
+  for (const auto& field : cls.fields) {
+    if (field) {
+      current_fields_.insert(field->name);
+    }
+  }
+}
+
+// Cheap static type of one arithmetic operand. Unknown shapes return {} and are
+// validated later by Codegen, which owns the precise rule set.
+std::string Analyzer::arithmeticOperandType(const ast::Expr& e) const {
+  switch (e.kind()) {
+    case ast::ExprKind::IntLiteral:
+      return "i32";
+    case ast::ExprKind::FloatLiteral:
+      return "f64";
+    case ast::ExprKind::StringLiteral:
+      return "String";
+    case ast::ExprKind::Binary:
+      return "num";  // nested; refined in codegen
+    case ast::ExprKind::Identifier: {
+      const auto& id = static_cast<const ast::IdentifierExpr&>(e);
+      if (id.name == "__FILE__" || id.name == "__FUNC__") {
+        return "String";
+      }
+      if (id.name == "__LINE__") {
+        return "i32";
+      }
+      std::string ty;
+      if (lookupLocal(id.name, ty)) {
+        return ty;
+      }
+      return {};
+    }
+    default:
+      return {};
+  }
+}
+
+// Numeric ops: require both sides numeric, or leave them to the string path.
+void Analyzer::checkArithmeticOperands(const ast::Expr& left, const ast::Expr& right,
+                                       const std::string& op,
+                                       const ast::SourceLocation& loc) {
+  if (op != "+" && op != "-" && op != "*" && op != "/") {
+    return;
+  }
+  const std::string lt = arithmeticOperandType(left);
+  const std::string rt = arithmeticOperandType(right);
+  if (lt.empty() || rt.empty()) {
+    return;
+  }
+
+  const auto is_num = [](const std::string& t) {
+    return t == "i32" || t == "i64" || t == "f64" || t == "num";
+  };
+  const auto is_str = [](const std::string& t) { return t == "String" || t == "ptr"; };
+
+  if (op == "+" && (is_str(lt) || is_str(rt))) {
+    return;  // string concat / interpolation
+  }
+  if (!is_num(lt) && !is_str(lt)) {
+    error(loc, "incompatible operand type '" + lt + "' for '" + op + "'");
+    return;
+  }
+  if (!is_num(rt) && !is_str(rt)) {
+    error(loc, "incompatible operand type '" + rt + "' for '" + op + "'");
+    return;
+  }
+  if (is_str(lt) || is_str(rt)) {
+    return;
+  }
+  if (is_num(lt) != is_num(rt)) {
+    error(loc, "incompatible types for '" + op + "': '" + lt + "' and '" + rt + "'");
+  }
+}
+
 void Analyzer::checkStmt(ast::Stmt& stmt) {
   switch (stmt.kind()) {
     case ast::StmtKind::VarDecl: {
@@ -597,71 +844,17 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
       if (decl.bindings.size() < 2) {
         error(decl.loc, "destructure requires at least two bindings");
       }
-
       // Resolve RHS class so bindings get real field types (declaration order).
-      const ast::ClassDeclStmt* cls = nullptr;
-      if (decl.init && decl.init->kind() == ast::ExprKind::New) {
-        const auto& neu = static_cast<const ast::NewExpr&>(*decl.init);
-        auto cit = classes_.find(neu.class_name);
-        if (cit != classes_.end()) {
-          cls = cit->second;
-        }
-      } else if (decl.init && decl.init->kind() == ast::ExprKind::Identifier) {
-        const auto& id = static_cast<const ast::IdentifierExpr&>(*decl.init);
-        std::string ty;
-        if (lookupLocal(id.name, ty)) {
-          auto cit = classes_.find(ty);
-          if (cit != classes_.end()) {
-            cls = cit->second;
-          }
-        }
-      }
-
-      if (cls) {
-        if (decl.bindings.size() != cls->fields.size()) {
-          error(decl.loc, "destructure binding count (" +
-                              std::to_string(decl.bindings.size()) +
-                              ") does not match field count of '" + cls->name + "' (" +
-                              std::to_string(cls->fields.size()) + ")");
-        }
-        for (std::size_t i = 0; i < decl.bindings.size(); ++i) {
-          const ast::DestructureBinding& b = decl.bindings[i];
-          std::string fty = "i32";
-          if (i < cls->fields.size() && cls->fields[i]) {
-            fty = cls->fields[i]->type_name.empty() ? "i32" : cls->fields[i]->type_name;
-          }
-          declareLocal(b.name, fty, b.loc);
-          if (b.is_mutable) {
-            mutable_vars_.insert(b.name);
-          }
-        }
-      } else {
-        for (const ast::DestructureBinding& b : decl.bindings) {
-          declareLocal(b.name, "i32", b.loc);
-          if (b.is_mutable) {
-            mutable_vars_.insert(b.name);
-          }
-        }
-      }
+      bindDestructureNames(decl, decl.init ? destructureSourceClass(*decl.init) : nullptr);
       break;
     }
     case ast::StmtKind::Assign: {
       auto& assign = static_cast<ast::AssignStmt&>(stmt);
-      if (assign.target && assign.target->kind() == ast::ExprKind::Identifier) {
-        const auto& id = static_cast<const ast::IdentifierExpr&>(*assign.target);
-        if (current_fields_.count(id.name) == 0) {
-          std::string ty;
-          if (!lookupLocal(id.name, ty)) {
-            error(assign.loc, "undeclared identifier '" + id.name + "'");
-            declareLocal(id.name, kErrorType, assign.loc);
-          } else if (readonly_names_.count(id.name) != 0) {
-            error(assign.loc, "cannot assign to constant '" + id.name + "'");
-          } else if (ty != kErrorType && in_spawn_ && mutable_vars_.count(id.name) != 0 &&
-                     !in_sync_) {
-            error(assign.loc, "Data race detected. Mutable variable '" + id.name +
-                                  "!' accessed outside a 'sync' block inside 'spawn'.");
-          }
-        }
+      const bool bare_target =
+          assign.target && assign.target->kind() == ast::ExprKind::Identifier;
+      if (bare_target) {
+        checkMutableTarget(static_cast<const ast::IdentifierExpr&>(*assign.target), assign.loc,
+                           "assign");
       } else if (assign.target) {
         const bool prev_write = property_write_;
         property_write_ = assign.target->kind() == ast::ExprKind::MemberAccess;
@@ -689,33 +882,7 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
     }
     case ast::StmtKind::FuncDecl: {
       auto& fn = static_cast<ast::FuncDeclStmt&>(stmt);
-      // Frontend-only LCMD / class-hook callbacks: never type-check bodies
-      // (may contain compile-time builtins like uid_counter()).
-      if (fn.name == "__compile_time_handler" || fn.name == "__on_class_parsed") {
-        break;
-      }
-      auto saved_mut = mutable_vars_;
-      auto saved_constraints = active_generic_constraints_;
-      ast::FuncDeclStmt* saved_fn = current_fn_;
-      current_fn_ = &fn;
-      const bool saved_async = in_async_fn_;
-      in_async_fn_ = fn.is_async;
-      for (const ast::GenericParam& gp : fn.generics) {
-        active_generic_constraints_[gp.name] = gp.constraint;
-      }
-      pushScope();
-      for (const ast::Param& p : fn.params) {
-        declareLocal(p.name, p.type_name.empty() ? "i32" : p.type_name, p.loc);
-        if (p.is_mutable) {
-          mutable_vars_.insert(p.name);
-        }
-      }
-      checkStmtList(fn.body);
-      popScope();
-      mutable_vars_ = std::move(saved_mut);
-      active_generic_constraints_ = std::move(saved_constraints);
-      current_fn_ = saved_fn;
-      in_async_fn_ = saved_async;
+      checkFuncBody(fn);
       break;
     }
     case ast::StmtKind::If: {
@@ -735,23 +902,7 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
         checkExpr(*m.scrutinee);
       }
       for (ast::MatchBranch& br : m.branches) {
-        if (!br.is_wildcard && br.pattern) {
-          checkExpr(*br.pattern);
-        }
-        pushScope();
-        // Destructuring arms introduce one local per bound field
-        // (`User { name, addr: Addr { city } }` binds name and city). `_` skips.
-        if (br.destruct) {
-          std::vector<std::pair<std::string, ast::SourceLocation>> names;
-          collectPatternBindings(*br.destruct, names);
-          for (const auto& nb : names) {
-            declareLocal(nb.first, kErrorType, nb.second);
-          }
-        } else if (br.pattern_kind == ast::MatchPatternKind::Some && !br.binding.empty()) {
-          declareLocal(br.binding, kErrorType, br.loc);
-        }
-        checkStmtList(br.body);
-        popScope();
+        checkMatchBranch(br);
       }
       break;
     }
@@ -785,19 +936,7 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
     }
     case ast::StmtKind::Return: {
       auto& ret = static_cast<ast::ReturnStmt&>(stmt);
-      if (ret.value) {
-        checkExpr(*ret.value);
-        // [closure-escape]: returning a capturing lambda → mark escape + fat-closure ABI.
-        if (ret.value->kind() == ast::ExprKind::Lambda) {
-          auto& lam = static_cast<ast::LambdaExpr&>(*ret.value);
-          if (!lam.captures.empty()) {
-            lam.escapes = true;
-            if (current_fn_) {
-              current_fn_->returns_fat_closure = true;
-            }
-          }
-        }
-      }
+      checkReturnStatement(ret);
       break;
     }
     case ast::StmtKind::ExprStmt: {
@@ -807,39 +946,9 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
     }
     case ast::StmtKind::Block: {
       auto& blk = static_cast<ast::BlockStmt&>(stmt);
-      // [dsl] `server { ... }` in a typed block retargets `this` to the section
-      // type, so bare `port = 8080` is checked against `Server`, not `App`.
       const std::string saved_section = config_section_class_;
       auto saved_fields = current_fields_;
-      if (!blk.section_field.empty() && !config_section_class_.empty()) {
-        const std::string owner = config_section_class_;
-        auto cit = classes_.find(owner);
-        if (cit != classes_.end()) {
-          const ast::ClassDeclStmt* cls = cit->second;
-          const ast::FieldDeclStmt* target = nullptr;
-          for (const auto& field : cls->fields) {
-            if (field && field->name == blk.section_field) {
-              target = field.get();
-              break;
-            }
-          }
-          if (!target) {
-            error(blk.loc, "unknown section '" + blk.section_field + "' on '" + owner + "'");
-          } else {
-            auto sub = classes_.find(target->type_name);
-            if (sub == classes_.end()) {
-              error(blk.loc, "section '" + blk.section_field + "' must be a class type, got '" +
-                                 target->type_name + "'");
-            } else {
-              config_section_class_ = target->type_name;
-              current_fields_.clear();
-              for (const auto& field : sub->second->fields) {
-                if (field) current_fields_.insert(field->name);
-              }
-            }
-          }
-        }
-      }
+      enterConfigSection(blk);
       checkStmtList(blk.stmts);
       config_section_class_ = saved_section;
       current_fields_ = std::move(saved_fields);
@@ -850,11 +959,7 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
       auto saved_fields = current_fields_;
       auto saved_constraints = active_generic_constraints_;
       current_fields_.clear();
-      for (const auto& field : cls.fields) {
-        if (field) {
-          current_fields_.insert(field->name);
-        }
-      }
+      pushConfigSectionFields(cls);
       // Class-level generics (`Array<T>`'s `T`) are in scope inside every method,
       // so `T tmp = data[i]` type-checks like any other declared type.
       for (const ast::GenericParam& gp : cls.generics) {
@@ -889,6 +994,31 @@ void Analyzer::checkDelegateFields(const ast::ClassDeclStmt& cls) {
   }
 }
 
+bool Analyzer::classConflictsWithNonPartial(const ast::ClassDeclStmt& part,
+                                            const std::unordered_map<std::string, std::size_t>& sol) {
+  if (sol.count(part.name) == 0) {
+    return false;
+  }
+  error(part.loc, "partial class '" + part.name +
+                      "' conflicts with a non-partial class of the same name");
+  return true;
+}
+
+bool Analyzer::solidClassConflicts(const ast::ClassDeclStmt& cls,
+                                   const std::unordered_map<std::string,
+                                                            std::vector<std::size_t>>& partials,
+                                   const std::unordered_map<std::string, std::size_t>& solids) {
+  if (partials.count(cls.name) != 0) {
+    error(cls.loc, "class '" + cls.name + "' conflicts with a partial class of the same name");
+    return true;
+  }
+  if (solids.count(cls.name) == 0) {
+    return false;
+  }
+  error(cls.loc, "redefinition of class '" + cls.name + "'");
+  return true;
+}
+
 bool Analyzer::mergePartialClasses(ast::Module& module) {
   std::unordered_map<std::string, std::vector<std::size_t>> partial_idxs;
   std::unordered_map<std::string, std::size_t> solid_idxs;
@@ -899,24 +1029,14 @@ bool Analyzer::mergePartialClasses(ast::Module& module) {
       continue;
     }
     auto& cls = static_cast<ast::ClassDeclStmt&>(*stmt);
-    if (cls.is_partial) {
-      if (solid_idxs.count(cls.name) != 0) {
-        error(cls.loc, "partial class '" + cls.name +
-                           "' conflicts with a non-partial class of the same name");
-        continue;
+    if (!cls.is_partial) {
+      if (!solidClassConflicts(cls, partial_idxs, solid_idxs)) {
+        solid_idxs[cls.name] = i;
       }
+      continue;
+    }
+    if (!classConflictsWithNonPartial(cls, solid_idxs)) {
       partial_idxs[cls.name].push_back(i);
-    } else {
-      if (partial_idxs.count(cls.name) != 0) {
-        error(cls.loc, "class '" + cls.name +
-                           "' conflicts with a partial class of the same name");
-        continue;
-      }
-      if (solid_idxs.count(cls.name) != 0) {
-        error(cls.loc, "redefinition of class '" + cls.name + "'");
-        continue;
-      }
-      solid_idxs[cls.name] = i;
     }
   }
 
@@ -1054,6 +1174,63 @@ bool Analyzer::interfaceHasMethod(const std::string& iface_name,
   return false;
 }
 
+std::string Analyzer::memberAccessType(const std::string& obj_ty,
+                                       const std::string& member) const {
+  auto cit = classes_.find(obj_ty);
+  if (cit == classes_.end() || !cit->second) {
+    return {};
+  }
+  // Trailing `_` is forbidden in source; physical fields are never written that way.
+  if (!member.empty() && member.back() == '_') {
+    return {};
+  }
+  const ast::ClassDeclStmt& cls = *cit->second;
+  // Property: get_x → return type, else logical field `x` (physical x_).
+  const std::string getter = "get_" + member;
+  for (const auto& m : cls.methods) {
+    if (m && m->name == getter) {
+      return m->return_type.empty() ? std::string("void") : m->return_type;
+    }
+  }
+  for (const auto& f : cls.fields) {
+    if (f && f->name == member) {
+      return f->type_name.empty() ? std::string("i32") : f->type_name;
+    }
+  }
+  return {};
+}
+
+std::string Analyzer::methodCallResultType(const ast::MethodCallExpr& call) const {
+  if (!call.object) {
+    return {};
+  }
+  // Receiver type: bare identifier may be a class (static/assoc), else the
+  // expression's own static type (enables `a.b().c()` chains and `??` checks).
+  std::string recv_ty = inferExprType(*call.object);
+  if (recv_ty.empty() && call.object->kind() == ast::ExprKind::Identifier) {
+    const auto& oid = static_cast<const ast::IdentifierExpr&>(*call.object);
+    if (classes_.count(oid.name) != 0) {
+      recv_ty = oid.name;  // `Variant.from_i32` / ClassName.staticMethod
+    }
+  }
+  if (recv_ty.empty()) {
+    return {};
+  }
+  // `obj?.m()` resolves on the Optional payload and wraps the result again.
+  const bool safe_on_optional =
+      call.is_safe && recv_ty.rfind("Optional<", 0) == 0 && recv_ty.back() == '>';
+  if (!safe_on_optional) {
+    return methodReturnTypeOn(recv_ty, call.method);
+  }
+
+  const std::string payload = recv_ty.substr(9, recv_ty.size() - 10);
+  const std::string ret = methodReturnTypeOn(payload, call.method);
+  if (ret.empty() || ret.rfind("Optional<", 0) == 0) {
+    return ret;
+  }
+  return "Optional<" + ret + ">";
+}
+
 std::string Analyzer::inferExprType(const ast::Expr& expr) const {
   switch (expr.kind()) {
     case ast::ExprKind::Identifier: {
@@ -1086,32 +1263,7 @@ std::string Analyzer::inferExprType(const ast::Expr& expr) const {
       if (!access.object) {
         return {};
       }
-      const std::string obj_ty = inferExprType(*access.object);
-      auto cit = classes_.find(obj_ty);
-      if (cit == classes_.end() || !cit->second) {
-        return {};
-      }
-      const ast::ClassDeclStmt& cls = *cit->second;
-      auto fieldType = [&](const std::string& name) -> std::string {
-        for (const auto& f : cls.fields) {
-          if (f && f->name == name) {
-            return f->type_name.empty() ? std::string("i32") : f->type_name;
-          }
-        }
-        return {};
-      };
-      // Trailing `_` is forbidden in source; physical fields are never written that way.
-      if (!access.member.empty() && access.member.back() == '_') {
-        return {};
-      }
-      // Property: get_x → return type, else logical field `x` (physical x_).
-      const std::string getter = "get_" + access.member;
-      for (const auto& m : cls.methods) {
-        if (m && m->name == getter) {
-          return m->return_type.empty() ? std::string("void") : m->return_type;
-        }
-      }
-      return fieldType(access.member);
+      return memberAccessType(inferExprType(*access.object), access.member);
     }
     case ast::ExprKind::Call: {
       const auto& call = static_cast<const ast::CallExpr&>(expr);
@@ -1127,38 +1279,8 @@ std::string Analyzer::inferExprType(const ast::Expr& expr) const {
       return fit->second->return_type.empty() ? std::string("void")
                                               : fit->second->return_type;
     }
-    case ast::ExprKind::MethodCall: {
-      const auto& call = static_cast<const ast::MethodCallExpr&>(expr);
-      if (!call.object) {
-        return {};
-      }
-      // Receiver type: bare identifier may be a class (static/assoc), else the
-      // expression's own static type (enables `a.b().c()` chains and `??` checks).
-      std::string recv_ty = inferExprType(*call.object);
-      if (recv_ty.empty() && call.object->kind() == ast::ExprKind::Identifier) {
-        const auto& oid = static_cast<const ast::IdentifierExpr&>(*call.object);
-        if (classes_.count(oid.name) != 0) {
-          recv_ty = oid.name;  // `Variant.from_i32` / ClassName.staticMethod
-        }
-      }      if (recv_ty.empty()) {
-        return {};
-      }
-      // `obj?.m()`: `?.` short-circuits only when the receiver is an Optional, in
-      // which case the method is resolved on the payload and the result is an
-      // `Optional<R>`. On a concrete receiver it is a plain call (see codegen).
-      if (call.is_safe && recv_ty.rfind("Optional<", 0) == 0 && recv_ty.back() == '>') {
-        const std::string payload = recv_ty.substr(9, recv_ty.size() - 10);
-        const std::string ret = methodReturnTypeOn(payload, call.method);
-        if (ret.empty()) {
-          return {};
-        }
-        if (ret.rfind("Optional<", 0) == 0) {
-          return ret;
-        }
-        return "Optional<" + ret + ">";
-      }
-      return methodReturnTypeOn(recv_ty, call.method);
-    }
+    case ast::ExprKind::MethodCall:
+      return methodCallResultType(static_cast<const ast::MethodCallExpr&>(expr));
     case ast::ExprKind::ScopedCall: {
       // Return type comes from the target module's exported declaration.
       const auto& sc = static_cast<const ast::ScopedCallExpr&>(expr);

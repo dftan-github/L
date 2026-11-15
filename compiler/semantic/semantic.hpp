@@ -23,6 +23,13 @@ private:
   void error(const ast::SourceLocation& loc, const std::string& message);
   // Merge `partial class` parts with the same name into one ClassDeclStmt.
   bool mergePartialClasses(ast::Module& module);
+  bool classConflictsWithNonPartial(
+      const ast::ClassDeclStmt& part,
+      const std::unordered_map<std::string, std::size_t>& sol);
+  bool solidClassConflicts(
+      const ast::ClassDeclStmt& cls,
+      const std::unordered_map<std::string, std::vector<std::size_t>>& partials,
+      const std::unordered_map<std::string, std::size_t>& solids);
   // Reject a class that delegates the same type twice ([delegate]).
   void checkDelegateFields(const ast::ClassDeclStmt& cls);
   // Inject `pub fun clone() -> Self` when the class does not define clone.
@@ -77,11 +84,49 @@ private:
   bool interfaceHasMethod(const std::string& iface_name, const std::string& method) const;
   // Best-effort type of an expression for generic constraint checks.
   std::string inferExprType(const ast::Expr& expr) const;
+  // Static type of `objType.member` (getter first, then logical field).
+  std::string memberAccessType(const std::string& obj_ty, const std::string& member) const;
+  // Static result type of `recv.method(...)`, including `?.` Optional wrapping.
+  std::string methodCallResultType(const ast::MethodCallExpr& call) const;
   // Static return type of `recv_ty.method` (instance / static / single delegate).
   std::string methodReturnTypeOn(const std::string& recv_ty,
                                  const std::string& method) const;
   void checkGenericCallConstraints(const ast::CallExpr& call);
   void checkConstrainedMethodCall(const ast::MethodCallExpr& call);
+  // Type-checks one function body (own scope, generics, async flag).
+  void checkFuncBody(ast::FuncDeclStmt& fn);
+  // One `match` arm with its own scope and pattern bindings.
+  void checkMatchBranch(ast::MatchBranch& br);
+  // Bare identifier reference in expression position.
+  void checkIdentifierRef(const ast::IdentifierExpr& id);
+  // Receiver of `x.m()` when `x` is a bare identifier.
+  void checkMethodCallReceiver(const ast::IdentifierExpr& id);
+  // `mod::fn(...)` visibility against the target module's exports.
+  void checkScopedCallTarget(const ast::ScopedCallExpr& sc);
+  // `return;` legality plus returned-lambda escape marking.
+  void checkReturnStatement(ast::ReturnStmt& ret);
+  // Cheap static type of one arithmetic operand (empty when unknown).
+  std::string arithmeticOperandType(const ast::Expr& e) const;
+  // Numeric operand compatibility for `+ - * /`.
+  void checkArithmeticOperands(const ast::Expr& left, const ast::Expr& right,
+                               const std::string& op, const ast::SourceLocation& loc);
+
+  // --- Flattening helpers (keeps checkStmt / checkExpr free of deep nesting) ---
+  // Undeclared-name check for a bare identifier used as the target of a store
+  // (assign / ++ / --). Returns false when the name did not resolve.
+  bool checkMutableTarget(const ast::IdentifierExpr& id, const ast::SourceLocation& loc,
+                          const char* message_context);
+  // Data-race rule: mutable `!` variable touched inside `spawn` outside `sync`.
+  void checkRaceViolation(const std::string& name, const ast::SourceLocation& loc) const;
+  // `const` / `constd` store rejection.
+  void checkReadonlyStore(const std::string& name, const ast::SourceLocation& loc) const;
+  // Class lookup for a destructuring RHS (`(a, b) := expr`).
+  const ast::ClassDeclStmt* destructureSourceClass(const ast::Expr& init);
+  void bindDestructureNames(const ast::DestructureDeclStmt& decl,
+                            const ast::ClassDeclStmt* cls);
+  // [dsl] Retarget `this` to a nested section type (`server { ... }`).
+  void enterConfigSection(const ast::BlockStmt& blk);
+  void pushConfigSectionFields(const ast::ClassDeclStmt& cls);
 
   // Generic function templates (name → AST).
   std::unordered_map<std::string, const ast::FuncDeclStmt*> generic_funcs_;

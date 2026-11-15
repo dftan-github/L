@@ -726,7 +726,65 @@ std::string Codegen::methodReturnTypeOn(const std::string& recv_ty,
   return {};
 }
 
-std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kind()) {
+// Return type of `ClassName.method(...)`: a real static method first, then an
+// associated free function with the same name (e.g. `Variant.from_i32`).
+std::string Codegen::staticMethodReturnType(const std::string& class_name,
+                                            const std::string& method) const {
+  const ClassInfo* cinfo = findClass(class_name);
+  if (cinfo && cinfo->ast) {
+    for (const auto& m : cinfo->ast->methods) {
+      if (m && m->name == method && m->is_static) {
+        return resolveTypeName(m->return_type);
+      }
+    }
+  }
+  auto fit = concrete_funcs_.find(method);
+  if (fit == concrete_funcs_.end() || !fit->second) {
+    return {};
+  }
+  return resolveTypeName(fit->second->return_type);
+}
+
+// Type produced by a destructuring `match` arm (`User { name } => name`).
+// Array arms yield the element type of `Array<T>`; class arms yield the
+// declared type of the bound field. Empty when the shape is not understood.
+std::string Codegen::matchDestructureArmType(const ast::MatchBranch& br,
+                                             const ast::MatchExpr& m) const {
+  if (!br.destruct || !br.value || br.value->kind() != ast::ExprKind::Identifier) {
+    return {};
+  }
+  const std::string& name = static_cast<const ast::IdentifierExpr&>(*br.value).name;
+
+  if (br.destruct->kind == ast::MatchPatternKind::ArrayDestructure) {
+    std::string abase;
+    std::vector<std::string> aargs;
+    const std::string sty = m.scrutinee ? exprTypeOf(*m.scrutinee) : std::string();
+    if (splitGenericType(sty, abase, aargs) && abase == "Array" && aargs.size() == 1) {
+      return aargs[0];
+    }
+    return {};
+  }
+
+  for (const ast::PatternField& pf : br.destruct->fields) {
+    const std::string bind = pf.binding.empty() ? pf.name : pf.binding;
+    if (bind != name) {
+      continue;
+    }
+    const ClassInfo* ci = findClass(resolveTypeName(br.destruct->class_name));
+    if (!ci) {
+      return {};
+    }
+    auto fit = ci->field_index.find(physicalFieldName(pf.name));
+    if (fit == ci->field_index.end() || fit->second >= ci->field_types.size()) {
+      return {};
+    }
+    return ci->field_types[fit->second];
+  }
+  return {};
+}
+
+std::string Codegen::exprTypeOf(const ast::Expr& expr) const {
+  switch (expr.kind()) {
     case ast::ExprKind::Match: {
       // Determine the result type from the arms. `some(x)` bindings are not in
       // `local_types_` during inference, so fall back to the payload type of the
@@ -745,39 +803,10 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
           return "String";
         }
         // `some(x) => x` — the arm just forwards the payload.
-        bool is_binding = false;
-        if (br.value->kind() == ast::ExprKind::Identifier) {
-          is_binding = !br.binding.empty() &&
-                       static_cast<const ast::IdentifierExpr&>(*br.value).name == br.binding;
-        }
-        // Destructuring arms bind field names; `User { name } => name` yields
-        // the field's declared type.
-        std::string destr_ty;
-        if (br.destruct && br.value->kind() == ast::ExprKind::Identifier) {
-          const std::string& name = static_cast<const ast::IdentifierExpr&>(*br.value).name;
-          if (br.destruct->kind == ast::MatchPatternKind::ArrayDestructure) {
-            std::string abase;
-            std::vector<std::string> aargs;
-            const std::string sty = m.scrutinee ? exprTypeOf(*m.scrutinee) : std::string();
-            if (splitGenericType(sty, abase, aargs) && abase == "Array" && aargs.size() == 1) {
-              destr_ty = aargs[0];
-            }
-          } else {
-            for (const ast::PatternField& pf : br.destruct->fields) {
-              const std::string bind = pf.binding.empty() ? pf.name : pf.binding;
-              if (bind != name) {
-                continue;
-              }
-              if (const ClassInfo* ci = findClass(resolveTypeName(br.destruct->class_name))) {
-                auto fit = ci->field_index.find(physicalFieldName(pf.name));
-                if (fit != ci->field_index.end() && fit->second < ci->field_types.size()) {
-                  destr_ty = ci->field_types[fit->second];
-                }
-              }
-              break;
-            }
-          }
-        }
+        const bool is_binding =
+            br.value->kind() == ast::ExprKind::Identifier && !br.binding.empty() &&
+            static_cast<const ast::IdentifierExpr&>(*br.value).name == br.binding;
+        const std::string destr_ty = matchDestructureArmType(br, m);
         const std::string ty =
             is_binding ? payload : (!destr_ty.empty() ? destr_ty : exprTypeOf(*br.value));
         if (ty.empty()) {
@@ -1003,21 +1032,9 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
       }
       // ClassName.staticMethod / Variant.from_i32 (free assoc) return types.
       if (lit == local_types_.end()) {
-        if (isClassType(oid.name) ||
-            (const_cast<Codegen*>(this)->ensureTypeAvailable(oid.name) &&
-             isClassType(oid.name))) {
-          const ClassInfo* cinfo = findClass(oid.name);
-          if (cinfo && cinfo->ast) {
-            for (const auto& m : cinfo->ast->methods) {
-              if (m && m->name == call.method && m->is_static) {
-                return resolveTypeName(m->return_type);
-              }
-            }
-          }
-          auto fit = concrete_funcs_.find(call.method);
-          if (fit != concrete_funcs_.end() && fit->second) {
-            return resolveTypeName(fit->second->return_type);
-          }
+        if (isClassType(oid.name) || (const_cast<Codegen*>(this)->ensureTypeAvailable(oid.name) &&
+                                      isClassType(oid.name))) {
+          return staticMethodReturnType(oid.name, call.method);
         }
         return {};
       }
@@ -6299,6 +6316,25 @@ llvm::Value* Codegen::emitAddrOf(const ast::AddrOfExpr& expr) {
   return builder_.CreateBitCast(slot, ptrTy(), "addr");
 }
 
+// Address of a field of the current class, reached through `this`.
+// Returns nullptr (with a diagnostic) for static methods.
+llvm::Value* Codegen::fieldAddressOnThis(const std::string& field,
+                                         const ast::SourceLocation& loc) {
+  const ClassInfo* info = findClass(current_class_);
+  if (!info) {
+    return nullptr;
+  }
+  auto fit = info->field_index.find(physicalFieldName(field));
+  if (fit == info->field_index.end()) {
+    return nullptr;
+  }
+  if (current_method_is_static_ || !current_this_) {
+    error(loc, "cannot access instance field '" + field + "' from a static method");
+    return nullptr;
+  }
+  return builder_.CreateStructGEP(info->type, current_this_, fit->second, field);
+}
+
 llvm::Value* Codegen::emitLValue(const ast::Expr& expr) {
   switch (expr.kind()) {
     case ast::ExprKind::Identifier: {
@@ -6325,16 +6361,8 @@ llvm::Value* Codegen::emitLValue(const ast::Expr& expr) {
       }
       // Method body: bare field name resolves against this (logical → physical).
       if (!current_class_.empty()) {
-        const ClassInfo* info = findClass(current_class_);
-        if (info) {
-          auto fit = info->field_index.find(physicalFieldName(id.name));
-          if (fit != info->field_index.end()) {
-            if (current_method_is_static_ || !current_this_) {
-              error("cannot access instance field '" + id.name + "' from a static method");
-              return nullptr;
-            }
-            return builder_.CreateStructGEP(info->type, current_this_, fit->second, id.name);
-          }
+        if (llvm::Value* field = fieldAddressOnThis(id.name, id.loc)) {
+          return field;
         }
       }
 
@@ -6392,6 +6420,18 @@ llvm::Value* Codegen::emitLValue(const ast::Expr& expr) {
       error("expression is not an assignable lvalue");
       return nullptr;
   }
+}
+
+// Declared type name of the first parameter of `name` in `cls`, if any.
+std::string Codegen::firstParamTypeName(const ast::ClassDeclStmt& cls,
+                                        const std::string& name) const {
+  for (const auto& m : cls.methods) {
+    if (!m || m->name != name || m->params.empty()) {
+      continue;
+    }
+    return resolveTypeName(m->params[0].type_name);
+  }
+  return {};
 }
 
 bool Codegen::emitAssign(const ast::AssignStmt& assign) {
@@ -6547,12 +6587,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
           }
           std::string expected_name;
           if (info->ast) {
-            for (const auto& m : info->ast->methods) {
-              if (m && m->name == pr.method_name && !m->params.empty()) {
-                expected_name = resolveTypeName(m->params[0].type_name);
-                break;
-              }
-            }
+            expected_name = firstParamTypeName(*info->ast, pr.method_name);
           }
           llvm::Type* expected = mit->second->getFunctionType()->getParamType(1);
           llvm::Value* arg = emitValueForParam(*assign.value, expected, expected_name);
@@ -9467,94 +9502,8 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
   // class-name / static / free-function path below.
   if ((lit == local_types_.end() || vit == named_values_.end()) &&
       !current_class_.empty() && current_this_ && !current_method_is_static_) {
-    const ClassInfo* owner = findClass(current_class_);
-    if (owner) {
-      auto fit = owner->field_index.find(physicalFieldName(id.name));
-      if (fit != owner->field_index.end()) {
-        const size_t fi = fit->second;
-        std::string field_ty;
-        if (fi < owner->field_types.size()) {
-          field_ty = resolveTypeName(owner->field_types[fi]);
-        }
-        if (!field_ty.empty() && isClassType(field_ty)) {
-          const ClassInfo* finfo = findClass(field_ty);
-          llvm::Function* target = nullptr;
-          const ClassInfo* callee_info = finfo;
-          if (finfo) {
-            auto own = finfo->methods.find(call.method);
-            if (own != finfo->methods.end()) {
-              target = own->second;
-            }
-          }
-          if (target) {
-            llvm::Value* field_ptr =
-                builder_.CreateStructGEP(owner->type, current_this_, fi, id.name + ".slot");
-            // Pointer-typed field slots hold the instance address; inline struct
-            // fields are already addressed by the GEP.
-            llvm::Type* slot_ty = owner->type->getElementType(fi);
-            if (slot_ty->isPointerTy()) {
-              field_ptr =
-                  builder_.CreateLoad(slot_ty, field_ptr, id.name + ".self");
-            }
-            const ast::FuncDeclStmt* method_ast = nullptr;
-            if (callee_info->ast) {
-              for (const auto& m : callee_info->ast->methods) {
-                if (m && m->name == call.method) {
-                  method_ast = m.get();
-                  break;
-                }
-              }
-            }
-            std::vector<const ast::Expr*> ordered;
-            if (method_ast) {
-              if (!resolveCallArgs(*method_ast, call.args, ordered)) {
-                return nullptr;
-              }
-            } else {
-              for (const ast::CallArg& a : call.args) {
-                if (!a.value) {
-                  return nullptr;
-                }
-                ordered.push_back(a.value.get());
-              }
-            }
-            const bool is_static = method_ast && method_ast->is_static;
-            std::vector<llvm::Value*> call_args;
-            unsigned ai = 0;
-            if (!is_static) {
-              call_args.push_back(field_ptr);
-              ai = 1;
-            }
-            for (const ast::Expr* arg : ordered) {
-              llvm::Type* expected =
-                  target->getFunctionType()->getParamType(ai);
-              std::string expected_name;
-              const size_t param_i =
-                  is_static ? static_cast<size_t>(ai) : static_cast<size_t>(ai - 1);
-              if (method_ast && param_i < method_ast->params.size()) {
-                expected_name =
-                    instantiateMemberType(method_ast->params[param_i].type_name,
-                                          *callee_info);
-              }
-              llvm::Value* v = emitValueForParam(*arg, expected, expected_name);
-              if (!v) {
-                return nullptr;
-              }
-              call_args.push_back(v);
-              ++ai;
-            }
-            if (target->arg_size() != call_args.size()) {
-              error("argument count mismatch calling " + field_ty + "." + call.method);
-              return nullptr;
-            }
-            if (target->getReturnType()->isVoidTy()) {
-              builder_.CreateCall(target, call_args);
-              return llvm::ConstantInt::get(i32Ty(), 0);
-            }
-            return builder_.CreateCall(target, call_args, "field.mcall");
-          }
-        }
-      }
+    if (llvm::Value* callv = emitMethodCallOnField(call, id.name)) {
+      return callv;
     }
   }
 
@@ -10391,19 +10340,8 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       }
       // Method body: field load via this (logical → physical).
       if (!current_class_.empty()) {
-        const ClassInfo* info = findClass(current_class_);
-        if (info) {
-          auto fit = info->field_index.find(physicalFieldName(id.name));
-          if (fit != info->field_index.end()) {
-            if (current_method_is_static_ || !current_this_) {
-              error("cannot access instance field '" + id.name + "' from a static method");
-              return nullptr;
-            }
-            llvm::Value* gep =
-                builder_.CreateStructGEP(info->type, current_this_, fit->second, id.name);
-            llvm::Type* fty = info->type->getElementType(fit->second);
-            return builder_.CreateLoad(fty, gep, id.name);
-          }
+        if (llvm::Value* field = loadFieldOnThis(id.name)) {
+          return field;
         }
       }
 
@@ -10866,45 +10804,13 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
           (isStringOperand(*bin.left) || isStringOperand(*bin.right) || lt == "String" ||
            rt == "String") &&
           !isNumericType(lt) && !isNumericType(rt)) {
-        auto toCStr = [this](llvm::Value* v, const std::string& ty,
-                             const ast::Expr& e) -> llvm::Value* {
-          const std::string eff_ty = ty.empty() ? exprTypeOf(e) : ty;
-          if (eff_ty == "String") {
-            ensureTypeAvailable("String");
-            const ClassInfo* info = findClass("String");
-            if (!info || !v) {
-              return nullptr;
-            }
-            auto fit = info->field_index.find("data_");
-            if (fit == info->field_index.end()) {
-              return nullptr;
-            }
-            // `Array<String>` elements travel by VALUE (e.g. `names.get(i)`), so
-            // GEP needs a stack home first — spill when the operand isn't already
-            // a pointer to the String object.
-            llvm::Value* base = v;
-            if (v->getType() != ptrTy()) {
-              if (v->getType() != info->type) {
-                return nullptr;
-              }
-              llvm::Function* cur = builder_.GetInsertBlock()->getParent();
-              llvm::AllocaInst* slot = createEntryAlloca(cur, info->type, "streq.tmp");
-              builder_.CreateStore(v, slot);
-              base = slot;
-            }
-            llvm::Value* gep =
-                builder_.CreateStructGEP(info->type, base, fit->second, "streq.data");
-            return builder_.CreateLoad(ptrTy(), gep, "streq.cstr");
-          }
-          return v;
-        };
-        llvm::Function* str_eq = requireExtern("l_str_eq");
-        if (!str_eq) {
+        llvm::Value* a = stringOperandToCStr(lhs, lt, *bin.left);
+        llvm::Value* b = stringOperandToCStr(rhs, rt, *bin.right);
+        if (!a || !b) {
           return nullptr;
         }
-        llvm::Value* a = toCStr(lhs, lt, *bin.left);
-        llvm::Value* b = toCStr(rhs, rt, *bin.right);
-        if (!a || !b) {
+        llvm::Function* str_eq = requireExtern("l_str_eq");
+        if (!str_eq) {
           return nullptr;
         }
         llvm::Value* eq_i32 = builder_.CreateCall(str_eq, {a, b}, "streq");
@@ -11954,6 +11860,191 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
 // `mod::fn(args)` — resolve the callee inside the named module. `pub` symbols
 // keep an unprefixed IR name (see mangleName), so this is just the plain call
 // path with an explicit module-qualified signature lookup.
+// Converts a String-typed operand to its raw C string pointer. `Array<String>`
+// elements travel by VALUE (`names.get(i)`), so a stack home is created first
+// when the operand is not already a pointer to the String object.
+llvm::Value* Codegen::stringOperandToCStr(llvm::Value* v, const std::string& ty,
+                                          const ast::Expr& e) {
+  const std::string eff_ty = ty.empty() ? exprTypeOf(e) : ty;
+  if (eff_ty != "String") {
+    return v;
+  }
+  if (!v) {
+    return nullptr;
+  }
+  ensureTypeAvailable("String");
+  const ClassInfo* info = findClass("String");
+  if (!info) {
+    return nullptr;
+  }
+  auto fit = info->field_index.find("data_");
+  if (fit == info->field_index.end()) {
+    return nullptr;
+  }
+
+  llvm::Value* base = v;
+  if (v->getType() != ptrTy()) {
+    if (v->getType() != info->type) {
+      return nullptr;
+    }
+    llvm::Function* cur = builder_.GetInsertBlock()->getParent();
+    llvm::AllocaInst* slot = createEntryAlloca(cur, info->type, "streq.tmp");
+    builder_.CreateStore(v, slot);
+    base = slot;
+  }
+  llvm::Value* gep = builder_.CreateStructGEP(info->type, base, fit->second, "streq.data");
+  return builder_.CreateLoad(ptrTy(), gep, "streq.cstr");
+}
+
+// Address of one field slot on `receiver`, following a pointer-typed field once.
+// `field_ty` is the stored LLVM type: it is needed because `CreateLoad` bitcasts
+// the pointer away from the identified struct type in debug (`-g`) builds.
+llvm::Value* Codegen::fieldSlotAddress(const ClassInfo& owner, llvm::Value* receiver,
+                                       size_t field_idx, const std::string& name,
+                                       llvm::Type* field_ty) {
+  llvm::Value* slot = builder_.CreateStructGEP(owner.type, receiver, field_idx, name + ".slot");
+  if (!field_ty->isPointerTy()) {
+    return slot;  // inline struct field: the GEP already addresses it
+  }
+  return builder_.CreateLoad(field_ty, slot, name + ".self");
+}
+
+// Loads a field of the current class through `this` ([property] fallback).
+llvm::Value* Codegen::loadFieldOnThis(const std::string& field_name) {
+  const ClassInfo* info = findClass(current_class_);
+  if (!info) {
+    return nullptr;
+  }
+  auto fit = info->field_index.find(physicalFieldName(field_name));
+  if (fit == info->field_index.end()) {
+    return nullptr;
+  }
+  if (current_method_is_static_ || !current_this_) {
+    error("cannot access instance field '" + field_name + "' from a static method");
+    return nullptr;
+  }
+  llvm::Type* fty = info->type->getElementType(static_cast<unsigned>(fit->second));
+  llvm::Value* gep =
+      builder_.CreateStructGEP(info->type, current_this_, fit->second, field_name);
+  return builder_.CreateLoad(fty, gep, field_name);
+}
+
+// `findMethodAst` returns the AST declaration backing the emitted function.
+const ast::FuncDeclStmt* Codegen::findMethodAst(const ClassInfo& info,
+                                                const std::string& name) const {
+  if (!info.ast) {
+    return nullptr;
+  }
+  for (const auto& m : info.ast->methods) {
+    if (m && m->name == name) {
+      return m.get();
+    }
+  }
+  return nullptr;
+}
+
+// Builds the LLVM argument list for a method call, converting each argument to
+// the parameter type. `first_param_consumed` is 1 when `self` was pushed first.
+bool Codegen::emitMethodArgs(const ast::MethodCallExpr& call,
+                             const ast::FuncDeclStmt* method_ast, const ClassInfo& callee_info,
+                             llvm::Function* target, unsigned first_param_consumed,
+                             std::vector<llvm::Value*>& out) {
+  std::vector<const ast::Expr*> ordered;
+  if (method_ast) {
+    if (!resolveCallArgs(*method_ast, call.args, ordered)) {
+      return false;
+    }
+  } else {
+    for (const ast::CallArg& a : call.args) {
+      if (!a.value) {
+        return false;
+      }
+      ordered.push_back(a.value.get());
+    }
+  }
+
+  const bool is_static = method_ast && method_ast->is_static;
+  unsigned ai = first_param_consumed;
+  for (const ast::Expr* arg : ordered) {
+    llvm::Type* expected = target->getFunctionType()->getParamType(ai);
+    std::string expected_name;
+    const size_t param_i = is_static ? static_cast<size_t>(ai) : static_cast<size_t>(ai - 1);
+    if (method_ast && param_i < method_ast->params.size()) {
+      expected_name = instantiateMemberType(method_ast->params[param_i].type_name, callee_info);
+    }
+    llvm::Value* v = emitValueForParam(*arg, expected, expected_name);
+    if (!v) {
+      return false;
+    }
+    out.push_back(v);
+    ++ai;
+  }
+  return true;
+}
+
+// Emits the call and returns its value (0 for void), or nullptr on error.
+llvm::Value* Codegen::finishMethodCall(llvm::Function* target,
+                                       std::vector<llvm::Value*>& args,
+                                       const std::string& what) {
+  if (target->arg_size() != args.size()) {
+    error("argument count mismatch calling " + what);
+    return nullptr;
+  }
+  if (target->getReturnType()->isVoidTy()) {
+    builder_.CreateCall(target, args);
+    return llvm::ConstantInt::get(i32Ty(), 0);
+  }
+  return builder_.CreateCall(target, args, "mcall");
+}
+
+// `this.field.method(...)` — the receiver lives in one of the enclosing class's
+// fields rather than in a local slot.
+llvm::Value* Codegen::emitMethodCallOnField(const ast::MethodCallExpr& call,
+                                            const std::string& field_name) {
+  const ClassInfo* owner = findClass(current_class_);
+  if (!owner) {
+    return nullptr;
+  }
+  auto fit = owner->field_index.find(physicalFieldName(field_name));
+  if (fit == owner->field_index.end()) {
+    return nullptr;
+  }
+  const size_t fi = fit->second;
+  if (fi >= owner->field_types.size()) {
+    return nullptr;
+  }
+  const std::string field_ty = resolveTypeName(owner->field_types[fi]);
+  if (field_ty.empty() || !isClassType(field_ty)) {
+    return nullptr;
+  }
+  const ClassInfo* callee_info = findClass(field_ty);
+  if (!callee_info) {
+    return nullptr;
+  }
+  auto own = callee_info->methods.find(call.method);
+  if (own == callee_info->methods.end()) {
+    return nullptr;
+  }
+  llvm::Function* target = own->second;
+
+  llvm::Value* field_ptr = fieldSlotAddress(
+      *owner, current_this_, fi, field_name,
+      owner->type->getElementType(static_cast<unsigned>(fi)));
+  const ast::FuncDeclStmt* method_ast = findMethodAst(*callee_info, call.method);
+  const bool is_static = method_ast && method_ast->is_static;
+
+  std::vector<llvm::Value*> call_args;
+  unsigned consumed = 0;
+  if (!is_static) {
+    call_args.push_back(field_ptr);
+    consumed = 1;
+  }
+  if (!emitMethodArgs(call, method_ast, *callee_info, target, consumed, call_args)) {
+    return nullptr;
+  }
+  return finishMethodCall(target, call_args, field_ty + "." + call.method);
+}
+
 llvm::Value* Codegen::emitScopedCall(const ast::ScopedCallExpr& call) {
   const ast::FuncDeclStmt* fn_ast = nullptr;
   auto mit = module_exports_.find(call.module);
