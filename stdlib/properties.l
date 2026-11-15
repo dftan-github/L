@@ -135,6 +135,20 @@ pub class CPropertys {
         l_store_i32_at(block, 0, 0)
     }
 
+    // --- container kind ---------------------------------------------------
+    // A payload-less node is otherwise indistinguishable: an empty object, an
+    // empty array and JSON null all have no payload and no properties. The
+    // (unused while payload-less) type_tag slot records which one it is.
+    // 0 = plain / null, 1 = object, 2 = array.
+
+    pub fun set_kind(i32 kind) {
+        l_store_i32_at(block, 4, kind)
+    }
+
+    pub fun get_kind() -> i32 {
+        return l_load_i32_at(block, 4)
+    }
+
     pub fun get_val() -> Optional<Variant> {
         if l_load_i32_at(block, 0) == 0 {
             return Optional<Variant>()

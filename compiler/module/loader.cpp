@@ -96,7 +96,7 @@ struct Loader {
   // stdlib module that uses `Array<String>` / `Map<V>` before the module is
   // parsed, and `<` would otherwise lex as a comparison operator.
   std::vector<std::string> known_classes = {"String", "Array", "Optional", "Map",
-                                            "Variant", "CPropertys"};
+                                            "Result", "Variant", "CPropertys"};
   std::vector<std::string> known_interfaces;
 
   // Resolve import path relative to import_base and package search paths.

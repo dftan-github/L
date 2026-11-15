@@ -803,7 +803,7 @@ def test_control_flow_e2e!
   out, err, st = Open3.capture3(exe.to_s)
   assert!(st.success?, "control_flow.exe exited #{st.exitstatus}\n#{err}")
   normalized = out.gsub("\r\n", "\n")
-  assert!(normalized == "999\n", "expected \"999\\n\", got #{normalized.inspect}")
+  assert!(normalized == "999\n888\n", "expected \"999\\n888\\n\", got #{normalized.inspect}")
 
   puts "  OK control_flow e2e"
 end
@@ -1562,18 +1562,23 @@ def test_json_e2e!
   FileUtils.mkdir_p(OUT_DIR)
   exe = OUT_DIR.join("json_test.exe")
   FileUtils.rm_f(exe)
+  # `json.l` is self-contained: it imports memory/io/array/string/optional/map/
+  # variant/result/properties, so listing them here would load each twice.
   stdout, stderr, status = run_compiler(
     "-o", exe.to_s,
-    *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_RESULT, STDLIB_MAP, STDLIB_JSON, JSON_TEST)
+    *with_runtime(STDLIB_JSON, JSON_TEST)
   )
   assert!(status.success?, "compile json_test failed\n#{stderr}\n#{stdout}")
   out, err, st = Open3.capture3(exe.to_s)
   assert!(st.success?, "json_test exited #{st.exitstatus}\n#{err}\n#{out}")
   n = out.gsub("\r\n", "\n")
-  assert!(n.include?("L"), "expected name L, got #{n.inspect}")
-  assert!(n.include?("42"), "expected 42, got #{n.inspect}")
+  assert!(n.include?("ok nested3"), "expected 3-level nesting round-trip, got #{n.inspect}")
+  assert!(n.include?("ok array_order"), "expected array order preserved, got #{n.inspect}")
+  assert!(n.include?("ok empty_object"), "expected {} to survive, got #{n.inspect}")
+  assert!(n.include?("ok tree_access"), "expected typed tree access, got #{n.inspect}")
+  assert!(n.include?("ok err_trailing"), "expected invalid input rejected, got #{n.inspect}")
   assert!(n.include?("json_ok"), "expected json_ok, got #{n.inspect}")
-  puts "  OK json e2e (parse flat object + stringify)"
+  puts "  OK json e2e (nested parse + round-trip stringify)"
 end
 
 def test_join_e2e!
@@ -1600,10 +1605,8 @@ def test_log_config_e2e!
   FileUtils.rm_f(exe)
   stdout, stderr, status = run_compiler(
     "-o", exe.to_s,
-    *with_runtime(
-      STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_RESULT, STDLIB_MAP, STDLIB_FILE, STDLIB_PATH,
-      STDLIB_FS, STDLIB_TIME, STDLIB_JSON, STDLIB_LOG, STDLIB_CONFIG, LOG_CONFIG_TEST
-    )
+    *with_runtime(STDLIB_FILE, STDLIB_PATH, STDLIB_FS, STDLIB_TIME, STDLIB_LOG,
+                  STDLIB_CONFIG, LOG_CONFIG_TEST)
   )
   assert!(status.success?, "compile log_config_test failed\n#{stderr}\n#{stdout}")
   out, err, st = Open3.capture3(exe.to_s)

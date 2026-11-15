@@ -1528,7 +1528,12 @@ ast::StmtPtr Parser::parseIfStmt() {
   stmt->cond = std::move(cond);
   stmt->then_body = parseBlockBody();
   if (match(ast::TokenType::KwElse)) {
-    stmt->else_body = parseBlockBody();
+    if (check(ast::TokenType::KwIf)) {
+      // `else if` — parse the nested if and carry it as the sole else statement.
+      stmt->else_body.push_back(parseIfStmt());
+    } else {
+      stmt->else_body = parseBlockBody();
+    }
   }
   return stmt;
 }
