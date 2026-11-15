@@ -38,6 +38,7 @@ COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_b
 PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
 STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
 TREE_TEST = ROOT.join("tests", "cases", "property_tree_test.l")
+TYPED_CONFIG_TEST = ROOT.join("tests", "cases", "typed_cfg.l")
 HTTP_PARSE_TEST = ROOT.join("tests", "cases", "http_parse_test.l")
 BREAK_CONTINUE_TEST = ROOT.join("tests", "cases", "break_continue_test.l")
 BREAK_OUTSIDE_LOOP_BAD = ROOT.join("tests", "cases", "break_outside_loop_bad.l")
@@ -3188,6 +3189,43 @@ def test_property_tree_e2e!
   puts "  OK property tree e2e (recursive CPropertys, ?. chaining + 9 edge cases)"
 end
 
+# Three-level typed config DSL: App → Server → Database. Verifies that every
+# nested `name { ... }` block rebinds `this` to its own field type (bare
+# `port = 5432` must land on Database.port, never on the root), plus the
+# adversarial edges: untouched fields, independent roots, repeated sections,
+# empty section bodies, and root fields assigned after sections.
+def test_typed_config_e2e!
+  assert!(File.exist?(TYPED_CONFIG_TEST), "typed_config_test case not found: #{TYPED_CONFIG_TEST}")
+
+  files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VARIANT,
+                       STDLIB_PROPERTIES, TYPED_CONFIG_TEST)
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("typed_config_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile typed_config_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "typed_config_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "typed_config_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "5432\n127.0.0.1\nsvc\n0\n0\n1\n5432\n8\n0\nroot\nsrv\nh\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  # Root fields must be embedded by value, so no heap indirection is introduced.
+  ir, ir_err, ir_st = run_compiler("--emit-llvm", *files)
+  assert!(ir_st.success?, "emit-llvm typed_config_test failed (#{ir_st.exitstatus})\n#{ir_err}\n#{ir}")
+  assert!(ir.include?("%App = type { %Server, %string_String }"),
+          "App should embed Server by value\n#{ir}")
+  assert!(ir.include?("%Server = type { %Database, %string_String }"),
+          "Server should embed Database by value\n#{ir}")
+
+  puts "  OK typed config e2e (3-level App→Server→Database, section rebinding + 5 edge cases)"
+end
+
 # Minimal HTTP response parser: status code + CPropertys headers, pure string
 # processing (no sockets). Covers the adversarial edges: empty response, missing
 # CRLF, absent header, repeated header, ':' inside a value.
@@ -4274,6 +4312,7 @@ def main
     test_coalesce_non_optional_bad!
     test_properties_e2e!
     test_property_tree_e2e!
+    test_typed_config_e2e!
     test_http_parse_e2e!
     test_break_continue_e2e!
     test_break_outside_loop_rejected!
