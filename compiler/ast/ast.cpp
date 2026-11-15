@@ -168,6 +168,14 @@ void CallExpr::dump(std::ostream& out, int indent) const {
   }
 }
 
+void ScopedCallExpr::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "ScopedCallExpr " << module << "::" << callee << " [" << args.size() << "]\n";
+  for (const CallArg& arg : args) {
+    arg.dump(out, indent + 1);
+  }
+}
+
 void MemberAccessExpr::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "MemberAccessExpr ." << member << '\n';

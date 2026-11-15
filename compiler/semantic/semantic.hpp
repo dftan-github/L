@@ -80,6 +80,11 @@ private:
   std::unordered_map<std::string, const ast::FuncDeclStmt*> generic_funcs_;
   // Free functions (incl. extern) — bare name usable as callback / fun(...) value.
   std::unordered_map<std::string, const ast::FuncDeclStmt*> free_funcs_;
+  // Cross-module symbol tables: module stem → (exported name → decl).
+  // Only `pub` declarations are registered here; that is what makes
+  // `mod::fn()` resolvable and what makes `mod::private_fn()` an error.
+  std::unordered_map<std::string, std::unordered_map<std::string, const ast::FuncDeclStmt*>>
+      module_exports_;
   // Interface declarations (name → AST).
   std::unordered_map<std::string, const ast::InterfaceDeclStmt*> interfaces_;
   // Active generic type params inside a template body: T → IPrintable (may be empty).

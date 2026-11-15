@@ -80,6 +80,7 @@ enum class TokenType {
   Arrow,         // ->
   FatArrow,      // =>
   Colon,         // :
+  ColonColon,    // :: (module scope resolution: `mod::fn()`)
   Semicolon,     // ;
   Comma,         // ,
   Dot,           // .

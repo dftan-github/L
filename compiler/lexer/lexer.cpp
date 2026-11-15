@@ -637,6 +637,10 @@ ast::Token Lexer::lexPunctuation() {
     case '=':
       return makeToken(ast::TokenType::Equal, "=", start);
     case ':':
+      if (n == ':') {
+        advance();
+        return makeToken(ast::TokenType::ColonColon, "::", start);
+      }
       return makeToken(ast::TokenType::Colon, ":", start);
     case ';':
       return makeToken(ast::TokenType::Semicolon, ";", start);

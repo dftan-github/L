@@ -1,4 +1,4 @@
-﻿#include "semantic/semantic.hpp"
+#include "semantic/semantic.hpp"
 
 namespace l::semantic {
 
@@ -283,9 +283,28 @@ void Analyzer::checkExpr(ast::Expr& expr) {
       }
       break;
     }
+    case ast::ExprKind::ScopedCall: {
+      // `mod::fn(...)` — the callee must exist in `mod` AND be declared `pub`.
+      auto& sc = static_cast<ast::ScopedCallExpr&>(expr);
+      for (ast::CallArg& a : sc.args) {
+        if (a.value) {
+          checkExpr(*a.value);
+        }
+      }
+      auto mit = module_exports_.find(sc.module);
+      if (mit == module_exports_.end()) {
+        error(sc.loc, "unknown module '" + sc.module + "' in '" + sc.module + "::" +
+                          sc.callee + "'");
+        break;
+      }
+      if (mit->second.find(sc.callee) == mit->second.end()) {
+        error(sc.loc, "'" + sc.callee + "' is not a pub function of module '" +
+                          sc.module + "'");
+      }
+      break;
+    }
     case ast::ExprKind::Coalesce: {
-      auto& co = static_cast<ast::CoalesceExpr&>(expr);
-      if (co.left) checkExpr(*co.left);
+      auto& co = static_cast<ast::CoalesceExpr&>(expr);      if (co.left) checkExpr(*co.left);
       if (co.right) checkExpr(*co.right);
       // Type rule: left must be Optional<T>; right must be T ([coalesce]).
       // An unresolved left type (e.g. delegate-promoted `this.get(k)`) is left to
@@ -736,15 +755,22 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
     case ast::StmtKind::ClassDecl: {
       auto& cls = static_cast<ast::ClassDeclStmt&>(stmt);
       auto saved_fields = current_fields_;
+      auto saved_constraints = active_generic_constraints_;
       current_fields_.clear();
       for (const auto& field : cls.fields) {
         if (field) {
           current_fields_.insert(field->name);
         }
       }
+      // Class-level generics (`Array<T>`'s `T`) are in scope inside every method,
+      // so `T tmp = data[i]` type-checks like any other declared type.
+      for (const ast::GenericParam& gp : cls.generics) {
+        active_generic_constraints_[gp.name] = gp.constraint;
+      }
       for (auto& method : cls.methods) {
         if (method) checkStmt(*method);
       }
+      active_generic_constraints_ = std::move(saved_constraints);
       current_fields_ = std::move(saved_fields);
       break;
     }
@@ -1035,6 +1061,20 @@ std::string Analyzer::inferExprType(const ast::Expr& expr) const {
         return "Optional<" + ret + ">";
       }
       return methodReturnTypeOn(recv_ty, call.method);
+    }
+    case ast::ExprKind::ScopedCall: {
+      // Return type comes from the target module's exported declaration.
+      const auto& sc = static_cast<const ast::ScopedCallExpr&>(expr);
+      auto mit = module_exports_.find(sc.module);
+      if (mit == module_exports_.end()) {
+        return {};
+      }
+      auto fit = mit->second.find(sc.callee);
+      if (fit == mit->second.end() || !fit->second) {
+        return {};
+      }
+      return fit->second->return_type.empty() ? std::string("void")
+                                             : fit->second->return_type;
     }
     case ast::ExprKind::Coalesce: {      const auto& co = static_cast<const ast::CoalesceExpr&>(expr);
       if (co.left) {
@@ -1397,6 +1437,7 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
   interfaces_.clear();
   generic_funcs_.clear();
   free_funcs_.clear();
+  module_exports_.clear();
   active_generic_constraints_.clear();
   imported_modules_.clear();
   readonly_names_.clear();
@@ -1436,6 +1477,10 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
         if (!fn.generics.empty()) {
           generic_funcs_[fn.name] = &fn;
         }
+        // Cross-module visibility: only `pub` free functions are exported.
+        if (fn.is_pub && !fn.module_name.empty()) {
+          module_exports_[fn.module_name][fn.name] = &fn;
+        }
       }
     } else if (stmt->kind() == ast::StmtKind::ExternModule) {
       const auto& ext = static_cast<const ast::ExternModuleStmt&>(*stmt);
@@ -1467,6 +1512,7 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
   interfaces_.clear();
   generic_funcs_.clear();
   free_funcs_.clear();
+  module_exports_.clear();
   active_generic_constraints_.clear();
   imported_modules_.clear();
   diags_ = nullptr;

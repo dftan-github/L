@@ -35,6 +35,7 @@ enum class ExprKind {
   Spawn,  // spawn { ... } → ptr thread handle
   AddrOf,  // &expr → ptr (address of lvalue)
   Match,   // match expr { some(v) => ..., none => ... } — value-producing
+  ScopedCall,  // mod::fn(args) — module-qualified call
 };
 
 enum class StmtKind {
@@ -143,9 +144,23 @@ struct CallExpr : Expr {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
+// `module::fn(args)` — a call whose callee is resolved in another module's
+// exported (`pub`) symbol table. The module prefix is kept for the visibility
+// check; codegen lowers it to the same IR name a plain `fn()` would use.
+struct ScopedCallExpr : Expr {
+  std::string module;
+  std::string callee;
+  std::vector<CallArg> args;
+  ExprKind kind() const override { return ExprKind::ScopedCall; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
 struct MemberAccessExpr : Expr {
   ExprPtr object;
   std::string member;
+  // `obj?.field` — when `object` is an empty Optional<T>, the whole access yields
+  // an empty Optional<FieldType> instead of dereferencing the payload.
+  bool is_safe = false;
   ExprKind kind() const override { return ExprKind::MemberAccess; }
   void dump(std::ostream& out, int indent = 0) const override;
 };

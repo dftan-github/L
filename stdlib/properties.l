@@ -249,8 +249,7 @@ pub class CPropertys {
         pad := indent(depth)
         v := get_val()
         if v.is_some() {
-            line := pad + "= " + describe(v.unwrap())
-            print(line + "\n")
+            print(pad + "= " + describe(v.unwrap()) + "\n")
         } else {
             print(pad + "(empty)\n")
         }

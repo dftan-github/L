@@ -1,4 +1,4 @@
-﻿//这里面包含114个例子
+//这里面包含114个例子
 
 //------------------------------------------------
 // examples/config_parser.l
@@ -168,14 +168,14 @@ fun handle_http_client(i32 cfd, Map<String> routes) -> i32 {
     path := request_path(line)
 
     body_opt := routes.get(path)
+    // One send path: the 404 case is just the fallback body + status.
+    body := body_opt ?? String("Not Found")
+    status := String("HTTP/1.1 404 Not Found")
     if body_opt.is_some() {
-        body := body_opt.unwrap()
-        resp := make_response(String("HTTP/1.1 200 OK"), body)
-        l_socket_send(cfd, resp.c_str(), resp.length())
-    } else {
-        resp404 := make_response(String("HTTP/1.1 404 Not Found"), String("Not Found"))
-        l_socket_send(cfd, resp404.c_str(), resp404.length())
+        status = String("HTTP/1.1 200 OK")
     }
+    resp := make_response(status, body)
+    l_socket_send(cfd, resp.c_str(), resp.length())
 
     l_socket_close(cfd)
     l_free(buf)
@@ -253,9 +253,9 @@ pub fun tokenize(String src) -> Array<Variant> {
     while i < parts.len() {
         part := parts.get(i)
         if is_number_token(part) {
-            tokens.push(Variant.from_i32(part.to_i32()))
+            tokens.push(part.to_i32())
         } else {
-            tokens.push(Variant.from_string(part))
+            tokens.push(part)
         }
         i! = i + 1
     }

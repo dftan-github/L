@@ -717,6 +717,25 @@ alwaysApply: true
 - **Final Copyable Block**: The final `[TIER 1]` and `[TIER 2]` report MUST be wrapped inside ONE single ```text code block (per Rule 102) so the human can copy it.
 - **No Code Dumps**: Never print code you are inserting.
 
+## 108. Extreme Minimalism in L Code Generation
+<!-- id:extreme-minimalism -->
+- **Dogfooding**: When writing `.l` files (stdlib, examples, tests), you MUST use the latest and most concise L syntax available.
+- **No Redundancy**:
+  - Use `?.` for safe chaining (e.g., `obj?.child?.get()`).
+  - Use `??` for default values (e.g., `opt ?? default`).
+  - Use `delegate` for implicit method promotion instead of manual wrappers.
+  - Use implicit boxing (e.g., `set("key", 42)`) instead of `Variant.from_i32(42)`.
+  - Use `match` for Optional unwrapping instead of nested `if val.is_some()`.
+- **Implicit over Explicit**: Rely on type inference (`:=`) and implicit unpacking whenever the context allows.
+
+## 109. Performance-First Architecture
+<!-- id:performance-first -->
+- **Zero-Cost Abstraction**: All language features MUST compile down to zero-overhead machine code. Do not introduce hidden runtime checks (except for bounds checks in debug mode).
+- **Memory Allocation**: Never hide heap allocations (e.g., `malloc`) inside getters, setters, or implicit conversions. Use `Arena` for bulk allocation and `defer`/`auto-free` for cleanup.
+- **Pass by Reference**: Classes, Structs, Arrays, and Strings MUST be passed by reference (pointer), never deep-copied, unless explicitly calling `.clone()`.
+- **Explicit Over Implicit**: Do not add runtime reflection, dynamic dispatch lookups, or hidden string formatting in hot paths. 
+- **Data Layout**: Optimize struct layout to minimize CPU cache misses; pack fields tightly when generating LLVM `StructType`.
+
 
 ## 999. AI Collaboration Discipline (CRITICAL)
 <!-- id:ai-discipline -->

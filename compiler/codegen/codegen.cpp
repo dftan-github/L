@@ -921,7 +921,13 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
       if (!access.object) {
         return {};
       }
-      const std::string obj_ty = exprTypeOf(*access.object);
+      std::string obj_ty = exprTypeOf(*access.object);
+      // `obj?.field` yields Optional<field> (flattened when the field is already
+      // an Optional), so later links in the chain see the right receiver type.
+      const bool safe = access.is_safe && obj_ty.rfind("Optional<", 0) == 0;
+      if (safe) {
+        obj_ty = obj_ty.substr(9, obj_ty.size() - 10);
+      }
       if (!isClassType(obj_ty)) {
         return {};
       }
@@ -930,22 +936,27 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
         return {};
       }
       const PropResolve pr = resolveProperty(*info, access.member, PropAccess::Read);
+      std::string field_ty;
       if (pr.kind == PropResolveKind::Method && info->ast) {
         for (const auto& m : info->ast->methods) {
           if (m && m->name == pr.method_name) {
-            return instantiateMemberType(m->return_type, *info);
+            field_ty = instantiateMemberType(m->return_type, *info);
+            break;
           }
         }
+      } else if (pr.kind == PropResolveKind::Field) {
+        auto fit = info->field_index.find(pr.field_name);
+        if (fit != info->field_index.end()) {
+          field_ty = info->field_types[fit->second];
+        }
+      }
+      if (field_ty.empty()) {
         return {};
       }
-      if (pr.kind == PropResolveKind::Field) {
-        auto fit = info->field_index.find(pr.field_name);
-        if (fit == info->field_index.end()) {
-          return {};
-        }
-        return info->field_types[fit->second];
+      if (!safe || field_ty.rfind("Optional<", 0) == 0) {
+        return field_ty;
       }
-      return {};
+      return "Optional<" + field_ty + ">";
     }
     case ast::ExprKind::Try: {
       const auto& try_expr = static_cast<const ast::TryExpr&>(expr);
@@ -962,6 +973,17 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {  switch (expr.kin
     }
     case ast::ExprKind::Spawn:
       return "ptr";
+    case ast::ExprKind::ScopedCall: {
+      const auto& sc = static_cast<const ast::ScopedCallExpr&>(expr);
+      auto mit = module_exports_.find(sc.module);
+      if (mit != module_exports_.end()) {
+        auto fit = mit->second.find(sc.callee);
+        if (fit != mit->second.end() && fit->second) {
+          return resolveTypeName(fit->second->return_type);
+        }
+      }
+      return {};
+    }
     case ast::ExprKind::IncDec:
       return "i32";
     default:
@@ -2544,6 +2566,11 @@ bool Codegen::emit(const ast::Module& module) {
     const std::string ir_name = mangleName(fn.module_name, fn.name, fn.is_pub);
     if (fn.is_pub || fn.name == "main") {
       public_funcs_[fn.name] = ir_name;
+      // Cross-module: only `pub` functions enter a module's export table, so
+      // `mod::private_fn()` cannot be resolved (the semantic pass rejects it).
+      if (fn.is_pub && !fn.module_name.empty()) {
+        module_exports_[fn.module_name][fn.name] = &fn;
+      }
     } else {
       private_funcs_[fn.module_name + "::" + fn.name] = ir_name;
     }
@@ -3548,6 +3575,13 @@ void Codegen::collectSpawnCaptures(const ast::Expr& expr, std::vector<std::strin
       const auto& m = static_cast<const ast::MethodCallExpr&>(expr);
       if (m.object) collectSpawnCaptures(*m.object, out, seen, body_locals);
       for (const ast::CallArg& a : m.args) {
+        if (a.value) collectSpawnCaptures(*a.value, out, seen, body_locals);
+      }
+      break;
+    }
+    case ast::ExprKind::ScopedCall: {
+      const auto& sc = static_cast<const ast::ScopedCallExpr&>(expr);
+      for (const ast::CallArg& a : sc.args) {
         if (a.value) collectSpawnCaptures(*a.value, out, seen, body_locals);
       }
       break;
@@ -7201,6 +7235,177 @@ llvm::Value* Codegen::emitSafeMethodCall(const ast::MethodCallExpr& call) {
   return out;
 }
 
+// `obj?.field` — safe field / property access. Mirrors emitSafeMethodCall:
+// evaluate the receiver once, branch on `has_value_`, and produce
+// `Optional<FieldType>` (flattened when the field is already an Optional).
+llvm::Value* Codegen::emitSafeMemberAccess(const ast::MemberAccessExpr& access) {
+  if (!access.object) {
+    error(access.loc, "member access missing object");
+    return nullptr;
+  }
+  std::string recv_ty = exprTypeOf(*access.object);
+  if (recv_ty.empty()) {
+    recv_ty = inferTypeFromExpr(*access.object);
+  }
+  if (recv_ty.empty()) {
+    error(access.loc, "cannot determine the receiver type of '?.' on '" + access.member + "'");
+    return nullptr;
+  }
+  if (recv_ty.rfind("Optional<", 0) != 0) {
+    // Concrete receiver: `?.` degrades to a plain field access.
+    return emitExpr(access);
+  }
+  const std::string payload = recv_ty.substr(9, recv_ty.size() - 10);
+  if (!ensureTypeAvailable(payload) || !isClassType(payload)) {
+    error(access.loc, "'?.' on '" + recv_ty + "' requires a class payload, got '" + payload + "'");
+    return nullptr;
+  }
+  const ClassInfo* inner_info = findClass(payload);
+  if (!inner_info) {
+    error(access.loc, "unknown class '" + payload + "' in '?.'");
+    return nullptr;
+  }
+  const PropResolve pr = resolveProperty(*inner_info, access.member, PropAccess::Read);
+  std::string field_ty;
+  if (pr.kind == PropResolveKind::Method) {
+    for (const auto& m : inner_info->ast->methods) {
+      if (m && m->name == pr.method_name) {
+        field_ty = instantiateMemberType(m->return_type, *inner_info);
+        break;
+      }
+    }
+  } else if (pr.kind == PropResolveKind::Field) {
+    auto fit = inner_info->field_index.find(pr.field_name);
+    if (fit != inner_info->field_index.end()) {
+      field_ty = inner_info->field_types[fit->second];
+    }
+  }
+  if (field_ty.empty()) {
+    error(access.loc, "unknown property '" + access.member + "' on '" + payload + "'");
+    return nullptr;
+  }
+  // An Optional field stays flat: `opt?.maybe` is Optional<T>, never Optional<Optional<T>>.
+  const bool flatten = field_ty.rfind("Optional<", 0) == 0;
+  const std::string out_ty = flatten ? field_ty : "Optional<" + field_ty + ">";
+  if (!ensureTypeAvailable(out_ty)) {
+    error(access.loc, "cannot specialize " + out_ty);
+    return nullptr;
+  }
+  const ClassInfo* opt_in = findClass(recv_ty);
+  const ClassInfo* opt_out = findClass(out_ty);
+  if (!opt_in || !opt_out) {
+    return nullptr;
+  }
+  auto has_it = opt_in->field_index.find("has_value_");
+  auto val_it = opt_in->field_index.find("value_");
+  auto ohas_it = opt_out->field_index.find("has_value_");
+  auto oval_it = opt_out->field_index.find("value_");
+  if (has_it == opt_in->field_index.end() || val_it == opt_in->field_index.end() ||
+      ohas_it == opt_out->field_index.end() || oval_it == opt_out->field_index.end()) {
+    error(access.loc, "Optional layout missing has_value_/value_");
+    return nullptr;
+  }
+
+  llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+  llvm::AllocaInst* out = createEntryAlloca(fn, opt_out->type, "safe.field.opt");
+  for (size_t i = 0; i < opt_out->field_types.size(); ++i) {
+    llvm::Type* fty = opt_out->type->getElementType(static_cast<unsigned>(i));
+    llvm::Value* gep =
+        builder_.CreateStructGEP(opt_out->type, out, static_cast<unsigned>(i), "safe.field.z");
+    builder_.CreateStore(llvm::Constant::getNullValue(fty), gep);
+  }
+
+  llvm::Value* recv = emitExpr(*access.object);
+  if (!recv) {
+    return nullptr;
+  }
+  if (recv->getType() == opt_in->type->getPointerTo()) {
+    recv = builder_.CreateLoad(opt_in->type, recv, "safe.field.recv");
+  }
+  llvm::Value* recv_has = builder_.CreateExtractValue(
+      recv, static_cast<unsigned>(has_it->second), "safe.field.has");
+
+  llvm::BasicBlock* some_bb = llvm::BasicBlock::Create(globalContext(), "safe.field.some", fn);
+  llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(globalContext(), "safe.field.merge", fn);
+  builder_.CreateCondBr(recv_has, some_bb, merge_bb);
+
+  builder_.SetInsertPoint(some_bb);
+  llvm::Value* inner = builder_.CreateExtractValue(
+      recv, static_cast<unsigned>(val_it->second), "safe.field.inner");
+
+  // Bind the unwrapped payload to a hidden local and re-run the normal property
+  // path (getter / pub-field fallback) against it.
+  llvm::Value* result = nullptr;
+  {
+    const std::string hidden = "__safe_field_recv";
+    llvm::AllocaInst* slot = createEntryAlloca(fn, inner->getType(), hidden);
+    builder_.CreateStore(inner, slot);
+    const auto saved_local = local_types_.find(hidden);
+    const std::string saved_local_ty =
+        (saved_local != local_types_.end()) ? saved_local->second : "";
+    auto saved_nv = named_values_.find(hidden);
+    llvm::AllocaInst* saved_nv_ptr = (saved_nv != named_values_.end())
+                                        ? llvm::dyn_cast<llvm::AllocaInst>(saved_nv->second)
+                                        : nullptr;
+
+    local_types_[hidden] = payload;
+    named_values_[hidden] = slot;
+
+    ast::IdentifierExpr ident;
+    ident.loc = access.loc;
+    ident.name = hidden;
+    ast::MemberAccessExpr plain;
+    plain.loc = access.loc;
+    plain.member = access.member;
+    plain.object = std::make_unique<ast::IdentifierExpr>(ident);
+    plain.is_safe = false;
+    result = emitExpr(plain);
+
+    if (saved_local == local_types_.end()) {
+      local_types_.erase(hidden);
+    } else {
+      local_types_[hidden] = saved_local_ty;
+    }
+    if (saved_nv_ptr) {
+      named_values_[hidden] = saved_nv_ptr;
+    } else {
+      named_values_.erase(hidden);
+    }
+  }
+  if (!result) {
+    return nullptr;
+  }
+  if (flatten) {
+    builder_.CreateStore(result, out);
+    builder_.CreateBr(merge_bb);
+    builder_.SetInsertPoint(merge_bb);
+    return out;
+  }
+
+  // Normalize the payload representation (class handles vs. plain values).
+  llvm::Value* out_val = builder_.CreateStructGEP(
+      opt_out->type, out, static_cast<unsigned>(oval_it->second), "safe.field.out.val");
+  llvm::Type* want = opt_out->type->getElementType(static_cast<unsigned>(oval_it->second));
+  if (result->getType() != want) {
+    if (result->getType()->isPointerTy() && want->isStructTy()) {
+      result = builder_.CreateLoad(want, result, "safe.field.load");
+    } else if (!result->getType()->isPointerTy() && want->isPointerTy()) {
+      llvm::AllocaInst* tmp = createEntryAlloca(fn, result->getType(), "safe.field.box");
+      builder_.CreateStore(result, tmp);
+      result = tmp;
+    }
+  }
+  builder_.CreateStore(result, out_val);
+  llvm::Value* out_has = builder_.CreateStructGEP(
+      opt_out->type, out, static_cast<unsigned>(ohas_it->second), "safe.field.out.has");
+  builder_.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt1Ty(globalContext()), 1),
+                       out_has);
+  builder_.CreateBr(merge_bb);
+
+  builder_.SetInsertPoint(merge_bb);
+  return out;
+}
+
 llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
                                      const ast::Expr* object_override) {
   const ast::Expr* object = object_override ? object_override : call.object.get();
@@ -8313,6 +8518,9 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
     }
     case ast::ExprKind::MemberAccess: {
       const auto& access = static_cast<const ast::MemberAccessExpr&>(expr);
+      if (access.is_safe) {
+        return emitSafeMemberAccess(access);
+      }
       if (!access.object) {
         error("member access missing object");
         return nullptr;
@@ -8386,6 +8594,8 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       return emitAddrOf(static_cast<const ast::AddrOfExpr&>(expr));
     case ast::ExprKind::MethodCall:
       return emitMethodCall(static_cast<const ast::MethodCallExpr&>(expr));
+    case ast::ExprKind::ScopedCall:
+      return emitScopedCall(static_cast<const ast::ScopedCallExpr&>(expr));
     case ast::ExprKind::Index: {
       const auto& ix = static_cast<const ast::IndexExpr&>(expr);
       llvm::Value* ptr = emitIndexLValue(ix);
@@ -8770,6 +8980,101 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
           return is_eq;
         }
         return builder_.CreateNot(is_eq, "strne");
+      }
+
+      // Interface / class-pointer equality: compare the raw pointer(s) instead of
+      // falling through to `toI32`, which only handles integers. A fat pointer
+      // compares equal when BOTH the data pointer and the vtable match.
+      if ((bin.op == "==" || bin.op == "!=") && lhs && rhs &&
+          lhs->getType()->isStructTy()) {
+        llvm::StructType* st = llvm::cast<llvm::StructType>(lhs->getType());
+        if (st == fatPtrTy()) {
+          llvm::Function* cur = builder_.GetInsertBlock()->getParent();
+          auto fieldPtr = [&](llvm::Value* v, unsigned idx) -> llvm::Value* {
+            llvm::AllocaInst* slot = createEntryAlloca(cur, st, "iface.eq.tmp");
+            builder_.CreateStore(v, slot);
+            return builder_.CreateStructGEP(st, slot, idx, "iface.eq.f");
+          };
+          llvm::Value* data_eq = builder_.CreateICmpEQ(
+              builder_.CreateLoad(ptrTy(), fieldPtr(lhs, 0), "iface.eq.a0"),
+              builder_.CreateLoad(ptrTy(), fieldPtr(rhs, 0), "iface.eq.b0"), "iface.eq.d");
+          llvm::Value* vt_eq = builder_.CreateICmpEQ(
+              builder_.CreateLoad(ptrTy(), fieldPtr(lhs, 1), "iface.eq.a1"),
+              builder_.CreateLoad(ptrTy(), fieldPtr(rhs, 1), "iface.eq.b1"), "iface.eq.v");
+          llvm::Value* both = builder_.CreateAnd(data_eq, vt_eq, "iface.eq.both");
+          return bin.op == "==" ? both : builder_.CreateNot(both, "iface.ne");
+        }
+      }
+      if ((bin.op == "==" || bin.op == "!=") && lhs && rhs &&
+          lhs->getType() == ptrTy() && rhs->getType() == ptrTy()) {
+        return bin.op == "==" ? builder_.CreateICmpEQ(lhs, rhs, "ptreq")
+                              : builder_.CreateICmpNE(lhs, rhs, "ptrne");
+      }
+
+      // Class value equality (`Array<Variant>` element etc.). A struct has no
+      // scalar lowering, so the comparison would reach `toI32` and ICE. Reference
+      // identity is the honest semantics here: structs are passed by value, so we
+      // compare the address of the *canonical* object when one is available.
+      // Struct/pointer equality (e.g. `Array<Variant>` element vs a `Variant`
+      // parameter). Structs have no scalar lowering, so these operands would
+      // otherwise reach `toI32` and ICE. Compare structurally when both sides are
+      // the same struct type, and fall back to pointer identity otherwise.
+      if ((bin.op == "==" || bin.op == "!=") && lhs && rhs &&
+          !lhs->getType()->isIntegerTy() && !lhs->getType()->isFloatingPointTy() &&
+          !isNumericType(lt) && !isNumericType(rt) && lt != "String" && rt != "String" &&
+          lt != "ptr" && rt != "ptr") {
+        auto spill = [&](llvm::Value* v) -> llvm::AllocaInst* {
+          llvm::Function* cur = builder_.GetInsertBlock()->getParent();
+          llvm::AllocaInst* slot = createEntryAlloca(cur, v->getType(), "val.eq.tmp");
+          builder_.CreateStore(v, slot);
+          return slot;
+        };
+        auto asAddr = [&](llvm::Value* v) -> llvm::Value* {
+          if (v->getType()->isPointerTy()) {
+            return v;
+          }
+          return spill(v);
+        };
+
+        if (lhs->getType()->isStructTy() && rhs->getType()->isStructTy() &&
+            lhs->getType() == rhs->getType()) {
+          // Field-wise comparison: equal only when every element matches.
+          auto* st = llvm::cast<llvm::StructType>(lhs->getType());
+          llvm::AllocaInst* sa = spill(lhs);
+          llvm::AllocaInst* sb = spill(rhs);
+          llvm::Value* all_eq = llvm::ConstantInt::getTrue(builder_.getContext());
+          for (unsigned i = 0; i < st->getNumElements(); ++i) {
+            llvm::Type* ft = st->getElementType(i);
+            llvm::Value* fa = builder_.CreateStructGEP(st, sa, i, "val.eq.fa");
+            llvm::Value* fb = builder_.CreateStructGEP(st, sb, i, "val.eq.fb");
+            llvm::Value* eq = nullptr;
+            if (ft->isPointerTy()) {
+              eq = builder_.CreateICmpEQ(builder_.CreateLoad(ft, fa, "val.eq.la"),
+                                         builder_.CreateLoad(ft, fb, "val.eq.lb"),
+                                         "val.eq.p");
+            } else if (ft->isIntegerTy()) {
+              eq = builder_.CreateICmpEQ(builder_.CreateLoad(ft, fa, "val.eq.la"),
+                                         builder_.CreateLoad(ft, fb, "val.eq.lb"),
+                                         "val.eq.i");
+            } else if (ft->isFloatingPointTy()) {
+              eq = builder_.CreateFCmpOEQ(builder_.CreateLoad(ft, fa, "val.eq.la"),
+                                          builder_.CreateLoad(ft, fb, "val.eq.lb"),
+                                          "val.eq.f");
+            } else {
+              // Nested aggregate: not comparable element-wise yet; treat as unequal.
+              eq = llvm::ConstantInt::getFalse(builder_.getContext());
+            }
+            all_eq = builder_.CreateAnd(all_eq, eq, "val.eq.all");
+          }
+          return bin.op == "==" ? all_eq : builder_.CreateNot(all_eq, "val.ne.all");
+        }
+
+        llvm::Value* pa = asAddr(lhs);
+        llvm::Value* pb = asAddr(rhs);
+        if (pa && pb) {
+          return bin.op == "==" ? builder_.CreateICmpEQ(pa, pb, "val.eqtmp")
+                                : builder_.CreateICmpNE(pa, pb, "val.netmp");
+        }
       }
 
       // Comparisons: promote numeric operands to a common type.
@@ -9683,6 +9988,62 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     return llvm::ConstantInt::get(i32Ty(), 0);
   }
   return builder_.CreateCall(callee, args, "calltmp");
+}
+
+// `mod::fn(args)` — resolve the callee inside the named module. `pub` symbols
+// keep an unprefixed IR name (see mangleName), so this is just the plain call
+// path with an explicit module-qualified signature lookup.
+llvm::Value* Codegen::emitScopedCall(const ast::ScopedCallExpr& call) {
+  const ast::FuncDeclStmt* fn_ast = nullptr;
+  auto mit = module_exports_.find(call.module);
+  if (mit != module_exports_.end()) {
+    auto fit = mit->second.find(call.callee);
+    if (fit != mit->second.end()) {
+      fn_ast = fit->second;
+    }
+  }
+  if (!fn_ast) {
+    auto cit = concrete_funcs_.find(call.module + "::" + call.callee);
+    if (cit != concrete_funcs_.end()) {
+      fn_ast = cit->second;
+    }
+  }
+  if (!fn_ast) {
+    error(call.loc, "'" + call.callee + "' is not a pub function of module '" +
+                        call.module + "'");
+    return nullptr;
+  }
+
+  const std::string ir_name = resolveFuncIrName(fn_ast->name);
+  llvm::Function* callee =
+      ir_name.empty() ? nullptr : module_->getFunction(ir_name);
+  if (!callee) {
+    error(call.loc, "unknown function: " + call.module + "::" + call.callee);
+    return nullptr;
+  }
+
+  std::vector<const ast::Expr*> ordered;
+  if (!resolveCallArgs(*fn_ast, call.args, ordered)) {
+    return nullptr;
+  }
+  if (callee->arg_size() != ordered.size()) {
+    error(call.loc, "argument count mismatch calling " + call.module + "::" + call.callee);
+    return nullptr;
+  }
+  std::vector<llvm::Value*> args;
+  for (size_t i = 0; i < ordered.size(); ++i) {
+    llvm::Type* expected = callee->getFunctionType()->getParamType(static_cast<unsigned>(i));
+    llvm::Value* v = emitValueForParam(*ordered[i], expected, fn_ast->params[i].type_name);
+    if (!v) {
+      return nullptr;
+    }
+    args.push_back(v);
+  }
+  if (callee->getReturnType()->isVoidTy()) {
+    builder_.CreateCall(callee, args);
+    return llvm::ConstantInt::get(i32Ty(), 0);
+  }
+  return builder_.CreateCall(callee, args, "scoped");
 }
 
 }  // namespace l::codegen

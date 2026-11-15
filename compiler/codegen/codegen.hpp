@@ -229,6 +229,9 @@ private:
                                     const std::vector<std::string>& arg_type_names,
                                     const ast::SourceLocation& call_loc);
   llvm::Value* emitGenericOrPlainCall(const ast::CallExpr& call);
+  // `mod::fn(...)` — resolves through module_exports_ (pub-only) then issues the
+  // same ABI call the unprefixed form would.
+  llvm::Value* emitScopedCall(const ast::ScopedCallExpr& call);
   // Reorder positional+keyword CallArgs to match FuncDecl param order.
   bool resolveCallArgs(const ast::FuncDeclStmt& fn, const std::vector<ast::CallArg>& raw,
                        std::vector<const ast::Expr*>& ordered);
@@ -308,6 +311,9 @@ private:
                               const ast::Expr* object_override = nullptr);
   // `obj?.m(...)` — short-circuits to an empty Optional when the receiver is one.
   llvm::Value* emitSafeMethodCall(const ast::MethodCallExpr& call);
+  // `obj?.field` — short-circuits to an empty Optional<FieldType> when the
+  // receiver Optional is empty, mirroring emitSafeMethodCall's skeleton.
+  llvm::Value* emitSafeMemberAccess(const ast::MemberAccessExpr& access);
 
   void error(const std::string& message);
   void error(const ast::SourceLocation& loc, const std::string& message);
@@ -384,6 +390,9 @@ private:
   // Cross-module symbol tables: short name → LLVM IR name.
   std::unordered_map<std::string, std::string> public_funcs_;
   std::unordered_map<std::string, std::string> private_funcs_;  // "mod::name" → IR
+  // Cross-module exports: module stem → (pub name → declaration).
+  std::unordered_map<std::string, std::unordered_map<std::string, const ast::FuncDeclStmt*>>
+      module_exports_;
   std::string current_module_;
   llvm::StructType* fat_ptr_ty_ = nullptr;
 

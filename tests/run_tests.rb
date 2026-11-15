@@ -67,6 +67,8 @@ MOD_A = ROOT.join("tests", "cases", "mod_a.l")
 ARRAY_TEST = ROOT.join("tests", "cases", "array_test.l")
 ARRAY_SUGAR = ROOT.join("tests", "cases", "array_sugar.l")
 ARRAY_POLY_TEST = ROOT.join("tests", "cases", "array_poly_test.l")
+ARRAY_OPS_TEST = ROOT.join("tests", "cases", "array_ops_test.l")
+SAFE_FIELD_TEST = ROOT.join("tests", "cases", "safe_field_test.l")
 STDLIB_ARRAY = ROOT.join("stdlib", "array.l")
 MATCH_TEST = ROOT.join("tests", "cases", "match_test.l")
 MATCH_EXPR_TEST = ROOT.join("tests", "cases", "match_expr_test.l")
@@ -149,6 +151,7 @@ CALLBACK_TEST = ROOT.join("tests", "cases", "callback_test.l")
 REF_PASS = ROOT.join("tests", "cases", "ref_pass.l")
 REF_BAD = ROOT.join("tests", "cases", "ref_bad.l")
 MAP_TEST = ROOT.join("tests", "cases", "map_test.l")
+MAP_OPS_TEST = ROOT.join("tests", "cases", "map_ops_test.l")
 STDLIB_MAP = ROOT.join("stdlib", "map.l")
 LCMD_L_CALLBACK = ROOT.join("tests", "cases", "lcmd_l_callback.l")
 LCMD_PATH = ROOT.join("tests", "cases", "lcmd_path.l")
@@ -190,6 +193,10 @@ CONFIG_TEST = ROOT.join("tests", "cases", "config_test.l")
 SORT_TEST = ROOT.join("tests", "cases", "sort_test.l")
 NODE_HOOK_OPTIN = ROOT.join("tests", "cases", "node_hook_optin.l")
 NODE_HOOK_OPTIN_OFF = ROOT.join("tests", "cases", "node_hook_optin_off.l")
+MOD_MATH = ROOT.join("tests", "cases", "mod_math.l")
+MOD_SCOPE_OK = ROOT.join("tests", "cases", "mod_scope_ok.l")
+MOD_SCOPE_PRIVATE_BAD = ROOT.join("tests", "cases", "mod_scope_private_bad.l")
+MOD_SCOPE_UNKNOWN_BAD = ROOT.join("tests", "cases", "mod_scope_unknown_bad.l")
 OUT_DIR = ROOT.join("build", "clang-debug", "test_out")
 COMPILER = ENV.fetch(
   "L_COMPILER",
@@ -1963,6 +1970,61 @@ def test_array_poly_e2e!
   puts "  OK array_poly_test e2e (Array<IReader> fat-ptr + dynamic dispatch → 141)"
 end
 
+def test_array_ops_e2e!
+  assert!(File.exist?(ARRAY_OPS_TEST), "array_ops_test case not found: #{ARRAY_OPS_TEST}")
+  assert!(File.exist?(STDLIB_ARRAY), "stdlib array not found: #{STDLIB_ARRAY}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("array_ops_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(STDLIB_ARRAY, ARRAY_OPS_TEST))
+  assert!(status.success?, "compile array_ops_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "array_ops_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "array_ops_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  # Empty pop/index_of/contains, then contains/index_of hits and misses, tail pop,
+  # insert-at-1 + append, remove(2) → 10, out-of-range no-ops, reversed order,
+  # clear keeps the buffer reusable.
+  expected = "-1\nfalse\ntrue\nfalse\n3\n-1\n40\n4\n" \
+             "0\n15\n10\n20\n30\n50\n10\n5\n" \
+             "50\n30\n20\n15\n0\n0\n5\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  puts "  OK array_ops e2e (pop / insert / remove / contains / index_of / reverse / clear)"
+end
+
+def test_safe_field_e2e!
+  assert!(File.exist?(SAFE_FIELD_TEST), "safe_field_test case not found: #{SAFE_FIELD_TEST}")
+  assert!(File.exist?(STDLIB_OPTIONAL), "stdlib optional not found: #{STDLIB_OPTIONAL}")
+  assert!(File.exist?(STDLIB_VARIANT), "stdlib variant not found: #{STDLIB_VARIANT}")
+  assert!(File.exist?(STDLIB_ARRAY), "stdlib array not found: #{STDLIB_ARRAY}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("safe_field_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(STDLIB_STRING, STDLIB_ARRAY, STDLIB_OPTIONAL, STDLIB_VARIANT, SAFE_FIELD_TEST)
+  )
+  assert!(status.success?, "compile safe_field_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "safe_field_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "safe_field_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  # Present receiver exposes the field; empty receiver short-circuits to the
+  # fallback without touching memory; Object?.field stays a flat Optional.
+  # Then implicit Array<Variant> boxing for i32 / String / f64 / bool.
+  expected = "3\n7\n-1\n-1\n7\n4\n42\nhello\n1.5\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  puts "  OK safe_field e2e (obj?.field short-circuit + Array<Variant> implicit boxing)"
+end
+
 def test_match_e2e!
   assert!(File.exist?(MATCH_TEST), "match_test case not found: #{MATCH_TEST}")
 
@@ -3282,6 +3344,48 @@ def test_delegate_private_bad_rejected!
   puts "  OK delegate does not leak private fields"
 end
 
+# `mod::fn()` — module-qualified call over the target module's pub symbol table.
+def test_module_scope_call_e2e!
+  assert!(File.exist?(MOD_SCOPE_OK), "mod_scope_ok not found: #{MOD_SCOPE_OK}")
+  files = with_runtime(MOD_MATH, MOD_SCOPE_OK)
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("mod_scope_ok.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *files)
+  assert!(status.success?,
+          "compile mod_scope_ok failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "mod_scope_ok.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = "5\n43\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+  puts "  OK mod::pub_fn() resolves across modules (2 + 3 = 5)"
+end
+
+def test_module_scope_private_bad_rejected!
+  assert!(File.exist?(MOD_SCOPE_PRIVATE_BAD),
+          "mod_scope_private_bad not found: #{MOD_SCOPE_PRIVATE_BAD}")
+  stdout, stderr, status = run_compiler("--emit-llvm", MOD_MATH, MOD_SCOPE_PRIVATE_BAD)
+  assert!(!status.success?,
+          "mod_scope_private_bad should fail to compile\n#{stdout}\n#{stderr}")
+  combined = "#{stdout}\n#{stderr}"
+  assert!(combined.match?(/\[ERROR\] .+mod_scope_private_bad\.l:\d+:\d+ - .*'secret' is not a pub function of module 'mod_math'/m),
+          "missing located [ERROR] for private cross-module call, got:\n#{combined}")
+  puts "  OK mod::private_fn() is rejected (no pub)"
+end
+
+def test_module_scope_unknown_bad_rejected!
+  assert!(File.exist?(MOD_SCOPE_UNKNOWN_BAD),
+          "mod_scope_unknown_bad not found: #{MOD_SCOPE_UNKNOWN_BAD}")
+  stdout, stderr, status = run_compiler("--emit-llvm", MOD_SCOPE_UNKNOWN_BAD)
+  assert!(!status.success?,
+          "mod_scope_unknown_bad should fail to compile\n#{stdout}\n#{stderr}")
+  combined = "#{stdout}\n#{stderr}"
+  assert!(combined.match?(/\[ERROR\] .+mod_scope_unknown_bad\.l:\d+:\d+ - .*unknown module 'nope'/m),
+          "missing located [ERROR] for unknown module prefix, got:\n#{combined}")
+  puts "  OK unknown module prefix is rejected"
+end
+
 def test_sync_try_release!
   assert!(File.exist?(SYNC_TRY_RELEASE), "sync_try_release not found: #{SYNC_TRY_RELEASE}")
   files = with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_RESULT, SYNC_TRY_RELEASE)
@@ -3913,6 +4017,35 @@ def test_map_e2e!
   puts "  OK map_test e2e (Map<i32> String keys)"
 end
 
+def test_map_ops_e2e!
+  assert!(File.exist?(MAP_OPS_TEST), "map_ops_test case not found: #{MAP_OPS_TEST}")
+  assert!(File.exist?(STDLIB_MAP), "stdlib map not found: #{STDLIB_MAP}")
+  assert!(File.exist?(STDLIB_OPTIONAL), "stdlib optional not found: #{STDLIB_OPTIONAL}")
+  assert!(File.exist?(STDLIB_STRING), "stdlib string not found: #{STDLIB_STRING}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("map_ops_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, MAP_OPS_TEST)
+  )
+  assert!(status.success?, "compile map_ops_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "map_ops_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "map_ops_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  # Temporary-key (String + i32) inserts must stay readable, contains/remove must
+  # leave the probe chain intact, and growth after removal must rehash cleanly.
+  expected = "6\n0\n100\n200\n300\n400\n500\ntrue\nfalse\n6\n333\n" \
+             "4\nfalse\n-1\n100\n-1\n333\n400\n500\n4\n28\n29\n"
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  puts "  OK map_ops e2e (owned keys, contains, remove keeps probe chain)"
+end
+
 def test_ref_bad_readonly!
   assert!(File.exist?(REF_BAD), "ref_bad case not found: #{REF_BAD}")
 
@@ -4093,6 +4226,8 @@ def main
     test_array_e2e!
     test_array_sugar_e2e!
     test_array_poly_e2e!
+    test_array_ops_e2e!
+    test_safe_field_e2e!
     test_match_e2e!
     test_match_expr_e2e!
     test_implicit_boxing_e2e!
@@ -4147,6 +4282,9 @@ def main
     test_chained_call_e2e!
     test_delegate_optional_e2e!
     test_delegate_private_bad_rejected!
+    test_module_scope_call_e2e!
+    test_module_scope_private_bad_rejected!
+    test_module_scope_unknown_bad_rejected!
     test_sync_try_release!
     test_result_e2e!
     test_try_operator_e2e!
@@ -4162,6 +4300,7 @@ def main
     test_ref_pass_e2e!
     test_ref_bad_readonly!
     test_map_e2e!
+    test_map_ops_e2e!
     test_lcmd_l_callback_e2e!
     test_lcmd_path_e2e!
     test_uid_counter_e2e!

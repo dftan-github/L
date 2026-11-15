@@ -43,6 +43,8 @@ L 是一门 **编译型、静态强类型** 的系统语言（LLVM 22）：短�
 | `#error` / 手写静态断言散落 | **`comptime { }`** + `compile_error` / `comptime_assert`（前端剥干净） |
 | YAML 再解析一遍 | **源码即配置** |
 | `null` 到处飞 | 只有 `Optional<T>` / `Result<T,E>` |
+| `if (opt != null) opt.x` 层层剥洋葱 | **`opt?.x`**：空就短路，非空才取；整链结果仍是 `Optional` |
+| `if (v) ... else default` 一遍遍写 | **`opt ?? default`**：缺失取默认，左侧只求值一次 |
 
 更多可运行片段：[`examples/all_samples.l`](examples/all_samples.l)
 
@@ -389,6 +391,22 @@ fun main() -> i32 {
 - 多文件：`l build -o app.exe a.l b.l …` 合成**一个** LLVM Module；`import` 有模块缓存，避免重复解析。  
 - 依赖：`l.toml` 的 `[dependencies]` → 扫 `vendor/<name>/`（`.li` + `lib*.a`）；环依赖直接报错。
 
+**跨模块调用用 `::`**：文件即模块，`mod::fn(args)` 直接点名，不必为防重名而造前缀。
+
+```l
+// math_utils.l
+pub fun add(i32 a, i32 b) -> i32 { return a + b }
+fun helper() -> i32 { return 1 }          // 非 pub
+
+// main.l
+import "math_utils.l"
+print(math_utils::add(2, 3))              // 5
+// math_utils::helper()  → [ERROR] 'helper' is not a pub function of module 'math_utils'
+// nope::add(1, 2)       → [ERROR] unknown module 'nope' in 'nope::add'
+```
+
+只有 `pub` 才能跨模块可见；符号在 IR 里仍扁平为稳定名字，运行时没有额外间接层。
+
 ### 对外导出（C ABI）
 
 ```l
@@ -412,6 +430,36 @@ pub fun counter_destroy(ptr p) { l_free(p) }
 
 **`l doc`**：扫 AST 里的 `pub fun` / `pub class` / `pub interface`，把签名写成 Markdown；声明正上方的 `#` / `//` 注释当作说明（`//LCMD_` 忽略）。适合给 stdlib 或对外 API 出一页可读文档，和 `gen-interface`（给机器看的 `.li`）成对。
 
+### 安全链式访问与默认值（`?.` / `??`）
+
+`Optional` 不该靠 `is_some()` + `unwrap()` 手动剥。两个运算符覆盖绝大多数场景：
+
+```l
+// ?. —— 接收者为空则整条链短路，返回空 Optional
+name := cfg?.get_name() ?? "anonymous"   // 空 → "anonymous"
+len  := cfg?.get_name()?.length() ?? 0   // 任一环为空 → 0
+
+// 字段访问同样安全：空 Optional 不会解引用 payload
+port := cfg?.port ?? 8080
+
+// ?? —— 左侧只求值一次，缺失时取右侧
+label := cache.get(key) ?? compute(key)
+```
+
+规则要点：
+
+| 写法 | 结果类型 | 空接收者时 |
+| --- | --- | --- |
+| `opt?.method()` | `Optional<R>` | 空 `Optional<R>`，不调用 |
+| `opt?.field` | `Optional<F>` | 空 `Optional<F>`，不读内存 |
+| `opt?.maybe`（字段本身是 Optional） | `Optional<T>`（**拍平**） | 空 `Optional<T>` |
+| `opt?.field ?? d` | `F` | `d` |
+
+- **拍平**：`Opt<Opt<T>>` 不会出现；链上 `?.` 层层收敛成单个 `Optional`。
+- **非 Optional 接收者**：`x?.m()` 退化为 `x.m()`，链里可混写。
+- **`??` 的左侧必须是 `Optional<T>`**，非 Optional 直接编译错误，避免拿错类型当默认值铺路。
+- 只有"缺失就该取默认"时才用 `??`；**需要副作用或提前 return 的分支仍写 `if`**，别硬套。
+
 ### 错误与空值纪律
 
 - API 查找 → `Optional<T>`（`Map.get` 等）  
@@ -421,7 +469,7 @@ pub fun counter_destroy(ptr p) { l_free(p) }
 ### 并发与测试习惯
 
 - 共享可变状态：`sync { ... }`；锁次数可用 runtime 计数校验（不只看最终数值）。  
-- 全量：**123 条**自动化用例 — `ruby tests/run_tests.rb`（Lexer→AST→可执行/JIT，含拒绝用例）。  
+- 全量：**147 条**自动化用例 — `ruby tests/run_tests.rb`（Lexer→AST→可执行/JIT，含拒绝用例）。  
 - 性能：`benchmarks/`，固定 `-O3`，**不**并进上述套件。  
 - 探索：`l repl` / `l eval`（ORC JIT，不落临时 exe）。
 
@@ -433,6 +481,51 @@ pub fun counter_destroy(ptr p) { l_free(p) }
 | 返回给 FFI | `as ptr` 前确保移出 auto-free，并提供 `destroy` |
 | 短生命周期批量分配 | `arena`；返回值要拷出池外 |
 | 查泄漏 | `l_get_alloc_count()` |
+
+---
+
+## 容器：`Array<T>` 与 `Map<V>`
+
+两者都是 stdlib 里的 L 代码（不是编译器内建），布局简单、行为可直接读源码。
+
+### `Array<T>`
+
+```l
+arr := [10, 20, 30]          // 字面量
+arr.push(40)
+arr.pop()                    // Optional<i32> → 40
+arr.insert(1, 15)            // 0 越界/越界均安全
+arr.remove(0)                // Optional<i32> → 退回被删元素
+arr.contains(20)             // bool
+arr.index_of(20)             // i32，缺失 → -1
+arr.reverse()                // 原地翻转
+arr.clear()                  // 长度归零，容量保留复用
+```
+
+**越界不崩**：`pop` / `remove` 返回空 `Optional`，`insert` 越界为 no-op。读 `arr[i]` 这类裸指针路径不做检查（与 C 一致）。
+
+### `Map<V>`
+
+`Map` 用开放寻址（连续内存，`l_alloc` 分配），不是链地址法。
+
+```l
+m := Map<i32>()
+m.put("a", 1)
+m.get("a")                   // Optional<i32>
+m.contains("a")              // bool
+m.remove("a")                // 删除并归还探测链
+m.len(); m.keys()
+```
+
+**Key 拷贝语义**：`put` 会把字符串 key **复制一份**存进堆。所以临时表达式可放心用：
+
+```l
+m.put(prefix + "user", 1)    // 临时串随后被 auto-free，map 里的 key 仍有效
+```
+
+**删除的正确性**：开放寻址不能简单清空槽位，否则探测链断裂、后续 key 永久失联。`remove` 用 backward-shift 簇修复，删除后周围元素仍可查。
+
+**收益**：`get` 返回 `Optional<V>`，缺键不会被静默当成 0/空串。
 
 ---
 
@@ -449,6 +542,8 @@ pub fun counter_destroy(ptr p) { l_free(p) }
 **并发** — `spawn` = OS 线程；写 `!` 必须 `sync`；原子 API 可经 `&` 豁免检查。
 
 **错误** — 无异常表；`Result` + `?` 冲刷 defer 后早归。
+
+**Variant 装箱** — 形参声明为 `Variant` 时，`set("k", 42)`、`push("s")` 直接传字面量，编译器自动转 `Variant.from_*`；显式工厂只留给需要写清类型的场合。
 
 **双模式** — 同为编译产物：AOT（`build`/`run`/`--shared`）与 JIT（`repl`/`eval`）。
 

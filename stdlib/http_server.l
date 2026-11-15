@@ -87,17 +87,10 @@ pub fun http_handle_client(i32 cfd, Map<String> routes) -> i32 {
     path := http_request_path(line)
 
     body_opt := routes.get(path)
-    body := String("not found")
+    body := body_opt ?? String("not found")
     status := String("HTTP/1.1 404 Not Found")
     if body_opt.is_some() {
-        // Rebind via fresh locals (avoid mutating typed String slots).
-        ok_body := body_opt.unwrap()
-        ok_status := String("HTTP/1.1 200 OK")
-        resp_ok := http_make_response(ok_status, ok_body)
-        l_socket_send(cfd, resp_ok.c_str(), resp_ok.length())
-        l_free(buf)
-        l_socket_close(cfd)
-        return 0
+        status = String("HTTP/1.1 200 OK")
     }
     resp := http_make_response(status, body)
     l_socket_send(cfd, resp.c_str(), resp.length())

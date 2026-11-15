@@ -561,6 +561,7 @@ ast::ExprPtr Parser::parsePostfix(ast::ExprPtr left) {
       access->loc = field.loc;
       access->object = std::move(left);
       access->member = field.lexeme;
+      access->is_safe = safe;
       left = std::move(access);
       continue;
     }
@@ -956,6 +957,21 @@ ast::ExprPtr Parser::parsePrimaryExpression() {
     std::string type_or_name = name_text;
     if (class_names_.count(name_text) != 0 && check(ast::TokenType::LAngle)) {
       type_or_name = parseTypeArgsSuffix(name_text);
+    }
+
+    if (check(ast::TokenType::ColonColon)) {
+      // `mod::fn(args)` — module-qualified call. Visibility is enforced later by
+      // the semantic pass against the target module's exported symbols.
+      advance();
+      ast::Token field = consume(ast::TokenType::Identifier,
+                                 "expected function name after '::'");
+      auto call = std::make_unique<ast::ScopedCallExpr>();
+      call->loc = name.loc;
+      call->module = name_text;
+      call->callee = field.lexeme;
+      // parseArgList consumes the '(' itself, same as a plain `fn(...)` call.
+      call->args = parseArgList();
+      return call;
     }
 
     if (check(ast::TokenType::LParen)) {
@@ -1994,7 +2010,8 @@ bool Parser::looksLikeTypedDecl() const {
   }
   if (peek().type == ast::TokenType::Identifier &&
       (class_names_.count(peek().lexeme) != 0 ||
-       interface_names_.count(peek().lexeme) != 0)) {
+       interface_names_.count(peek().lexeme) != 0 ||
+       generic_type_names_.count(peek().lexeme) != 0)) {
     std::size_t after_type = 1;
     if (peek(1).type == ast::TokenType::LAngle) {
       after_type = skipGenericArgs(1);
