@@ -36,6 +36,7 @@ DELEGATE_SAME_TYPE_PARTIAL_BAD = ROOT.join("tests", "cases", "delegate_same_type
 COALESCE_TEST = ROOT.join("tests", "cases", "coalesce_test.l")
 COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_bad.l")
 ERGONOMICS_TEST = ROOT.join("tests", "cases", "ergonomics_test.l")
+DROP_TEST = ROOT.join("tests", "cases", "drop_test.l")
 PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
 STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
 TREE_TEST = ROOT.join("tests", "cases", "property_tree_test.l")
@@ -3153,6 +3154,36 @@ def test_ergonomics_e2e!
   puts "  OK ergonomics e2e (Result<bool,E>, else-if chain, bare return)"
 end
 
+def test_drop_e2e!
+  assert!(File.exist?(DROP_TEST), "drop case not found: #{DROP_TEST}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("drop_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status =
+    run_compiler("-o", exe.to_s,
+                 *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, DROP_TEST))
+  assert!(status.success?, "compile drop_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "drop_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "drop_test.exe exited #{st.exitstatus}\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = <<~OUT
+    inside 7
+    drop 7
+    1
+    block 9
+    drop 9
+    2
+    0
+    v
+  OUT
+  assert!(normalized == expected, "expected #{expected.inspect}, got #{normalized.inspect}")
+
+  puts "  OK drop e2e (user drop() hook + Map key/buffer cleanup, 0 leaked allocations)"
+end
+
 def test_coalesce_non_optional_bad!
   assert!(File.exist?(COALESCE_NON_OPTIONAL_BAD), "case not found: #{COALESCE_NON_OPTIONAL_BAD}")
 
@@ -4355,6 +4386,7 @@ def main
     test_optional_e2e!
     test_coalesce_e2e!
     test_ergonomics_e2e!
+    test_drop_e2e!
     test_coalesce_non_optional_bad!
     test_properties_e2e!
     test_property_tree_e2e!

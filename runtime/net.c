@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Heap strings handed to L must use l_alloc so l_free's counter stays balanced. */
+void* l_alloc(size_t size);
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -285,7 +288,7 @@ char* l_resolve_ipv4(const char* host) {
 #endif
   freeaddrinfo(res);
   size_t n = strlen(buf);
-  char* out = (char*)malloc(n + 1);
+  char* out = (char*)l_alloc(n + 1);
   if (out == NULL) {
     return NULL;
   }

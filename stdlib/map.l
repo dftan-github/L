@@ -178,6 +178,23 @@ pub class Map<V> {
         return size
     }
 
+    // Class destructor: releases every owned key string plus the three buffers.
+    // Called by codegen's auto-free path just before `l_free(this)`.
+    pub fun drop() {
+        i32 i = 0
+        while i < capacity {
+            if occupied[i] {
+                l_free(keys[i])
+            }
+            i = i + 1
+        }
+        l_free(keys)
+        l_free(values)
+        l_free(occupied)
+        size = 0
+        capacity = 0
+    }
+
     // Snapshot of keys currently stored (order undefined; copies C strings).
     pub fun keys() -> Array<String> {
         arr := Array<String>()

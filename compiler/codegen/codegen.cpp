@@ -1240,6 +1240,7 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
   auto saved_named = named_values_;
   auto saved_locals = local_types_;
   auto saved_heap = heap_locals_;
+  auto saved_owned_strings = owned_string_locals_;
   auto saved_readonly = readonly_refs_;
   auto saved_defers = defer_scopes_;
   auto saved_autofree = auto_free_scopes_;
@@ -1265,6 +1266,7 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
   named_values_ = std::move(saved_named);
   local_types_ = std::move(saved_locals);
   heap_locals_ = std::move(saved_heap);
+  owned_string_locals_ = std::move(saved_owned_strings);
   readonly_refs_ = std::move(saved_readonly);
   defer_scopes_ = std::move(saved_defers);
   auto_free_scopes_ = std::move(saved_autofree);
@@ -1605,6 +1607,46 @@ bool Codegen::emitLFreeOfLocal(const std::string& name) {
     arena_locals_.erase(name);
     return true;
   }
+  // Drop hook: run the class's `drop()` (if declared) before releasing memory.
+  // The hook sees a valid object, so it can free owned buffers / key strings.
+  if (lit != local_types_.end()) {
+    const ClassInfo* info = findClass(lit->second);
+    if (info) {
+      auto dit = info->methods.find("drop");
+      if (dit != info->methods.end() && dit->second && dit->second->arg_size() >= 1) {
+        builder_.CreateCall(dit->second, {ptr});
+      }
+    }
+  }
+  // A heap String wrapper owns its `data_` only when that C string came from the
+  // heap (l_str_concat / *_to_str). Literal-backed Strings point at static data.
+  // Codegen records the owned set in `owned_string_locals_`.
+  if (lit != local_types_.end() && lit->second == "String" &&
+      owned_string_locals_.count(name) != 0) {
+    const ClassInfo* sinfo = findClass("String");
+    if (sinfo && sinfo->field_index.count("data_") != 0) {
+      llvm::Value* data_gep = builder_.CreateStructGEP(
+          sinfo->type, ptr, sinfo->field_index.at("data_"), name + ".data.ptr");
+      llvm::Value* data = builder_.CreateLoad(ptrTy(), data_gep, name + ".data");
+      llvm::Value* nn = builder_.CreateICmpNE(
+          data, llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy())),
+          name + ".data.nn");
+      llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+      llvm::BasicBlock* free_bb =
+          llvm::BasicBlock::Create(globalContext(), name + ".data.free", fn);
+      llvm::BasicBlock* done_bb =
+          llvm::BasicBlock::Create(globalContext(), name + ".data.done", fn);
+      builder_.CreateCondBr(nn, free_bb, done_bb);
+      builder_.SetInsertPoint(free_bb);
+      llvm::Function* lfree = requireExtern("l_free");
+      if (!lfree) {
+        return false;
+      }
+      builder_.CreateCall(lfree, {data});
+      branchTo(done_bb);
+      builder_.SetInsertPoint(done_bb);
+    }
+  }
   llvm::Function* free_fn = requireExtern("l_free");
   if (!free_fn) {
     return false;
@@ -1753,6 +1795,34 @@ llvm::Value* Codegen::classObjectPtr(const std::string& name) {
       return builder_.CreateLoad(ptrTy(), it->second, name + ".obj");
     }
     return it->second;
+  }
+  // Closure / spawn capture: the ctx slot holds the parent local's address.
+  auto cap = capture_slots_.find(name);
+  if (cap != capture_slots_.end() && current_lambda_ctx_ && current_lambda_ctx_ty_) {
+    llvm::Value* slot = builder_.CreateStructGEP(current_lambda_ctx_ty_, current_lambda_ctx_,
+                                                 cap->second, name + ".cap");
+    if (current_lambda_ctx_by_value_) {
+      auto ty_it = capture_types_.find(name);
+      llvm::Type* cty = llvmTypeForTypeName(
+          ty_it != capture_types_.end() ? ty_it->second : "i32");
+      llvm::Value* val = builder_.CreateLoad(cty, slot, name + ".capval");
+      llvm::AllocaInst* tmp =
+          createEntryAlloca(builder_.GetInsertBlock()->getParent(), cty, name + ".this");
+      builder_.CreateStore(val, tmp);
+      return tmp;
+    }
+    llvm::Value* local_ptr = builder_.CreateLoad(ptrTy(), slot, name + ".ptr");
+    // Heap-promoted locals (drop-capable classes, `heap` / concat results) store
+    // the object pointer in the slot; plain stack locals are the object itself.
+    auto ty_it = capture_types_.find(name);
+    const std::string cap_ty = ty_it != capture_types_.end() ? resolveTypeName(ty_it->second) : "";
+    const ClassInfo* cap_info = cap_ty.empty() ? nullptr : findClass(cap_ty);
+    const bool heap_captured = heap_locals_.count(name) != 0 || arena_locals_.count(name) != 0 ||
+                               (cap_info && cap_info->methods.count("drop") != 0);
+    if (heap_captured) {
+      return builder_.CreateLoad(ptrTy(), local_ptr, name + ".obj");
+    }
+    return local_ptr;
   }
   auto git = global_vars_.find(name);
   if (git != global_vars_.end()) {
@@ -2242,6 +2312,7 @@ bool Codegen::emitMethodBody(const std::string& class_name, const ast::FuncDeclS
   named_values_.clear();
   local_types_.clear();
   heap_locals_.clear();
+  owned_string_locals_.clear();
   arena_locals_.clear();
   readonly_refs_.clear();
   defer_scopes_.clear();
@@ -2390,6 +2461,7 @@ bool Codegen::emit(const ast::Module& module) {
   specialized_funcs_.clear();
   type_subst_.clear();
   heap_locals_.clear();
+  owned_string_locals_.clear();
   arena_locals_.clear();
   readonly_refs_.clear();
   defer_scopes_.clear();
@@ -2873,6 +2945,7 @@ bool Codegen::emitSpecializedFunc(const ast::FuncDeclStmt& tmpl, const std::stri
   auto saved_named = named_values_;
   auto saved_locals = local_types_;
   auto saved_heap = heap_locals_;
+  auto saved_owned_strings = owned_string_locals_;
   auto saved_readonly = readonly_refs_;
   auto saved_defers = defer_scopes_;
   auto saved_autofree = auto_free_scopes_;
@@ -2885,6 +2958,7 @@ bool Codegen::emitSpecializedFunc(const ast::FuncDeclStmt& tmpl, const std::stri
   named_values_.clear();
   local_types_.clear();
   heap_locals_.clear();
+  owned_string_locals_.clear();
   arena_locals_.clear();
   readonly_refs_.clear();
   defer_scopes_.clear();
@@ -2926,6 +3000,7 @@ bool Codegen::emitSpecializedFunc(const ast::FuncDeclStmt& tmpl, const std::stri
   named_values_ = std::move(saved_named);
   local_types_ = std::move(saved_locals);
   heap_locals_ = std::move(saved_heap);
+  owned_string_locals_ = std::move(saved_owned_strings);
   readonly_refs_ = std::move(saved_readonly);
   defer_scopes_ = std::move(saved_defers);
   auto_free_scopes_ = std::move(saved_autofree);
@@ -2993,6 +3068,7 @@ bool Codegen::emitHookBodies(llvm::Function* fn,
   local_types_.clear();
   closure_locals_.clear();
   heap_locals_.clear();
+  owned_string_locals_.clear();
   arena_locals_.clear();
   readonly_refs_.clear();
   defer_scopes_.clear();
@@ -3085,6 +3161,8 @@ bool Codegen::emitLifecycleWrappers(const ast::Module& module) {
     local_types_.clear();
     closure_locals_.clear();
     heap_locals_.clear();
+    owned_string_locals_.clear();
+  owned_string_locals_.clear();
     arena_locals_.clear();
     readonly_refs_.clear();
     defer_scopes_.clear();
@@ -3197,6 +3275,7 @@ bool Codegen::emitFuncDecl(const ast::FuncDeclStmt& fn_ast) {
   fat_closure_locals_.clear();
   fat_closure_ctx_tys_.clear();
   heap_locals_.clear();
+  owned_string_locals_.clear();
   arena_locals_.clear();
   readonly_refs_.clear();
   defer_scopes_.clear();
@@ -3839,6 +3918,7 @@ llvm::Value* Codegen::emitSpawnBody(const std::vector<ast::StmtPtr>& body,
   auto saved_named = named_values_;
   auto saved_locals = local_types_;
   auto saved_heap = heap_locals_;
+  auto saved_owned_strings = owned_string_locals_;
   auto saved_readonly = readonly_refs_;
   auto saved_defers = defer_scopes_;
   auto saved_autofree = auto_free_scopes_;
@@ -3860,6 +3940,7 @@ llvm::Value* Codegen::emitSpawnBody(const std::vector<ast::StmtPtr>& body,
   named_values_.clear();
   local_types_.clear();
   heap_locals_.clear();
+  owned_string_locals_.clear();
   arena_locals_.clear();
   readonly_refs_.clear();
   defer_scopes_.clear();
@@ -3917,6 +3998,7 @@ llvm::Value* Codegen::emitSpawnBody(const std::vector<ast::StmtPtr>& body,
   named_values_ = std::move(saved_named);
   local_types_ = std::move(saved_locals);
   heap_locals_ = std::move(saved_heap);
+  owned_string_locals_ = std::move(saved_owned_strings);
   readonly_refs_ = std::move(saved_readonly);
   defer_scopes_ = std::move(saved_defers);
   auto_free_scopes_ = std::move(saved_autofree);
@@ -4831,6 +4913,9 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
       builder_.CreateStore(heap_ptr, slot);
       named_values_[decl.name] = slot;
       heap_locals_.insert(decl.name);
+      if (type_name == "String") {
+        owned_string_locals_.insert(decl.name);
+      }
       noteAutoFreeLocal(decl.name);
       return true;
     }
@@ -4864,6 +4949,33 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
     llvm::AllocaInst* alloca = createEntryAlloca(fn, info->type, decl.name);
     named_values_[decl.name] = alloca;
     heap_locals_.erase(decl.name);
+    // Drop hook: a class declaring `drop()` owns external resources (buffers,
+    // key strings). Its instances must live on the heap so the auto-free path
+    // runs drop() at scope exit. Drop-free classes stay on the stack (zero cost).
+    const bool needs_drop = info->methods.count("drop") != 0;
+    if (needs_drop && decl.init && decl.init->kind() == ast::ExprKind::New) {
+      const auto& neu = static_cast<const ast::NewExpr&>(*decl.init);
+      if (neu.class_name != type_name) {
+        error("class type mismatch in initialization of " + decl.name);
+        return false;
+      }
+      ensureDataLayout();
+      llvm::Function* alloc_fn = requireExtern("l_alloc");
+      if (!alloc_fn) {
+        return false;
+      }
+      const uint64_t bytes = module_->getDataLayout().getTypeAllocSize(info->type);
+      llvm::Value* raw = builder_.CreateCall(
+          alloc_fn, {llvm::ConstantInt::get(i64Ty(), bytes)}, decl.name + ".heap");
+      if (!initClassAtPtr(raw, *info, neu)) {
+        return false;
+      }
+      named_values_[decl.name] = createEntryAlloca(fn, ptrTy(), decl.name);
+      builder_.CreateStore(raw, named_values_[decl.name]);
+      heap_locals_.insert(decl.name);
+      noteAutoFreeLocal(decl.name);
+      return true;
+    }
     if (decl.init) {
       if (decl.init->kind() == ast::ExprKind::New) {
         const auto& neu = static_cast<const ast::NewExpr&>(*decl.init);
@@ -6610,6 +6722,7 @@ bool Codegen::emitForInRange(const ast::ForInStmt& stmt, const ast::BinaryExpr& 
   auto saved_named = named_values_;
   auto saved_locals = local_types_;
   auto saved_heap = heap_locals_;
+  auto saved_owned_strings = owned_string_locals_;
   named_values_[stmt.item_name] = item_slot;
   local_types_[stmt.item_name] = "i32";
   heap_locals_.erase(stmt.item_name);
@@ -6633,6 +6746,7 @@ bool Codegen::emitForInRange(const ast::ForInStmt& stmt, const ast::BinaryExpr& 
   named_values_ = std::move(saved_named);
   local_types_ = std::move(saved_locals);
   heap_locals_ = std::move(saved_heap);
+  owned_string_locals_ = std::move(saved_owned_strings);
 
   if (!body_ok) {
     return false;
@@ -6750,6 +6864,7 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
   auto saved_named = named_values_;
   auto saved_locals = local_types_;
   auto saved_heap = heap_locals_;
+  auto saved_owned_strings = owned_string_locals_;
   named_values_[stmt.item_name] = item_slot;
   local_types_[stmt.item_name] = elem_ty_name;
   heap_locals_.erase(stmt.item_name);
@@ -6773,6 +6888,7 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
   named_values_ = std::move(saved_named);
   local_types_ = std::move(saved_locals);
   heap_locals_ = std::move(saved_heap);
+  owned_string_locals_ = std::move(saved_owned_strings);
 
   if (!body_ok) {
     return false;
@@ -8802,6 +8918,7 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
   auto saved_named = named_values_;
   auto saved_locals = local_types_;
   auto saved_heap = heap_locals_;
+  auto saved_owned_strings = owned_string_locals_;
   auto saved_readonly = readonly_refs_;
   auto saved_defers = defer_scopes_;
   auto saved_autofree = auto_free_scopes_;
@@ -8821,6 +8938,7 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
   named_values_.clear();
   local_types_.clear();
   heap_locals_.clear();
+  owned_string_locals_.clear();
   arena_locals_.clear();
   readonly_refs_.clear();
   defer_scopes_.clear();
@@ -8879,6 +8997,7 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
   named_values_ = std::move(saved_named);
   local_types_ = std::move(saved_locals);
   heap_locals_ = std::move(saved_heap);
+  owned_string_locals_ = std::move(saved_owned_strings);
   readonly_refs_ = std::move(saved_readonly);
   defer_scopes_ = std::move(saved_defers);
   auto_free_scopes_ = std::move(saved_autofree);
@@ -9956,6 +10075,15 @@ llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expec
   }
 
   if (!expected_type_name.empty() && isClassType(expected_type_name)) {
+    // `classValuePtr` already knows how to reach a captured / heap-local object;
+    // going through emitExpr here would load the struct by value instead.
+    if (expr.kind() == ast::ExprKind::Identifier) {
+      llvm::Value* obj = classValuePtr(expr, expected_type_name);
+      if (!obj) {
+        return nullptr;
+      }
+      return obj;
+    }
     llvm::Value* v = emitExpr(expr);
     if (!v) {
       return nullptr;

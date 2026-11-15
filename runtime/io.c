@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Every heap C string handed to L must go through l_alloc so l_free's
+ * allocation counter (l_get_alloc_count) stays balanced. */
+void* l_alloc(size_t size);
+
 void l_print(const char* text) {
   if (text == NULL) {
     return;
@@ -45,7 +49,7 @@ void l_print_str(const char* s) {
 char* l_read_line(void) {
   size_t cap = 128;
   size_t len = 0;
-  char* buf = (char*)malloc(cap);
+  char* buf = (char*)l_alloc(cap);
   if (buf == NULL) {
     return NULL;
   }
@@ -85,7 +89,7 @@ void* l_int_to_str(int32_t val) {
   if (n < 0) {
     return NULL;
   }
-  char* out = (char*)malloc((size_t)n + 1);
+  char* out = (char*)l_alloc((size_t)n + 1);
   if (out == NULL) {
     return NULL;
   }
@@ -99,7 +103,7 @@ void* l_i64_to_str(int64_t val) {
   if (n < 0) {
     return NULL;
   }
-  char* out = (char*)malloc((size_t)n + 1);
+  char* out = (char*)l_alloc((size_t)n + 1);
   if (out == NULL) {
     return NULL;
   }
@@ -113,7 +117,7 @@ void* l_f64_to_str(double val) {
   if (n < 0) {
     return NULL;
   }
-  char* out = (char*)malloc((size_t)n + 1);
+  char* out = (char*)l_alloc((size_t)n + 1);
   if (out == NULL) {
     return NULL;
   }
@@ -124,7 +128,7 @@ void* l_f64_to_str(double val) {
 void* l_bool_to_str(int32_t val) {
   const char* lit = val ? "true" : "false";
   const size_t n = strlen(lit);
-  char* out = (char*)malloc(n + 1);
+  char* out = (char*)l_alloc(n + 1);
   if (out == NULL) {
     return NULL;
   }
@@ -134,7 +138,7 @@ void* l_bool_to_str(int32_t val) {
 
 /* One-byte C string (e.g. '{'=123) — avoids L string-interpolation of braces. */
 void* l_str_from_byte(int32_t c) {
-  char* out = (char*)malloc(2);
+  char* out = (char*)l_alloc(2);
   if (out == NULL) {
     return NULL;
   }
@@ -153,7 +157,7 @@ void* l_str_concat(const char* s1, const char* s2) {
   }
   const size_t n1 = strlen(s1);
   const size_t n2 = strlen(s2);
-  char* out = (char*)malloc(n1 + n2 + 1);
+  char* out = (char*)l_alloc(n1 + n2 + 1);
   if (out == NULL) {
     return NULL;
   }
@@ -238,7 +242,7 @@ char* l_str_substr(const char* s, int32_t start, int32_t len) {
   if ((size_t)start + (size_t)len > n) {
     len = (int32_t)(n - (size_t)start);
   }
-  char* out = (char*)malloc((size_t)len + 1);
+  char* out = (char*)l_alloc((size_t)len + 1);
   if (out == NULL) {
     return NULL;
   }

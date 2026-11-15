@@ -384,6 +384,8 @@ private:
   llvm::Value* pending_closure_ctx_ = nullptr;
   llvm::StructType* pending_closure_ctx_ty_ = nullptr;
   std::unordered_set<std::string> heap_locals_;  // class locals stored as ptr alloca
+  // Heap String locals whose `data_` C string is owned (from concat / *_to_str).
+  std::unordered_set<std::string> owned_string_locals_;
   // Locals that auto-cleanup via l_arena_free (not l_free).
   std::unordered_set<std::string> arena_locals_;
   // Per-scope names of `heap`-allocated locals still needing auto l_free.

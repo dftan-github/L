@@ -416,7 +416,7 @@ typedef struct LProcessResult {
 static char* read_stream_all(FILE* f) {
   size_t cap = 256;
   size_t len = 0;
-  char* buf = (char*)malloc(cap);
+  char* buf = (char*)l_alloc(cap);
   if (buf == NULL) {
     return NULL;
   }
@@ -451,8 +451,8 @@ void* l_process_run_capture(const char* cmd) {
     return NULL;
   }
   r->exit_code = -1;
-  r->out_stdout = (char*)malloc(1);
-  r->out_stderr = (char*)malloc(1);
+  r->out_stdout = (char*)l_alloc(1);
+  r->out_stderr = (char*)l_alloc(1);
   if (r->out_stdout) {
     r->out_stdout[0] = '\0';
   }
