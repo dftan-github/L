@@ -241,8 +241,8 @@ class App {
 
     // Recursive dump of a subtree, one "path = value" line per leaf.
     pub fun dump(String prefix) {
-        kids := this.children(prefix)
-        for name in kids {
+        names := this.children(prefix)
+        for name in names {
             // Root level must not prepend a leading dot; deeper levels join with one.
             child := name
             if prefix.length() > 0 {

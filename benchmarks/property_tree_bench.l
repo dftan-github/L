@@ -1,4 +1,4 @@
-// Performance smoke: CPropertys (recursive tree, lazy child Map, Variant values).
+﻿// Performance smoke: CPropertys (recursive tree, lazy child Map, Variant values).
 
 fun bench_tree_build() -> i32 {
     // 20_000 nodes: 1 root + 20_000 children, each holding an i32 payload.
@@ -7,10 +7,10 @@ fun bench_tree_build() -> i32 {
     while i < 20000 {
         n := CPropertys()
         n.set_val(Variant.from_i32(i))
-        root.add_child(String.from(i), n)
+        root.add_property(String.from(i), n)
         i! += 1
     }
-    return root.child_count()
+    return root.property_count()
 }
 
 fun bench_tree_lookup() -> i32 {
@@ -20,14 +20,14 @@ fun bench_tree_lookup() -> i32 {
     while i < 20000 {
         n := CPropertys()
         n.set_val(Variant.from_i32(i))
-        root.add_child(String.from(i), n)
+        root.add_property(String.from(i), n)
         i! += 1
     }
     i64 sum! = 0
     i! = 0
     while i < 1000000 {
         key := String.from(i - (i / 20000) * 20000)
-        if root.get_child(key).is_some() {
+        if root.get_property(key).is_some() {
             sum! += 1
         }
         i! += 1
@@ -43,7 +43,7 @@ fun bench_tree_deep() -> i32 {
     while i < 1000 {
         n := CPropertys()
         n.set_val(Variant.from_i32(i))
-        cur.add_child("c", n)
+        cur.add_property("c", n)
         cur = n
         i! += 1
     }

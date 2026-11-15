@@ -1,10 +1,10 @@
-// CPropertys — a recursive tree of dynamically-typed values and named children.
+﻿// CPropertys — a recursive tree of dynamically-typed values and named properties.
 //
 // Both shapes live on one node type:
 //   - tree   : `set_val/get_val` (this node's payload) and
-//              `add_child/get_child` (named children, reference semantics)
+//              `add_property/get_property` (named properties, reference semantics)
 //   - bag    : `set/get/keys/len` — a key/value bag that stores each entry as a
-//              child node, so `set("db.pool.max", v)` + `get("db.pool.max")`
+//              property node, so `set("db.pool.max", v)` + `get("db.pool.max")`
 //              keeps working exactly as the old flat `Map<Variant>` did.
 //
 // NODES HAVE REFERENCE SEMANTICS. A `CPropertys` value is a single heap-block
@@ -16,8 +16,8 @@
 //   off  0 : i32  has_val  (0 = unset)
 //   off  4 : i32  type_tag (Variant tag)
 //   off  8 : ptr  data     (Variant payload cell)
-//   off 16 : ptr  kids     (a `Map<ptr>`: name → child block address)
-//   off 24 : i32  kids_installed (0 = lazily created)
+//   off 16 : ptr  props    (a `Map<ptr>`: name → property block address)
+//   off 24 : i32  props_installed (0 = lazily created)
 //
 // `sizeof(CPropertys)` is one pointer, so the type is finite no matter how
 // deep the tree goes.
@@ -88,8 +88,8 @@ pub class CPropertys {
         l_store_i32_at(b, 4, 0)          // type_tag = 0
         ptr cell = l_alloc(16)
         l_store_ptr_at(b, 8, cell)       // payload cell (stable address)
-        l_store_ptr_at(b, 16, l_null_ptr())  // child index (created lazily)
-        l_store_i32_at(b, 24, 0)         // child index installed flag
+        l_store_ptr_at(b, 16, l_null_ptr())  // property index (created lazily)
+        l_store_i32_at(b, 24, 0)         // property index installed flag
         block = b
     }
 
@@ -106,9 +106,9 @@ pub class CPropertys {
 
     // --- internals --------------------------------------------------------
 
-    // Returns the raw child-index pointer; `Map<ptr>` is only materialized at
+    // Returns the raw property-index pointer; `Map<ptr>` is only materialized at
     // the call site (returning a class by value from a method is not supported).
-    fun kids() -> ptr {
+    fun props() -> ptr {
         if l_load_i32_at(block, 24) == 0 {
             m := heap Map<ptr>()
             ptr mp = m as ptr
@@ -146,13 +146,13 @@ pub class CPropertys {
 
     // --- flat API (name → value, kept from the old bag) --------------------
 
-    // The bag's values live in a lazily created `Map<String, ptr>` child index:
-    // the key is the child name and the child node carries the payload. This is
+    // The bag's values live in a lazily created `Map<String, ptr>` property index:
+    // the key is the property name and the property node carries the payload. This is
     // what lets `set("a.b", v)` / `get("db.pool.max")` keep the dotted-key
-    // semantics call sites relied on, while `add_child`/`get_child` navigate the
-    // same structure as a tree.
+    // semantics call sites relied on, while `add_property`/`get_property`
+    // navigate the same structure as a tree.
     pub fun set(String key, Variant val) {
-        k := kids() as Map<ptr>
+        k := props() as Map<ptr>
         found := k.get(key)
         if found.is_some() {
             n := CPropertys.from_block(found.unwrap())
@@ -165,7 +165,7 @@ pub class CPropertys {
     }
 
     pub fun get(String key) -> Optional<Variant> {
-        k := kids() as Map<ptr>
+        k := props() as Map<ptr>
         found := k.get(key)
         if !found.is_some() {
             return Optional<Variant>()
@@ -175,25 +175,26 @@ pub class CPropertys {
 
     // All stored names (order undefined). Used to enumerate subtrees by prefix.
     pub fun keys() -> Array<String> {
-        return child_keys()
+        return property_keys()
     }
 
     // Number of stored names.
     pub fun len() -> i32 {
-        return child_count()
+        return property_count()
     }
 
-    // --- children ---------------------------------------------------------
+    // --- properties -------------------------------------------------------
 
-    // Inserts or replaces the child stored under `key`. Only the child's block
-    // address is stored, so later mutations through the caller's handle show up.
-    pub fun add_child(String key, CPropertys node) {
-        k := kids() as Map<ptr>
+    // Inserts or replaces the property stored under `key`. Only the node's
+    // block address is stored, so later mutations through the caller's handle
+    // show up.
+    pub fun add_property(String key, CPropertys node) {
+        k := props() as Map<ptr>
         k.put(key, node.block)
     }
 
-    pub fun get_child(String key) -> Optional<CPropertys> {
-        k := kids() as Map<ptr>
+    pub fun get_property(String key) -> Optional<CPropertys> {
+        k := props() as Map<ptr>
         found := k.get(key)
         if !found.is_some() {
             return Optional<CPropertys>()
@@ -201,23 +202,23 @@ pub class CPropertys {
         return Optional<CPropertys>(true, CPropertys.from_block(found.unwrap()))
     }
 
-    pub fun has_child(String key) -> bool {
-        k := kids() as Map<ptr>
+    pub fun has_property(String key) -> bool {
+        k := props() as Map<ptr>
         return k.get(key).is_some()
     }
 
-    pub fun child_count() -> i32 {
-        k := kids() as Map<ptr>
+    pub fun property_count() -> i32 {
+        k := props() as Map<ptr>
         return k.len()
     }
 
-    pub fun child_keys() -> Array<String> {
-        k := kids() as Map<ptr>
+    pub fun property_keys() -> Array<String> {
+        k := props() as Map<ptr>
         return k.keys()
     }
 
     pub fun is_leaf() -> bool {
-        k := kids() as Map<ptr>
+        k := props() as Map<ptr>
         return k.len() == 0
     }
 
@@ -234,7 +235,7 @@ pub class CPropertys {
         i32 i = 0
         while i < parts.len() {
             seg := parts.get(i)
-            nxt := cur.get_child(seg)
+            nxt := cur.get_property(seg)
             if !nxt.is_some() {
                 return Optional<CPropertys>()
             }
@@ -253,15 +254,15 @@ pub class CPropertys {
         } else {
             print(pad + "(empty)\n")
         }
-        names := child_keys()
+        names := property_keys()
         i32 i = 0
         while i < names.len() {
             key := names.get(i)
             idx := pad + key + ":\n"
             print(idx)
-            child := get_child(key).unwrap()
+            node := get_property(key).unwrap()
             nxt_depth := depth + 1
-            child.dump(nxt_depth)
+            node.dump(nxt_depth)
             i = i + 1
         }
     }

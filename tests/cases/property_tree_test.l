@@ -1,22 +1,22 @@
-fun main() -> i32 {
+﻿fun main() -> i32 {
     root := CPropertys()
     node1 := CPropertys()
     node2 := CPropertys()
 
-    root.add_child("n1", node1)
-    node1.add_child("n2", node2)
+    root.add_property("n1", node1)
+    node1.add_property("n2", node2)
     node2.set_val(42)
 
     // 安全调用链 + 默认值：整条链任何一段缺失都不崩，直接落到 ??
-    v := root?.get_child("n1")?.get_child("n2")?.get_val() ?? Variant.from_i32(-1)
+    v := root?.get_property("n1")?.get_property("n2")?.get_val() ?? Variant.from_i32(-1)
     if v.is_i32() {
         print(v.as_i32() ?? -1)          // 输出 42
     }
-    print(root.child_count())            // 输出 1
+    print(root.property_count())            // 输出 1
 
     // ---- 边界 1: 空树 / 未设值 ----
     empty := CPropertys()
-    print(empty.child_count())           // 输出 0
+    print(empty.property_count())           // 输出 0
     if empty.has_value() {
         print("BUG: fresh node has value")
     } else {
@@ -24,7 +24,7 @@ fun main() -> i32 {
     }
 
     // ---- 边界 2: 不存在的 key（?. 链短路） ----
-    missing := root?.get_child("absent")?.get_val() ?? Variant.from_i32(-2)
+    missing := root?.get_property("absent")?.get_val() ?? Variant.from_i32(-2)
     print(missing.as_i32() ?? -2)        // 输出 -2
     if empty.get_val().is_some() {
         print("BUG: absent value reported some")
@@ -35,26 +35,26 @@ fun main() -> i32 {
     // ---- 边界 3: 同 key 重复写入, 后写覆盖前写 ----
     other := CPropertys()
     other.set_val(7)
-    root.add_child("n1", other)
-    print(root.child_count())            // 输出 1
-    print(root?.get_child("n1")?.get_val()?.as_i32() ?? -1) // 输出 7
+    root.add_property("n1", other)
+    print(root.property_count())            // 输出 1
+    print(root?.get_property("n1")?.get_val()?.as_i32() ?? -1) // 输出 7
 
     // ---- 边界 4: 兄弟节点互不干扰 ----
     sibling := CPropertys()
     sibling.set_val(9)
-    root.add_child("n3", sibling)
-    print(root.child_count())            // 输出 2
-    print(root?.get_child("n3")?.get_val()?.as_i32() ?? -1) // 输出 9
-    if root?.get_child("n1")?.has_child("n3") ?? false {
+    root.add_property("n3", sibling)
+    print(root.property_count())            // 输出 2
+    print(root?.get_property("n3")?.get_val()?.as_i32() ?? -1) // 输出 9
+    if root?.get_property("n1")?.has_property("n3") ?? false {
         print("BUG: sibling leaked into n1")
     } else {
         print("siblings-isolated")
     }
 
     // ---- 边界 5: 引用语义 — 先挂子节点, 后改值必须可见 ----
-    root.add_child("late", node2)
+    root.add_property("late", node2)
     node2.set_val(99)
-    print(root?.get_child("late")?.get_val()?.as_i32() ?? -1) // 输出 99
+    print(root?.get_property("late")?.get_val()?.as_i32() ?? -1) // 输出 99
 
     // ---- 边界 6: 叶子判定 ----
     node2.set_val(1)
@@ -82,7 +82,7 @@ fun main() -> i32 {
     print(node2?.get_val()?.as_string() ?? "BUG: tag did not flip") // 输出 hi
 
     // ---- 边界 9: 点分路径穿透 ----
-    if (root?.get_path("n1") ?? empty).has_child("n1") {
+    if (root?.get_path("n1") ?? empty).has_property("n1") {
         print("BUG: path n1 resolved to wrong node")
     } else {
         print("path-found")
