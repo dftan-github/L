@@ -8,6 +8,8 @@
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopAnalysisManager.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DIBuilder.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
@@ -84,6 +86,74 @@ Codegen::Codegen(std::string module_name, diag::DiagnosticEngine* diags)
     : module_(std::make_unique<llvm::Module>(std::move(module_name), globalContext())),
       builder_(globalContext()),
       diags_(diags) {}
+
+// --- Debug info ------------------------------------------------------------
+// Header-only plumbing: DICompileUnit + DISubprogram per function, and a
+// DILocation per statement. `initDebugInfo` runs after emit() when `-g` is set,
+// because codegen only knows the real source file names once it walks the AST.
+
+void Codegen::initDebugInfo(const std::string& module_name) {
+  const std::string file = module_name.empty() ? std::string("<module>") : module_name;
+  di_builder_ = std::make_unique<llvm::DIBuilder>(*module_);
+  di_file_ = di_builder_->createFile(file, file);
+  // Producer/optimization flags are informational; `-g` always implies DWARF.
+  di_cu_ = di_builder_->createCompileUnit(llvm::dwarf::DW_LANG_C99, di_file_, "L", opt_level_ != 0,
+                                          "", 0, "", llvm::DICompileUnit::FullDebug);
+  di_files_.clear();
+  di_files_[file] = di_file_;
+  di_sp_ = nullptr;
+  di_scope_ = nullptr;
+}
+
+void Codegen::finishDebugInfo() {
+  if (!di_builder_) {
+    return;
+  }
+  di_builder_->finalize();
+  di_builder_.reset();
+}
+
+llvm::DIFile* Codegen::debugFile(const std::string& filename) {
+  const std::string key =
+      filename.empty() ? (di_file_->getFilename().str()) : filename;
+  auto it = di_files_.find(key);
+  if (it != di_files_.end()) {
+    return it->second;
+  }
+  llvm::DIFile* f = di_builder_->createFile(key, key);
+  di_files_[key] = f;
+  return f;
+}
+
+llvm::DISubprogram* Codegen::debugSubprogram(llvm::Function* fn, const ast::FuncDeclStmt& decl,
+                                             llvm::DIFile* file) {
+  if (!di_builder_ || !fn) {
+    return nullptr;
+  }
+  const unsigned line = decl.loc.line ? decl.loc.line : 1;
+  llvm::DISubroutineType* st =
+      di_builder_->createSubroutineType(di_builder_->getOrCreateTypeArray({}));
+  llvm::DISubprogram* sp = di_builder_->createFunction(
+      file, decl.name, fn->getName(), file, line, st, line, llvm::DINode::FlagZero,
+      llvm::DISubprogram::SPFlagDefinition | llvm::DISubprogram::SPFlagLocalToUnit);
+  fn->setSubprogram(sp);
+  return sp;
+}
+
+void Codegen::setDebugLoc(const ast::SourceLocation& loc) {
+  if (!di_builder_ || !di_sp_ || loc.line == 0) {
+    return;
+  }
+  llvm::DILocalScope* scope = di_scope_ ? static_cast<llvm::DILocalScope*>(di_scope_) : di_sp_;
+  builder_.SetCurrentDebugLocation(llvm::DILocation::get(
+      module_->getContext(), loc.line, loc.column ? loc.column : 1, scope));
+}
+
+void Codegen::clearDebugLoc() {
+  if (di_builder_) {
+    builder_.SetCurrentDebugLocation(llvm::DebugLoc());
+  }
+}
 
 llvm::Type* Codegen::i32Ty() {
   return llvm::Type::getInt32Ty(globalContext());
@@ -2434,6 +2504,11 @@ bool Codegen::emitClassMethodBodies(const ast::ClassDeclStmt& decl) {
 
 bool Codegen::emit(const ast::Module& module) {
   had_error_ = false;
+  // `-g`: create the compile unit first; every emitted function then attaches a
+  // DISubprogram, and emitObjectFile() finalizes the builder before codegen.
+  if (debug_info_ && !di_builder_) {
+    initDebugInfo(module_->getModuleIdentifier());
+  }
   named_values_.clear();
   local_types_.clear();
   const_values_.clear();
@@ -2809,6 +2884,9 @@ bool Codegen::emitObjectFile(const std::string& object_path) {
   }
 
   module_->setDataLayout(tm->createDataLayout());
+  // `-g`: finalize the compile unit before optimization so the pass pipeline
+  // preserves line tables and the object gets a .debug_info / .pdb record.
+  finishDebugInfo();
   optimizeModule(tm.get());
 
   std::error_code ec;
@@ -2829,6 +2907,11 @@ bool Codegen::emitObjectFile(const std::string& object_path) {
 }
 
 bool Codegen::emitStmt(const ast::Stmt& stmt) {
+  // `-g`: line tables are driven from statement locations (Expr nodes inherit
+  // the enclosing statement's line in the emitted instructions).
+  if (di_builder_) {
+    setDebugLoc(stmt.loc);
+  }
   switch (stmt.kind()) {
     case ast::StmtKind::InterfaceDecl:
     case ast::StmtKind::ClassDecl:
@@ -3286,6 +3369,12 @@ bool Codegen::emitFuncDecl(const ast::FuncDeclStmt& fn_ast) {
   current_fn_name_ = fn_ast.name;
   const bool is_main = (fn_ast.name == "main");
   inject_deinit_on_return_ = is_main && global_deinit_fn_ != nullptr;
+  // Debug info: bind the lexical function + its first DILocation so every
+  // instruction until the next statement carries `fn_ast.loc`.
+  if (di_builder_) {
+    di_sp_ = debugSubprogram(fn, fn_ast, debugFile(fn_ast.loc.filename));
+    setDebugLoc(fn_ast.loc);
+  }
   enterDeferScope();
 
   if (is_main) {

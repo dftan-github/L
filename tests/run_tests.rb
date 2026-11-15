@@ -38,6 +38,7 @@ COALESCE_NON_OPTIONAL_BAD = ROOT.join("tests", "cases", "coalesce_non_optional_b
 ERGONOMICS_TEST = ROOT.join("tests", "cases", "ergonomics_test.l")
 DROP_TEST = ROOT.join("tests", "cases", "drop_test.l")
 INCREMENTAL_TEST = ROOT.join("tests", "cases", "incremental_cache.l")
+DEBUG_INFO_TEST = ROOT.join("tests", "cases", "debug_info_test.l")
 PROPERTIES_TEST = ROOT.join("tests", "cases", "properties_test.l")
 STDLIB_PROPERTIES = ROOT.join("stdlib", "properties.l")
 TREE_TEST = ROOT.join("tests", "cases", "property_tree_test.l")
@@ -3225,6 +3226,41 @@ def test_incremental_cache_e2e!
   puts "  OK incremental cache (hit replays identical object, edit invalidates)"
 end
 
+# `-g`: DWARF line tables. Without the flag the IR must stay debug-free, and
+# with it every emitted function needs a DISubprogram plus per-statement
+# DILocations, and the executable must still behave identically.
+def test_debug_info_e2e!
+  assert!(File.exist?(DEBUG_INFO_TEST), "case not found: #{DEBUG_INFO_TEST}")
+  FileUtils.mkdir_p(OUT_DIR)
+
+  plain_ir, plain_err, plain_st =
+    run_compiler("-O0", "--emit-llvm", *with_runtime(DEBUG_INFO_TEST))
+  assert!(plain_st.success?, "debug-free IR build failed\n#{plain_err}")
+  assert!(!plain_ir.include?("llvm.dbg.cu"), "-g absent but compile unit was emitted")
+  assert!(!plain_ir.include?("DILocation"), "-g absent but DILocations were emitted")
+
+  dbg_ir, dbg_err, dbg_st =
+    run_compiler("-g", "-O0", "--emit-llvm", *with_runtime(DEBUG_INFO_TEST))
+  assert!(dbg_st.success?, "-g IR build failed\n#{dbg_err}")
+  assert!(dbg_ir.include?("llvm.dbg.cu"), "-g did not emit a compile unit")
+  assert!(dbg_ir.include?("!DISubprogram"), "-g did not emit any DISubprogram")
+  assert!(dbg_ir.include?("DILocation"), "-g did not emit any DILocation")
+  # `main` and `add` both get subprograms, and the body carries line numbers.
+  assert!(dbg_ir.scan(/!DISubprogram\(/).size >= 2,
+         "expected subprograms for both functions, got #{dbg_ir.scan(/!DISubprogram\(/).size}")
+  assert!(dbg_ir.include?('DW_LANG'), "-g compile unit has no DWARF language tag")
+
+  exe = OUT_DIR.join("debug_info.exe")
+  FileUtils.rm_f(exe)
+  _o, cerr, cst = run_compiler("-g", "-o", exe.to_s, *with_runtime(DEBUG_INFO_TEST))
+  assert!(cst.success?, "-g link build failed\n#{cerr}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "debug build exited #{st.exitstatus}\n#{err}")
+  assert!(out.strip == "42", "debug build printed #{out.inspect}, expected 42")
+
+  puts "  OK -g debug info (compile unit + subprograms + line locations, same output)"
+end
+
 def test_coalesce_non_optional_bad!
   assert!(File.exist?(COALESCE_NON_OPTIONAL_BAD), "case not found: #{COALESCE_NON_OPTIONAL_BAD}")
 
@@ -4429,6 +4465,7 @@ def main
     test_ergonomics_e2e!
     test_drop_e2e!
     test_incremental_cache_e2e!
+    test_debug_info_e2e!
     test_coalesce_non_optional_bad!
     test_properties_e2e!
     test_property_tree_e2e!

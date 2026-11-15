@@ -77,13 +77,14 @@ fs::path incrementalCacheDir() {
 
 // Empty string when caching is not applicable (in-memory sources).
 std::string buildCacheKey(const std::vector<std::string>& unit_names,
-                          const std::vector<fs::path>& import_paths, bool shared, unsigned opt,
-                          const std::string& compiler_stamp) {
+                          const std::vector<fs::path>& import_paths, bool shared, bool debug,
+                          unsigned opt, const std::string& compiler_stamp) {
   if (unit_names.empty()) {
     return {};
   }
   std::ostringstream os;
-  os << "v1|shared=" << (shared ? 1 : 0) << "|O=" << opt << "|cc=" << compiler_stamp << '\n';
+  os << "v2|shared=" << (shared ? 1 : 0) << "|g=" << (debug ? 1 : 0) << "|O=" << opt
+     << "|cc=" << compiler_stamp << '\n';
   // Import roots decide which stdlib files an `import` resolves to: a key that
   // ignored them could replay a build produced against a different tree.
   for (const fs::path& p : import_paths) {
@@ -447,6 +448,7 @@ int main(int argc, char** argv) {
   bool dump_ast = false;
   bool emit_llvm = false;
   bool emit_obj = false;
+  bool debug_info = false;
   bool shared_lib = false;
   unsigned opt_level = 0;
   std::string output_path;
@@ -493,6 +495,10 @@ int main(int argc, char** argv) {
     }
     if (arg == "--emit-llvm") {
       emit_llvm = true;
+      continue;
+    }
+    if (arg == "-g" || arg == "--debug") {
+      debug_info = true;
       continue;
     }
     if (arg == "--emit-obj") {
@@ -823,7 +829,7 @@ int main(int argc, char** argv) {
                          (emit_obj || emit_llvm || !output_path.empty() || cmd == CliCommand::Build ||
                           cmd == CliCommand::Run);
   const std::string cache_key =
-      cacheable ? buildCacheKey(cache_inputs, import_paths, shared_lib, opt_level,
+      cacheable ? buildCacheKey(cache_inputs, import_paths, shared_lib, debug_info, opt_level,
                                  self_exe.empty() ? std::string() : fileStamp(self_exe))
                 : std::string();
   const fs::path cache_dir = incrementalCacheDir() / (cache_key.empty() ? "miss" : cache_key);
@@ -874,6 +880,7 @@ int main(int argc, char** argv) {
       codegen = std::make_unique<l::codegen::Codegen>(primary_name, &diags);
       codegen->setOptLevel(opt_level);
       codegen->setSharedMode(shared_lib);
+      codegen->setDebugInfo(debug_info);
       (void)codegen->emit(*ast);
     }
 
@@ -899,6 +906,7 @@ int main(int argc, char** argv) {
     }
     std::string ir;
     llvm::raw_string_ostream ros(ir);
+    codegen->finalizeDebugInfo();
     codegen->module().print(ros, nullptr);
     ros.flush();
     llvm::outs() << ir;
@@ -906,6 +914,8 @@ int main(int argc, char** argv) {
       std::error_code ec;
       fs::create_directories(cache_dir, ec);
       if (!fs::exists(cached_obj)) {
+        // Cache the optimized object too, but never let this side-effecting
+        // step clobber the IR we already produced.
         (void)codegen->emitObjectFile(cached_obj.string());
       }
       writeWholeFile(cached_ir, ir);

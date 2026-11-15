@@ -9,6 +9,8 @@
 #include "ast/ast.hpp"
 #include "diagnostic/diagnostic.hpp"
 
+#include "llvm/IR/DIBuilder.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -28,6 +30,9 @@ public:
 
   bool emit(const ast::Module& module);
   bool emitObjectFile(const std::string& object_path);
+  // `-g`: close the compile unit so it is attached to the module. Idempotent;
+  // emitObjectFile() calls it too, so `--emit-llvm` must call it explicitly.
+  void finalizeDebugInfo() { finishDebugInfo(); }
 
   // 0 = -O0 (default), 1..3 map to LLVM OptimizationLevel::O1..O3.
   void setOptLevel(unsigned level) { opt_level_ = level > 3 ? 3 : level; }
@@ -36,6 +41,10 @@ public:
   // `--shared`: export `pub` functions (DLLExport on Windows) and emit PIC objects.
   void setSharedMode(bool shared) { shared_mode_ = shared; }
   bool sharedMode() const { return shared_mode_; }
+
+  // `-g`: attach DWARF/CodeView line tables so debuggers map IR back to .l lines.
+  void setDebugInfo(bool on) { debug_info_ = on; }
+  bool debugInfo() const { return debug_info_; }
 
   llvm::Module& module() { return *module_; }
   const llvm::Module& module() const { return *module_; }
@@ -471,6 +480,26 @@ private:
   bool had_error_ = false;
   unsigned opt_level_ = 0;
   bool shared_mode_ = false;
+
+  // --- Debug info (`-g`) ---------------------------------------------------
+  // One compile unit covers the whole program (L merges every module into a
+  // single LLVM module), plus one DISubprogram per emitted function. Line
+  // tables come from a DILocation set before each statement.
+  bool debug_info_ = false;
+  std::unique_ptr<llvm::DIBuilder> di_builder_;
+  llvm::DICompileUnit* di_cu_ = nullptr;
+  llvm::DIFile* di_file_ = nullptr;
+  std::unordered_map<std::string, llvm::DIFile*> di_files_;
+  llvm::DISubprogram* di_sp_ = nullptr;   // subprogram of the function being emitted
+  llvm::DILexicalBlock* di_scope_ = nullptr;  // innermost debug scope (nullptr → di_sp_)
+  unsigned di_stmt_ = 0;                  // smallest DILocation per DISubprogram
+  void initDebugInfo(const std::string& module_name);
+  void finishDebugInfo();
+  llvm::DIFile* debugFile(const std::string& filename);
+  llvm::DISubprogram* debugSubprogram(llvm::Function* fn, const ast::FuncDeclStmt& decl,
+                                      llvm::DIFile* file);
+  void setDebugLoc(const ast::SourceLocation& loc);
+  void clearDebugLoc();
 };
 
 }  // namespace l::codegen
