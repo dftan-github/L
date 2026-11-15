@@ -77,6 +77,10 @@ private:
   // require `{ |` so `obj.field { .x = 1 }` ([config-syntax]) is not treated as a lambda.
   void attachTrailingBlockIfPresent(std::vector<ast::CallArg>& args,
                                     bool allow_bare_brace = false);
+  // [dsl] Bare `{ ... }` block for registered config-block functions.
+  std::unique_ptr<ast::LambdaExpr> parseConfigBlock();
+  // [dsl] Collect class/interface names before parsing starts.
+  void prescanClassNames();
   bool maybeConsumeStmtSemicolon();
 
   ast::StmtPtr parseConstDecl();
@@ -139,6 +143,11 @@ private:
   std::vector<ast::StmtPtr> pending_injections_;
   // Relative-init bases (`obj { .x = ... }`); leading `.name` binds to the top.
   std::vector<ast::ExprPtr> relative_bases_;
+  // [dsl] Functions declared `pub fun name(fun() body, ...)` — a bare
+  // `{ ... }` after a call to them is a zero-arg config block, not a body.
+  std::unordered_set<std::string> config_block_funcs_;
+  // Nesting depth of config block bodies; bare `name = v` maps to a property.
+  int dsl_block_depth_ = 0;
   // Loop nesting depth: gates `break` / `continue` and drives codegen targets.
   int loop_depth_ = 0;
 };

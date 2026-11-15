@@ -383,9 +383,16 @@ void Analyzer::checkExpr(ast::Expr& expr) {
         error(call.loc, call.callee + "() is only allowed in compile-time context");
         break;
       }
+      // [dsl] A config block's body is checked against its root class, which is
+      // what makes bare `port = 8080` resolve to `Server.port` inside `server { }`.
+      const std::string saved_section = config_section_class_;
+      if (!call.config_type.empty()) {
+        config_section_class_ = call.config_type;
+      }
       for (auto& arg : call.args) {
         if (arg.value) checkExpr(*arg.value);
       }
+      config_section_class_ = saved_section;
       checkGenericCallConstraints(call);
       break;
     }
@@ -749,7 +756,42 @@ void Analyzer::checkStmt(ast::Stmt& stmt) {
     }
     case ast::StmtKind::Block: {
       auto& blk = static_cast<ast::BlockStmt&>(stmt);
+      // [dsl] `server { ... }` in a typed block retargets `this` to the section
+      // type, so bare `port = 8080` is checked against `Server`, not `App`.
+      const std::string saved_section = config_section_class_;
+      auto saved_fields = current_fields_;
+      if (!blk.section_field.empty() && !config_section_class_.empty()) {
+        const std::string owner = config_section_class_;
+        auto cit = classes_.find(owner);
+        if (cit != classes_.end()) {
+          const ast::ClassDeclStmt* cls = cit->second;
+          const ast::FieldDeclStmt* target = nullptr;
+          for (const auto& field : cls->fields) {
+            if (field && field->name == blk.section_field) {
+              target = field.get();
+              break;
+            }
+          }
+          if (!target) {
+            error(blk.loc, "unknown section '" + blk.section_field + "' on '" + owner + "'");
+          } else {
+            auto sub = classes_.find(target->type_name);
+            if (sub == classes_.end()) {
+              error(blk.loc, "section '" + blk.section_field + "' must be a class type, got '" +
+                                 target->type_name + "'");
+            } else {
+              config_section_class_ = target->type_name;
+              current_fields_.clear();
+              for (const auto& field : sub->second->fields) {
+                if (field) current_fields_.insert(field->name);
+              }
+            }
+          }
+        }
+      }
       checkStmtList(blk.stmts);
+      config_section_class_ = saved_section;
+      current_fields_ = std::move(saved_fields);
       break;
     }
     case ast::StmtKind::ClassDecl: {
@@ -1022,6 +1064,10 @@ std::string Analyzer::inferExprType(const ast::Expr& expr) const {
     }
     case ast::ExprKind::Call: {
       const auto& call = static_cast<const ast::CallExpr&>(expr);
+      // [dsl] `cfg := app(type: App) { ... }` — the value is the built root.
+      if (!call.config_type.empty()) {
+        return call.config_type;
+      }
       // Free functions / associated statics (`Variant.from_i32(...)`).
       auto fit = free_funcs_.find(call.callee);
       if (fit == free_funcs_.end() || !fit->second) {

@@ -2776,8 +2776,48 @@ bool Codegen::emitStmt(const ast::Stmt& stmt) {
       return emitReturn(static_cast<const ast::ReturnStmt&>(stmt));
     case ast::StmtKind::ExprStmt:
       return emitExprStmt(static_cast<const ast::ExprStmt&>(stmt));
-    case ast::StmtKind::Block:
-      return emitStmtListScoped(static_cast<const ast::BlockStmt&>(stmt).stmts);
+    case ast::StmtKind::Block: {
+      const auto& blk = static_cast<const ast::BlockStmt&>(stmt);
+      // [dsl] `server { ... }` — rebind `this` to the section receiver.
+      if (!blk.section_field.empty() && current_this_ && !current_class_.empty()) {
+        const ClassInfo* owner = findClass(current_class_);
+        if (!owner) {
+          error(blk.loc, "unknown config class '" + current_class_ + "'");
+          return false;
+        }
+        llvm::Value* section = nullptr;
+        std::string section_ty;
+        if (current_class_ == "CPropertys") {
+          section = emitConfigSectionPtr(blk.section_field, current_class_, blk.loc);
+          section_ty = "CPropertys";
+        } else {
+          const std::string phys = physicalFieldName(blk.section_field);
+          auto fit = owner->field_index.find(phys);
+          if (fit == owner->field_index.end()) {
+            error(blk.loc, "unknown section '" + blk.section_field + "' on '" +
+                               current_class_ + "'");
+            return false;
+          }
+          if (fit->second < owner->field_types.size()) {
+            section_ty = resolveTypeName(owner->field_types[fit->second]);
+          }
+          section = builder_.CreateStructGEP(owner->type, current_this_, fit->second,
+                                             blk.section_field + ".section");
+        }
+        if (!section) {
+          return false;
+        }
+        const std::string saved_class = current_class_;
+        llvm::Value* saved_this = current_this_;
+        current_class_ = section_ty;
+        current_this_ = section;
+        bool ok = emitStmtListScoped(blk.stmts);
+        current_class_ = saved_class;
+        current_this_ = saved_this;
+        return ok;
+      }
+      return emitStmtListScoped(blk.stmts);
+    }
     case ast::StmtKind::If:
       return emitIf(static_cast<const ast::IfStmt&>(stmt));
     case ast::StmtKind::Match:
@@ -4323,6 +4363,15 @@ std::string Codegen::inferTypeFromExpr(const ast::Expr& expr) {
     }
     return {};
   }
+  if (expr.kind() == ast::ExprKind::Call) {
+    // [dsl] A block call's value is the root it built, not the helper's
+    // declared return type — `cfg := app(type: App) { ... }` is an `App`.
+    const auto& call = static_cast<const ast::CallExpr&>(expr);
+    if (!call.config_type.empty() && !call.config_bind_target.empty()) {
+      ensureTypeAvailable(call.config_type);
+      return call.config_type;
+    }
+  }
   if (expr.kind() == ast::ExprKind::MethodCall ||
       expr.kind() == ast::ExprKind::Call ||
       expr.kind() == ast::ExprKind::Index ||
@@ -5520,6 +5569,88 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
   if (!assign.target || !assign.value) {
     error("incomplete assignment");
     return false;
+  }
+
+  // [dsl] Bare `port = 8080` inside a block: on a `CPropertys` root it
+  // lowers to `this.set("port", 8080)`; a typed root resolves the field instead.
+  if (assign.is_dsl_property && current_this_ && !current_class_.empty()) {
+    const auto& access = static_cast<const ast::MemberAccessExpr&>(*assign.target);
+    const ClassInfo* info = findClass(current_class_);
+    if (!info) {
+      error(assign.loc, "unknown config class '" + current_class_ + "'");
+      return false;
+    }
+    // `CPropertys` roots have no typed fields: store name → value.
+    if (current_class_ == "CPropertys") {
+      auto sit = info->methods.find("set");
+      if (sit == info->methods.end()) {
+        error(assign.loc, "CPropertys is missing set()");
+        return false;
+      }
+      llvm::Value* key = makeStringLitObject(access.member, "prop.key");
+      llvm::Value* val = emitValueForParam(
+          *assign.value, sit->second->getFunctionType()->getParamType(2), "Variant");
+      if (!val) {
+        return false;
+      }
+      builder_.CreateCall(sit->second, {current_this_, key, val});
+      return true;
+    }
+    const PropResolve pr = resolveProperty(*info, access.member, PropAccess::Write);
+    if (pr.kind == PropResolveKind::None) {
+      error(access.loc,
+            "unknown property '" + access.member + "' on '" + current_class_ + "'");
+      return false;
+    }
+    // Setter: `this.set_x(value)`.
+    if (pr.kind == PropResolveKind::Method) {
+      auto mit = info->methods.find(pr.method_name);
+      if (mit == info->methods.end()) {
+        error(access.loc, "missing setter " + pr.method_name);
+        return false;
+      }
+      std::string expected_name;
+      if (info->ast) {
+        for (const auto& m : info->ast->methods) {
+          if (m && m->name == pr.method_name && !m->params.empty()) {
+            expected_name = resolveTypeName(m->params[0].type_name);
+            break;
+          }
+        }
+      }
+      llvm::Type* expected = mit->second->getFunctionType()->getParamType(1);
+      llvm::Value* val = emitValueForParam(*assign.value, expected, expected_name);
+      if (!val) {
+        return false;
+      }
+      builder_.CreateCall(mit->second, {current_this_, val});
+      return true;
+    }
+    // Field: `this.<physical> = value`.
+    auto fit = info->field_index.find(pr.field_name);
+    if (fit == info->field_index.end()) {
+      error(access.loc, "missing field " + pr.field_name);
+      return false;
+    }
+    llvm::Value* slot =
+        builder_.CreateStructGEP(info->type, current_this_, fit->second, "prop.slot");
+    std::string field_ty;
+    if (fit->second < info->field_types.size()) {
+      field_ty = resolveTypeName(info->field_types[fit->second]);
+    }
+    llvm::Type* fty = info->type->getElementType(fit->second);
+    llvm::Value* val = emitValueForParam(*assign.value, fty, field_ty);
+    if (!val) {
+      return false;
+    }
+    // Class-typed fields are stored by value: a literal / method result arrives
+    // as a `String*` (or Class*) and must be copied into the field slot.
+    if ((isClassType(field_ty) || field_ty == "String") && val->getType()->isPointerTy() &&
+        fty->isStructTy()) {
+      val = builder_.CreateLoad(fty, val, "prop.copy");
+    }
+    builder_.CreateStore(val, slot);
+    return true;
   }
 
   if (rejectReadonlyMutation(*assign.target, assign.loc)) {
@@ -7406,6 +7537,244 @@ llvm::Value* Codegen::emitSafeMemberAccess(const ast::MemberAccessExpr& access) 
   return out;
 }
 
+llvm::Value* Codegen::emitClassMethodCall(const ast::MethodCallExpr& call,
+                                         const ClassInfo& cinfo, llvm::Value* self_ptr,
+                                         const std::string& class_name) {
+  llvm::Function* callee_fn = nullptr;
+  const ClassInfo* callee_info = &cinfo;
+  llvm::Value* this_ptr = self_ptr;
+
+  auto mit = cinfo.methods.find(call.method);
+  if (mit != cinfo.methods.end()) {
+    callee_fn = mit->second;
+  } else if (cinfo.ast) {
+    struct DelegateHit {
+      std::string type_name;
+      unsigned field_idx = 0;
+      llvm::Function* fn = nullptr;
+      const ClassInfo* emb = nullptr;
+    };
+    std::vector<DelegateHit> hits;
+    for (const auto& field : cinfo.ast->fields) {
+      if (!field || !field->is_delegate) {
+        continue;
+      }
+      if (!ensureTypeAvailable(field->type_name) || !isClassType(field->type_name)) {
+        continue;
+      }
+      const ClassInfo* emb = findClass(field->type_name);
+      if (!emb) {
+        continue;
+      }
+      auto emit = emb->methods.find(call.method);
+      if (emit == emb->methods.end()) {
+        continue;
+      }
+      auto fit = cinfo.field_index.find(physicalFieldName(field->name));
+      if (fit == cinfo.field_index.end()) {
+        error(call.loc, "delegate field layout missing for '" + field->type_name + "'");
+        return nullptr;
+      }
+      hits.push_back(DelegateHit{field->type_name, fit->second, emit->second, emb});
+    }
+    if (hits.size() >= 2) {
+      error(call.loc, "Ambiguous method '" + call.method + "': defined in both '" +
+                          hits[0].type_name + "' and '" + hits[1].type_name + "'.");
+      return nullptr;
+    }
+    if (hits.size() == 1) {
+      this_ptr = builder_.CreateStructGEP(cinfo.type, self_ptr, hits[0].field_idx,
+                                          "delegate." + hits[0].type_name);
+      callee_fn = hits[0].fn;
+      callee_info = hits[0].emb;
+    }
+  }
+  if (!callee_fn) {
+    return nullptr;  // not a method on this class / its delegates
+  }
+
+  std::vector<const ast::Expr*> ordered;
+  const ast::FuncDeclStmt* method_ast = nullptr;
+  if (callee_info->ast) {
+    for (const auto& m : callee_info->ast->methods) {
+      if (m && m->name == call.method) {
+        method_ast = m.get();
+        break;
+      }
+    }
+  }
+  if (method_ast) {
+    if (!resolveCallArgs(*method_ast, call.args, ordered)) {
+      return nullptr;
+    }
+  } else {
+    for (const ast::CallArg& a : call.args) {
+      if (!a.name.empty()) {
+        error("keyword arguments require a known method signature");
+        return nullptr;
+      }
+      if (!a.value) {
+        error("null argument in method call");
+        return nullptr;
+      }
+      ordered.push_back(a.value.get());
+    }
+  }
+
+  const bool is_static = method_ast && method_ast->is_static;
+  std::vector<llvm::Value*> call_args;
+  unsigned ai = 0;
+  if (!is_static) {
+    call_args.push_back(this_ptr);
+    ai = 1;
+  }
+  for (const ast::Expr* arg : ordered) {
+    llvm::Type* expected = callee_fn->getFunctionType()->getParamType(ai);
+    std::string expected_name;
+    const size_t param_i = is_static ? static_cast<size_t>(ai) : static_cast<size_t>(ai - 1);
+    if (method_ast && param_i < method_ast->params.size()) {
+      expected_name =
+          instantiateMemberType(method_ast->params[param_i].type_name, *callee_info);
+    }
+    ++ai;
+    llvm::Value* v = emitValueForParam(*arg, expected, expected_name);
+    if (!v) {
+      return nullptr;
+    }
+    call_args.push_back(v);
+  }
+  if (callee_fn->arg_size() != call_args.size()) {
+    error("argument count mismatch calling " + class_name + "." + call.method);
+    return nullptr;
+  }
+  if (callee_fn->getReturnType()->isVoidTy()) {
+    builder_.CreateCall(callee_fn, call_args);
+    return llvm::ConstantInt::get(i32Ty(), 0);
+  }
+  return builder_.CreateCall(callee_fn, call_args, is_static ? "static.call" : "mcall");
+}
+
+// [dsl] `app { ... }` / `app(type: App) { ... }`.
+// Builds the root object (default `CPropertys`, or the `type:` class), runs the
+// bare-brace block inline with `this` bound to it, then makes the ordinary call
+// so the callee can post-process the finished tree.
+bool Codegen::initConfigSections(const ClassInfo& info, llvm::Value* base, int depth) {
+  // Self-referential config classes would recurse forever; a few levels is all
+  // a hand-written config tree can use (App → Server → Database → ...).
+  if (depth > 8 || !base || !info.type || !info.type->isSized()) {
+    return true;
+  }
+  for (size_t i = 0; i < info.field_types.size(); ++i) {
+    const std::string fty_name = resolveTypeName(info.field_types[i]);
+    if (fty_name.empty() || !isClassType(fty_name)) {
+      continue;
+    }
+    const ClassInfo* finfo = findClass(fty_name);
+    if (!finfo || !finfo->type) {
+      continue;
+    }
+    llvm::Value* slot =
+        builder_.CreateStructGEP(info.type, base, static_cast<unsigned>(i), "config.slot");
+    // The parent was just zero-filled; hand the child a zeroed slot and let the
+    // user's `init()` (if any, no extra args) run: `this` is already live.
+    builder_.CreateStore(llvm::Constant::getNullValue(finfo->type), slot);
+    auto init_it = finfo->methods.find("init");
+    if (init_it != finfo->methods.end() && init_it->second &&
+        init_it->second->arg_size() == 1) {
+      builder_.CreateCall(init_it->second, {slot});
+    }
+    if (!initConfigSections(*finfo, slot, depth + 1)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+llvm::Value* Codegen::emitConfigBlockCall(const ast::CallExpr& call,
+                                         const ast::LambdaExpr& block) {
+  std::string root_ty = call.config_type;
+  if (root_ty.empty()) {
+    root_ty = "CPropertys";
+  }
+  if (!ensureTypeAvailable(root_ty) || !isClassType(root_ty)) {
+    error(call.loc, "unknown config type '" + root_ty + "'");
+    return nullptr;
+  }
+  const ClassInfo* rinfo = findClass(root_ty);
+  if (!rinfo) {
+    return nullptr;
+  }
+  llvm::Function* cur = builder_.GetInsertBlock()->getParent();
+  llvm::AllocaInst* root =
+      createEntryAlloca(cur, rinfo->type, root_ty + ".config");
+  if (!initClassAtPtr(root, *rinfo, ast::NewExpr{})) {
+    return nullptr;
+  }
+  // Class-typed fields are embedded by value: after zero-filling the root the
+  // nested `Server` / `Database` are still uninitialized. Build the whole tree
+  // top-down here (once, before the block body runs) so nothing clobbers it.
+  if (!initConfigSections(*rinfo, root, 0)) {
+    return nullptr;
+  }
+  if (!emitConfigBlockInline(block, root, root_ty)) {
+    return nullptr;
+  }
+
+  // [dsl] `cfg := app(type: App) { ... }` — the root built above *is* the
+  // value of `cfg`; hand it to the declaration so no helper call is emitted.
+  if (!call.config_bind_target.empty()) {
+    return root;
+  }
+
+  // Ordinary call, but the block argument is the already-built root.
+  auto fit = concrete_funcs_.find(call.callee);
+  if (fit == concrete_funcs_.end() && !current_module_.empty()) {
+    fit = concrete_funcs_.find(current_module_ + "::" + call.callee);
+  }
+  if (fit == concrete_funcs_.end() || !fit->second) {
+    error(call.loc, "unknown function: " + call.callee);
+    return nullptr;
+  }
+  const ast::FuncDeclStmt* fdecl = fit->second;
+  const std::string ir_name = resolveFuncIrName(call.callee);
+  llvm::Function* callee = ir_name.empty() ? nullptr : module_->getFunction(ir_name);
+  if (!callee) {
+    error(call.loc, "missing function IR: " + call.callee);
+    return nullptr;
+  }
+  std::vector<const ast::Expr*> ordered;
+  if (!resolveCallArgs(*fdecl, call.args, ordered)) {
+    return nullptr;
+  }
+  if (callee->arg_size() != ordered.size()) {
+    error(call.loc, "argument count mismatch calling " + call.callee);
+    return nullptr;
+  }
+  std::vector<llvm::Value*> call_args;
+  for (size_t i = 0; i < ordered.size(); ++i) {
+    llvm::Type* expected = callee->getFunctionType()->getParamType(static_cast<unsigned>(i));
+    if (ordered[i] && ordered[i]->kind() == ast::ExprKind::Lambda &&
+        static_cast<const ast::LambdaExpr&>(*ordered[i]).is_config_dsl) {
+      call_args.push_back(builder_.CreateBitCast(root, expected, "config.root"));
+      continue;
+    }
+    std::string expected_name;
+    if (i < fdecl->params.size()) {
+      expected_name = resolveTypeName(fdecl->params[i].type_name);
+    }
+    llvm::Value* v = emitValueForParam(*ordered[i], expected, expected_name);
+    if (!v) {
+      return nullptr;
+    }
+    call_args.push_back(v);
+  }
+  if (callee->getReturnType()->isVoidTy()) {
+    builder_.CreateCall(callee, call_args);
+    return llvm::ConstantInt::get(i32Ty(), 0);
+  }
+  return builder_.CreateCall(callee, call_args, "config.call");
+}
+
 llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
                                      const ast::Expr* object_override) {
   const ast::Expr* object = object_override ? object_override : call.object.get();
@@ -7685,6 +8054,44 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
   const auto& id = static_cast<const ast::IdentifierExpr&>(*object);
   auto lit = local_types_.find(id.name);
   auto vit = named_values_.find(id.name);
+
+  // [dsl] Captured class receiver: inside a lambda `local_types_` only
+  // holds params/locals, so a captured object is missing there. Resolve the
+  // static type from `capture_types_` and fetch the live pointer from the ctx.
+  if (lit == local_types_.end() && vit == named_values_.end() &&
+      current_lambda_ctx_ && current_lambda_ctx_ty_) {
+    auto cap = capture_slots_.find(id.name);
+    auto cty = capture_types_.find(id.name);
+    if (cap != capture_slots_.end() && cty != capture_types_.end()) {
+      const std::string cap_ty = resolveTypeName(cty->second);
+      if (ensureTypeAvailable(cap_ty) && isClassType(cap_ty)) {
+        const ClassInfo* cinfo = findClass(cap_ty);
+        if (cinfo) {
+          llvm::Value* slot = builder_.CreateStructGEP(current_lambda_ctx_ty_,
+                                                       current_lambda_ctx_, cap->second,
+                                                       id.name + ".cap");
+          llvm::Type* cty_llvm = llvmTypeForTypeName(cap_ty);
+          llvm::Value* self = nullptr;
+          if (current_lambda_ctx_by_value_) {
+            llvm::Value* val = builder_.CreateLoad(cty_llvm, slot, id.name + ".capval");
+            llvm::AllocaInst* tmp =
+                createEntryAlloca(builder_.GetInsertBlock()->getParent(), cty_llvm,
+                                  id.name + ".this");
+            builder_.CreateStore(val, tmp);
+            self = tmp;
+          } else {
+            self = builder_.CreateLoad(ptrTy(), slot, id.name + ".ptr");
+          }
+          if (self) {
+            llvm::Value* callv = emitClassMethodCall(call, *cinfo, self, cap_ty);
+            if (callv) {
+              return callv;
+            }
+          }
+        }
+      }
+    }
+  }
 
   // Instance field receiver: `this.field.method(...)`. Fields are not locals, so
   // resolve them against the enclosing class before falling through to the
@@ -8160,6 +8567,159 @@ std::vector<std::string> Codegen::resolveCaptureLocals(const ast::LambdaExpr& ex
     }
   }
   return out;
+}
+
+// [dsl] Resolve `name { ... }` inside a config block to a live class
+// object: a `get_name()` child when the class exposes one, otherwise the
+// null-initialised `name_` field constructed in place.
+llvm::Value* Codegen::emitConfigSectionPtr(const std::string& field_name,
+                                          const std::string& class_name,
+                                          const ast::SourceLocation& loc) {
+  const ClassInfo* info = findClass(class_name);
+  if (!info) {
+    error(loc, "unknown config class '" + class_name + "'");
+    return nullptr;
+  }
+  llvm::Value* self = current_this_;
+  if (!self) {
+    error(loc, "'" + field_name + " { ... }' is only valid inside a config block");
+    return nullptr;
+  }
+
+  // `CPropertys` roots carry a name → node map, not typed fields: reuse the
+  // existing child node when present, otherwise build a fresh one and attach it.
+  if (class_name == "CPropertys") {
+    if (info->methods.count("get_property") == 0 || info->methods.count("add_property") == 0) {
+      error(loc, "CPropertys requires get_property/add_property for config sections");
+      return nullptr;
+    }
+    llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+
+    ast::MethodCallExpr get_call;
+    get_call.loc = loc;
+    get_call.method = "get_property";
+    ast::CallArg get_key;
+    auto key_lit = std::make_unique<ast::StringLiteralExpr>();
+    key_lit->loc = loc;
+    key_lit->value = field_name;
+    get_key.value = std::move(key_lit);
+    get_call.args.push_back(std::move(get_key));
+    llvm::Value* found = emitClassMethodCall(get_call, *info, self, class_name);
+    if (!found) {
+      return nullptr;
+    }
+
+    // Optional<CPropertys>: hit → the node handle, miss → attach a new node.
+    if (!found->getType()->isPointerTy()) {
+      error(loc, "get_property did not return an Optional handle");
+      return nullptr;
+    }
+    const ClassInfo* opt_info = findClass("Optional<CPropertys>");
+    if (!opt_info || !opt_info->type) {
+      error(loc, "Optional<CPropertys> is not available");
+      return nullptr;
+    }
+    llvm::StructType* opt_ty = opt_info->type;
+    llvm::Value* hit = builder_.CreateLoad(opt_ty, found, "section.opt");
+    llvm::Value* has = builder_.CreateExtractValue(hit, 0, "section.has");
+
+    llvm::BasicBlock* hit_bb = llvm::BasicBlock::Create(globalContext(), "section.hit", fn);
+    llvm::BasicBlock* miss_bb = llvm::BasicBlock::Create(globalContext(), "section.miss", fn);
+    llvm::BasicBlock* join_bb = llvm::BasicBlock::Create(globalContext(), "section.join", fn);
+    builder_.CreateCondBr(has, hit_bb, miss_bb);
+
+    builder_.SetInsertPoint(hit_bb);
+    llvm::Value* existing = builder_.CreateExtractValue(hit, 1, "section.node");
+    builder_.CreateBr(join_bb);
+
+    builder_.SetInsertPoint(miss_bb);
+    const ClassInfo* node_info = findClass("CPropertys");
+    if (!node_info) {
+      error(loc, "CPropertys is not available");
+      return nullptr;
+    }
+    llvm::AllocaInst* fresh = createEntryAlloca(fn, node_info->type, "section.node.fresh");
+    if (!initClassAtPtr(fresh, *node_info, ast::NewExpr{})) {
+      return nullptr;
+    }
+    ast::MethodCallExpr add_call;
+    add_call.loc = loc;
+    add_call.method = "add_property";
+    ast::CallArg add_key;
+    auto add_lit = std::make_unique<ast::StringLiteralExpr>();
+    add_lit->loc = loc;
+    add_lit->value = field_name;
+    add_key.value = std::move(add_lit);
+    add_call.args.push_back(std::move(add_key));
+    // `add_property(key, node)` — a class argument is passed by reference.
+    ast::CallArg node_arg;
+    auto node_ref = std::make_unique<ast::IdentifierExpr>();
+    node_ref->loc = loc;
+    node_ref->name = "__section_node";
+    node_arg.value = std::move(node_ref);
+    add_call.args.push_back(std::move(node_arg));
+    const std::string saved_local = "__section_node";
+    local_types_[saved_local] = "CPropertys";
+    named_values_[saved_local] = fresh;
+    llvm::Value* added = emitClassMethodCall(add_call, *info, self, class_name);
+    named_values_.erase(saved_local);
+    local_types_.erase(saved_local);
+    if (!added) {
+      return nullptr;
+    }
+    builder_.CreateBr(join_bb);
+
+    builder_.SetInsertPoint(join_bb);
+    llvm::PHINode* phi = builder_.CreatePHI(ptrTy(), 2, "section.ptr");
+    phi->addIncoming(existing, hit_bb);
+    phi->addIncoming(fresh, miss_bb);
+    return phi;
+  }
+
+  const std::string getter = "get_" + field_name;
+  auto git = info->methods.find(getter);
+  if (git != info->methods.end()) {
+    ast::MethodCallExpr call;
+    call.loc = loc;
+    call.method = getter;
+    return emitClassMethodCall(call, *info, self, class_name);
+  }
+
+  const std::string phys = physicalFieldName(field_name);
+  auto fit = info->field_index.find(phys);
+  if (fit == info->field_index.end()) {
+    error(loc, "unknown section '" + field_name + "' on '" + class_name + "'");
+    return nullptr;
+  }
+  return builder_.CreateStructGEP(info->type, self, fit->second, field_name + ".section");
+}
+
+// [dsl] Emit a bare-brace config block inline at its call site: `this`
+// points at `root`, bare `name = v` became `this.name = v`, and nested
+// `section { ... }` blocks rebind `this` to the section field.
+bool Codegen::emitConfigBlockInline(const ast::LambdaExpr& body, llvm::Value* root,
+                                    const std::string& class_name) {
+  const std::string saved_class = current_class_;
+  llvm::Value* saved_this = current_this_;
+  const bool saved_static = current_method_is_static_;
+
+  current_class_ = class_name;
+  current_this_ = root;
+  current_method_is_static_ = false;
+
+  // [dsl] The block is not a closure: it runs inline, so `this` is just
+  // the root receiver. Nothing extra needs to be captured or restored.
+  enterDeferScope();
+  bool ok = emitStmtList(body.body);
+  if (ok) {
+    ok = flushCurrentScopeDefers();
+  }
+  exitDeferScope();
+
+  current_class_ = saved_class;
+  current_this_ = saved_this;
+  current_method_is_static_ = saved_static;
+  return ok;
 }
 
 llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string& fun_type_name) {
@@ -9318,6 +9878,15 @@ llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expec
   // Trailing block / lambda / bare function name → function pointer matching fun(...).
   if (!expected_type_name.empty() && isFunTypeName(expected_type_name)) {
     if (expr.kind() == ast::ExprKind::Lambda) {
+      const auto& lam = static_cast<const ast::LambdaExpr&>(expr);
+      // [dsl] Placeholder for a bare-brace config block: the real binding
+      // happens at the owning call site (see callArgsForConfigBlock).
+      if (lam.is_config_dsl) {
+        pending_config_block_ = &lam;
+        pending_config_expected_ = expected_type_name;
+        return llvm::ConstantPointerNull::get(
+            llvm::cast<llvm::PointerType>(ptrTy()));
+      }
       pending_closure_ctx_ = nullptr;
       pending_closure_ctx_ty_ = nullptr;
       llvm::Value* fn =
@@ -9474,6 +10043,15 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
   if (call.callee == "compile_error" || call.callee == "comptime_assert") {
     error(call.loc, call.callee + "() is only allowed in compile-time context");
     return nullptr;
+  }
+
+  // [dsl] `app { ... }` / `app(type: App) { ... }` — not a real call: the
+  // callee owns a config root (default `CPropertys`) and the block runs inline.
+  for (const ast::CallArg& a : call.args) {
+    if (a.value && a.value->kind() == ast::ExprKind::Lambda &&
+        static_cast<const ast::LambdaExpr&>(*a.value).is_config_dsl) {
+      return emitConfigBlockCall(call, static_cast<const ast::LambdaExpr&>(*a.value));
+    }
   }
 
   // [closure-integration] `delay(ms) { ... }` / `delay(ms, || ...)` with inline Lambda → spawn desugar.

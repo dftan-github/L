@@ -53,6 +53,9 @@ private:
   std::vector<std::unordered_map<std::string, std::string>> scopes_;
   // Field names of the class currently being checked (bare `field =` in methods).
   std::unordered_set<std::string> current_fields_;
+  // [dsl] `server { ... }` inside a typed config block: the class the
+  // nested block's `this` refers to (empty outside config sections).
+  std::string config_section_class_;
   // Module-level classes (after partial merge) for property fallback checks.
   std::unordered_map<std::string, const ast::ClassDeclStmt*> classes_;
   // True while checking a property write (`u.x = ...`).
@@ -80,6 +83,9 @@ private:
   std::unordered_map<std::string, const ast::FuncDeclStmt*> generic_funcs_;
   // Free functions (incl. extern) — bare name usable as callback / fun(...) value.
   std::unordered_map<std::string, const ast::FuncDeclStmt*> free_funcs_;
+  // [dsl] `fun name(fun() body, ...)` — a bare `{ ... }` after it is a
+  // config block whose body runs with `this` bound to a config root.
+  std::unordered_set<std::string> config_block_funcs_;
   // Cross-module symbol tables: module stem → (exported name → decl).
   // Only `pub` declarations are registered here; that is what makes
   // `mod::fn()` resolvable and what makes `mod::private_fn()` an error.

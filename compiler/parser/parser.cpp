@@ -20,6 +20,7 @@ Parser::Parser(std::vector<ast::Token> tokens, diag::DiagnosticEngine* diags)
     eof.type = ast::TokenType::EndOfFile;
     tokens_.push_back(std::move(eof));
   }
+  prescanClassNames();
 }
 
 void Parser::registerClassName(const std::string& name) {
@@ -458,6 +459,37 @@ std::unique_ptr<ast::LambdaExpr> Parser::parseTrailingBlock() {
     synchronize();
   }
   consume(ast::TokenType::RBrace, "expected '}' after trailing block");
+  return lambda;
+}
+
+// [dsl] `server { port = 8080 }` — a bare-brace block bound to a config
+// root. The receiver and the guard are explicit params so the usual call
+// machinery checks arity: `fun(root, {|=0}) { <body> }`.
+// Parsing a bare `name = v` here marks it as a property assignment.
+std::unique_ptr<ast::LambdaExpr> Parser::parseConfigBlock() {
+  ast::Token brace = consume(ast::TokenType::LBrace, "expected '{'");
+  auto lambda = std::make_unique<ast::LambdaExpr>();
+  lambda->loc = brace.loc;
+  lambda->is_config_dsl = true;
+  lambda->params.push_back("root");
+  lambda->params.push_back("body_block");
+
+  ++dsl_block_depth_;
+  while (!atEnd() && !check(ast::TokenType::RBrace)) {
+    ast::StmtPtr stmt = parseStatement();
+    if (stmt) {
+      lambda->body.push_back(std::move(stmt));
+      continue;
+    }
+    if (had_error_) {
+      synchronize();
+      continue;
+    }
+    errorAt(peek(), "expected statement in config block");
+    synchronize();
+  }
+  --dsl_block_depth_;
+  consume(ast::TokenType::RBrace, "expected '}' after config block");
   return lambda;
 }
 
@@ -998,8 +1030,45 @@ ast::ExprPtr Parser::parseCallArgs(std::string callee, ast::SourceLocation loc) 
   call->loc = std::move(loc);
   call->callee = std::move(callee);
   call->args = parseArgList();
+  // [dsl] `app(type: App) { ... }` — the root class is a directive, not a
+  // runtime argument: it selects which class the block tree is built into.
+  if (config_block_funcs_.count(call->callee) != 0) {
+    for (auto it = call->args.begin(); it != call->args.end(); ++it) {
+      if (it->name == "type" && it->value &&
+          it->value->kind() == ast::ExprKind::Identifier) {
+        call->config_type = static_cast<const ast::IdentifierExpr&>(*it->value).name;
+        call->args.erase(it);
+        break;
+      }
+    }
+  }
   // Bare `{ ... }` after a call would steal `if foo() {` bodies. Only `delay(ms) {`
-  // opts into zero-arg trailing without `|`; others still need `{ |` / `{||`.
+  // and registered config-block functions opt into zero-arg trailing without `|`.
+  // [dsl] A registered block fn gets `fun(root, {|=0}) { ... }` instead.
+  // [dsl] Inside a config block any `name(type: Cls) { ... }` opens a
+  // typed section, not just registered top-level block functions.
+  const bool config_section =
+      config_block_funcs_.count(call->callee) != 0 || dsl_block_depth_ > 0;
+  if (config_section && dsl_block_depth_ > 0) {
+    for (auto it = call->args.begin(); it != call->args.end(); ++it) {
+      if (it->name == "type" && it->value &&
+          it->value->kind() == ast::ExprKind::Identifier) {
+        call->config_type = static_cast<const ast::IdentifierExpr&>(*it->value).name;
+        call->args.erase(it);
+        break;
+      }
+    }
+  }
+  if (config_section && check(ast::TokenType::LBrace)) {
+    auto lambda = parseConfigBlock();
+    if (lambda) {
+      ast::CallArg arg;
+      arg.loc = lambda->loc;
+      arg.value = std::move(lambda);
+      call->args.push_back(std::move(arg));
+    }
+    return call;
+  }
   attachTrailingBlockIfPresent(call->args, /*allow_bare_brace=*/call->callee == "delay");
   return call;
 }
@@ -1062,6 +1131,14 @@ ast::StmtPtr Parser::parseInferDecl() {
   const bool is_mutable = match(ast::TokenType::Bang);
   consume(ast::TokenType::ColonAssign, "expected ':='");
   ast::ExprPtr init = parseExpression();
+  // [dsl] `cfg := app(type: App) { ... }` — the block already built the
+  // root, so bind that very object to `cfg` instead of a discarded result.
+  if (init && init->kind() == ast::ExprKind::Call) {
+    auto& call = static_cast<ast::CallExpr&>(*init);
+    if (!call.config_type.empty()) {
+      call.config_bind_target = name.lexeme;
+    }
+  }
   // Allow omitting ';' when the initializer ends with `}` (e.g. `h := spawn { ... }`).
   maybeConsumeStmtSemicolon();
 
@@ -1224,6 +1301,32 @@ ast::StmtPtr Parser::parseAssignOrExprStmt() {
     if (mutable_marker) {
       errorAt(peek(), "'!' is only valid on mutable assignment LHS");
     }
+    // [dsl] `server { ... }` inside a config block — nested section.
+    if (dsl_block_depth_ > 0 && expr->kind() == ast::ExprKind::Identifier &&
+        check(ast::TokenType::LBrace)) {
+      const auto& sect = static_cast<const ast::IdentifierExpr&>(*expr);
+      advance();  // '{'
+      ++dsl_block_depth_;
+      auto block = std::make_unique<ast::BlockStmt>();
+      block->loc = start.loc;
+      block->section_field = sect.name;
+      while (!atEnd() && !check(ast::TokenType::RBrace)) {
+        ast::StmtPtr inner = parseStatement();
+        if (inner) {
+          block->stmts.push_back(std::move(inner));
+          continue;
+        }
+        if (had_error_) {
+          synchronize();
+          continue;
+        }
+        errorAt(peek(), "expected statement in config section");
+        synchronize();
+      }
+      --dsl_block_depth_;
+      consume(ast::TokenType::RBrace, "expected '}' after config section");
+      return block;
+    }
     maybeConsumeStmtSemicolon();
     auto stmt = std::make_unique<ast::ExprStmt>();
     stmt->loc = start.loc;
@@ -1251,6 +1354,20 @@ ast::StmtPtr Parser::parseAssignOrExprStmt() {
 
   auto stmt = std::make_unique<ast::AssignStmt>();
   stmt->loc = start.loc;
+  // [dsl] Inside `name { ... }`, a bare `port = 8080` targets `this.port`.
+  // Codegen prefers a class field of the root and falls back to the plain
+  // variable store when the root has no such field (`CPropertys` roots).
+  if (dsl_block_depth_ > 0 && expr->kind() == ast::ExprKind::Identifier) {
+    const auto& lhs = static_cast<const ast::IdentifierExpr&>(*expr);
+    auto access = std::make_unique<ast::MemberAccessExpr>();
+    access->loc = start.loc;
+    access->member = lhs.name;
+    auto self = std::make_unique<ast::ThisExpr>();
+    self->loc = start.loc;
+    access->object = std::move(self);
+    expr = std::move(access);
+    stmt->is_dsl_property = true;
+  }
   stmt->target = std::move(expr);
   stmt->value = std::move(value);
   stmt->mutable_marker = mutable_marker;
@@ -1363,6 +1480,14 @@ std::unique_ptr<ast::FuncDeclStmt> Parser::parseFunCommon(bool allow_body) {
   } else {
     // Signature-only (interface / extern). ASI often inserts ';' after type tokens.
     match(ast::TokenType::Semicolon);
+  }
+
+  // [dsl] `fun app(fun() body, ...)` at top level: a bare `{ ... }`
+  // after a call to it is a config block, not an `if` body.
+  if (allow_body && context_path_.size() == 1 && !func->params.empty() &&
+      func->params.front().name == "body" &&
+      func->params.front().type_name == "fun()") {
+    config_block_funcs_.insert(func->name);
   }
 
   generic_type_names_ = saved_generics;
@@ -1960,6 +2085,24 @@ bool Parser::isBuiltinTypeToken(ast::TokenType type) {
       return true;
     default:
       return false;
+  }
+}
+
+// [dsl] Pre-register classes declared anywhere in the file so
+// `app(type: App) { ... }` can appear before `class App`.
+void Parser::prescanClassNames() {
+  for (std::size_t i = 0; i + 1 < tokens_.size(); ++i) {
+    const auto& tok = tokens_[i];
+    if (tok.type != ast::TokenType::KwClass && tok.type != ast::TokenType::KwInterface) {
+      continue;
+    }
+    if (tokens_[i + 1].type == ast::TokenType::Identifier) {
+      if (tok.type == ast::TokenType::KwClass) {
+        class_names_.insert(tokens_[i + 1].lexeme);
+      } else {
+        interface_names_.insert(tokens_[i + 1].lexeme);
+      }
+    }
   }
 }
 

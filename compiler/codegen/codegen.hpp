@@ -151,6 +151,21 @@ private:
                                std::string& ret, bool& has_explicit_ret);
   llvm::FunctionType* llvmFunctionTypeForFunName(const std::string& fun_type_name);
   llvm::Value* emitLambda(const ast::LambdaExpr& expr, const std::string& fun_type_name);
+  // [dsl] `app { ... }` / `app(type: App) { ... }` — build root inline.
+  llvm::Value* emitConfigBlockCall(const ast::CallExpr& call,
+                                   const ast::LambdaExpr& block);
+  // [dsl] Inline a bare-brace config block at its call site with `this`
+  // bound to `root` (a live class object pointer). Returns false on error.
+  bool emitConfigBlockInline(const ast::LambdaExpr& body, llvm::Value* root,
+                             const std::string& class_name);
+  // [dsl] Recursively `init` class-typed fields so every nested section
+  // has a live receiver before the config block body runs.
+  bool initConfigSections(const ClassInfo& info, llvm::Value* base, int depth);
+  // [dsl] Resolve `name { ... }` inside a block: getter → existing child,
+  // otherwise a null-initialised `name_` field constructed in place.
+  llvm::Value* emitConfigSectionPtr(const std::string& field_name,
+                                    const std::string& class_name,
+                                    const ast::SourceLocation& loc);
   // Stack locals actually captured (filters globals / consts out of LambdaExpr::captures).
   std::vector<std::string> resolveCaptureLocals(const ast::LambdaExpr& expr) const;
   llvm::Value* emitArrayLiteral(const ast::ArrayLiteralExpr& expr);
@@ -309,6 +324,9 @@ private:
   llvm::ArrayType* vtableArrayTy(const InterfaceInfo& iface);
   llvm::Value* emitMethodCall(const ast::MethodCallExpr& call,
                               const ast::Expr* object_override = nullptr);
+  // [dsl] Invoke `call.method` on an already-resolved class object.
+  llvm::Value* emitClassMethodCall(const ast::MethodCallExpr& call, const ClassInfo& cinfo,
+                                   llvm::Value* self_ptr, const std::string& class_name);
   // `obj?.m(...)` — short-circuits to an empty Optional when the receiver is one.
   llvm::Value* emitSafeMethodCall(const ast::MethodCallExpr& call);
   // `obj?.field` — short-circuits to an empty Optional<FieldType> when the
@@ -412,6 +430,10 @@ private:
 
   std::string current_class_;
   llvm::Value* current_this_ = nullptr;
+  // [dsl] Bare-brace block handed to a config-block function; bound by
+  // the owning call site, which also supplies the config root.
+  const ast::LambdaExpr* pending_config_block_ = nullptr;
+  std::string pending_config_expected_;
   bool current_method_is_static_ = false;
   // Enclosing function return type name (e.g. Result<i32,String>) for `expr?`.
   std::string current_fn_return_type_;

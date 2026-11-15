@@ -140,6 +140,12 @@ struct CallArg {
 struct CallExpr : Expr {
   std::string callee;
   std::vector<CallArg> args;
+  // [dsl] `app(type: App) { ... }` — optional config root class. Empty
+  // means the block tree is a `CPropertys` node.
+  std::string config_type;
+  // [dsl] `cfg := app(type: App) { ... }` — the local that should
+  // receive the built root instead of a discarded call result.
+  std::string config_bind_target;
   ExprKind kind() const override { return ExprKind::Call; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
@@ -223,6 +229,9 @@ struct LambdaExpr : Expr {
   std::vector<std::string> captures;
   // True when this capturing lambda is returned from its enclosing function ([closure-escape]).
   bool escapes = false;
+  // [dsl] Bare-block config lambda: extra leading params (root, {|=0}) and
+  // the body is emitted inline at the call site with `this` bound to the root.
+  bool is_config_dsl = false;
   ExprKind kind() const override { return ExprKind::Lambda; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
@@ -296,6 +305,8 @@ struct AssignStmt : Stmt {
   ExprPtr target;  // IdentifierExpr or MemberAccessExpr
   ExprPtr value;
   bool mutable_marker = false;  // LHS used '!'
+  // [dsl]: bare-name assign inside a config block → `this.<name> = value`.
+  bool is_dsl_property = false;
   StmtKind kind() const override { return StmtKind::Assign; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
@@ -348,6 +359,9 @@ struct ExprStmt : Stmt {
 // Statement group (relative-init desugar: `app.rs232 { .baud = 115200 }` → Assigns).
 struct BlockStmt : Stmt {
   std::vector<StmtPtr> stmts;
+  // [dsl] `server { ... }` inside a config block: bind `this` to the
+  // `section_` field of the enclosing class, then run `stmts`.
+  std::string section_field;
   StmtKind kind() const override { return StmtKind::Block; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
