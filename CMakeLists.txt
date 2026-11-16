@@ -18,5 +18,10 @@ if(TARGET LLVMDebugInfoPDB)
     LLVMBinaryFormat LLVMObject LLVMSupport LLVMDebugInfoCodeView LLVMDebugInfoMSF)
 endif()
 
+# [performance-first] Build l_runtime as LLVM bitcode so the final link can
+# inline runtime helpers into L-generated code. Off by default for non-Clang
+# toolchains; turn on explicitly where supported.
+option(L_RUNTIME_LTO "Build l_runtime as LTO bitcode for cross-module inlining" OFF)
+
 add_subdirectory(runtime)
 add_subdirectory(compiler)
