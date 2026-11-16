@@ -916,7 +916,8 @@ std::string Codegen::exprTypeOf(const ast::Expr& expr) const {
         return "bool";
       }
       if (bin.left && bin.right &&
-          (bin.op == "+" || bin.op == "-" || bin.op == "*" || bin.op == "/")) {
+          (bin.op == "+" || bin.op == "-" || bin.op == "*" || bin.op == "/" ||
+           bin.op == "%")) {
         const std::string lt = exprTypeOf(*bin.left);
         const std::string rt = exprTypeOf(*bin.right);
         std::string promoted = promoteNumericTypes(lt, rt);
@@ -11052,7 +11053,8 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       const std::string lt = exprTypeOf(*bin.left);
       const std::string rt = exprTypeOf(*bin.right);
 
-      if (bin.op == "+" || bin.op == "-" || bin.op == "*" || bin.op == "/") {
+      if (bin.op == "+" || bin.op == "-" || bin.op == "*" || bin.op == "/" ||
+          bin.op == "%") {
         std::string left_ty = lt;
         std::string right_ty = rt;
         // Legacy fallback: untyped field / sizeof-style operands default to i32.
@@ -11080,11 +11082,13 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
           if (bin.op == "+") return builder_.CreateFAdd(lhs, rhs, "faddtmp");
           if (bin.op == "-") return builder_.CreateFSub(lhs, rhs, "fsubtmp");
           if (bin.op == "*") return builder_.CreateFMul(lhs, rhs, "fmultmp");
+          if (bin.op == "%") return builder_.CreateFRem(lhs, rhs, "fremtmp");
           return builder_.CreateFDiv(lhs, rhs, "fdivtmp");
         }
         if (bin.op == "+") return builder_.CreateAdd(lhs, rhs, "addtmp");
         if (bin.op == "-") return builder_.CreateSub(lhs, rhs, "subtmp");
         if (bin.op == "*") return builder_.CreateMul(lhs, rhs, "multmp");
+        if (bin.op == "%") return builder_.CreateSRem(lhs, rhs, "remtmp");
         return builder_.CreateSDiv(lhs, rhs, "divtmp");
       }
 
@@ -11623,6 +11627,16 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
   if (call.callee == "compile_error" || call.callee == "comptime_assert") {
     error(call.loc, call.callee + "() is only allowed in compile-time context");
     return nullptr;
+  }
+
+  // [auto-free] `l_free(x)` taken on a compiler-tracked owning local hands the
+  // release over to the program: drop `x` from every auto-free scope so the
+  // end-of-scope injection does not free the same pointer a second time.
+  // A `defer l_free(x)` is already handled by noteExplicitLFreeInDefer.
+  if (call.callee == "l_free" && call.args.size() == 1 && call.args[0].value &&
+      call.args[0].value->kind() == ast::ExprKind::Identifier) {
+    const auto& id = static_cast<const ast::IdentifierExpr&>(*call.args[0].value);
+    cancelAutoFreeLocal(id.name);
   }
 
   // [dsl] `app { ... }` / `app(type: App) { ... }` — not a real call: the

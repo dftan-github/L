@@ -739,6 +739,7 @@ int Parser::infixPrecedence(ast::TokenType type) {
       return 10;
     case ast::TokenType::Star:
     case ast::TokenType::Slash:
+    case ast::TokenType::Percent:
       return 20;
     default:
       return -1;

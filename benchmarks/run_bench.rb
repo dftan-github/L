@@ -82,5 +82,92 @@ compile_o3!([STDLIB_ARRAY, STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_VA
   puts format("wall_time_ms=%.3f", (t1 - t0) * 1000.0)
 end
 
-puts "PASS"
+# ---------------------------------------------------------------------------
+# L vs C++ head-to-head suite (benchmarks/bench_l.l vs benchmarks/bench_cpp.cpp)
+# Three aligned workloads — A dense arithmetic loop, B heap object creation,
+# C string-keyed map — each printing its own elapsed milliseconds.
+#
+# IMPORTANT: bench_l.l is compiled AOT to a native .exe with -O3 and executed as
+# a process. It never goes through `l eval`, `l run`'s REPL, or the comptime
+# tree-walking interpreter — the comparison must measure real LLVM -O3 machine
+# code, exactly like the C++ side.
+# ---------------------------------------------------------------------------
+CXX_BENCH = BENCH_DIR.join("bench_cpp.cpp")
+L_BENCH = BENCH_DIR.join("bench_l.l")
+
+def clangxx
+  return ENV["L_CXX"] if ENV["L_CXX"] && !ENV["L_CXX"].empty?
+
+  # Prefer the LLVM toolchain this project is built against (its clang++ uses the
+  # MSVC STL correctly), then the one next to l.exe's LLVM, then PATH.
+  # Sort newest-first so an older LLVM that can't parse the current MSVC STL
+  # isn't picked just because its directory name sorts first.
+  versioned = Dir.glob("D:/Librarys/clang*/bin/clang++.exe").sort_by do |p|
+    p[/clang\+llvm-(\d+)\.(\d+)\.(\d+)/] ? [$1.to_i, $2.to_i, $3.to_i] : [0, 0, 0]
+  end.reverse
+  candidates = versioned + Dir.glob(ROOT.join("..", "**", "clang++.exe").to_s)
+  candidates.find { |p| File.exist?(p) } ||
+    `where clang++ 2>NUL`.lines.first&.strip
+end
+
+def compile_cpp_o3!(src, exe)
+  cxx = clangxx
+  die!("clang++ not found (set L_CXX)") unless cxx && File.exist?(cxx.to_s)
+  FileUtils.mkdir_p(OUT_DIR)
+  FileUtils.rm_f(exe)
+  cmd = [cxx.to_s, "-O3", "-std=c++17", "-o", exe.to_s, src.to_s]
+  stdout, stderr, status = Open3.capture3(*cmd)
+  unless status.success?
+    die!("C++ compile failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  end
+  die!("exe missing: #{exe}") unless File.exist?(exe)
+end
+
+die!("bench_cpp.cpp not found: #{CXX_BENCH}") unless File.exist?(CXX_BENCH)
+die!("bench_l.l not found: #{L_BENCH}") unless File.exist?(L_BENCH)
+
+cpp_exe = OUT_DIR.join("bench_cpp.exe")
+l_bench_exe = OUT_DIR.join("bench_l.exe")
+
+puts "\nCompiling bench_cpp.cpp with -O3 ..."
+compile_cpp_o3!(CXX_BENCH, cpp_exe)
+
+puts "Compiling bench_l.l with -O3 ..."
+compile_o3!([STDLIB_ARRAY, STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP,
+             ROOT.join("stdlib", "thread.l"), ROOT.join("stdlib", "time.l"),
+             L_BENCH], l_bench_exe)
+
+def parse_ms(text)
+  text.to_s.gsub("\r\n", "\n").lines.filter_map do |ln|
+    m = ln.match(/\A\s*([ABC]) .*?\s([\d.]+) ms/)
+    [m[1], m[2].to_f] if m
+  end.to_h
+end
+
+cpp_ms = nil
+l_ms = nil
+3.times do |round|
+  puts "\nRound #{round + 1}"
+  puts "--- C++ (bench_cpp.exe) ---"
+  _, out = time_exe!(cpp_exe)
+  puts out.to_s.gsub("\r\n", "\n")
+  cpp_ms = parse_ms(out)
+
+  puts "--- L (bench_l.exe) ---"
+  _, out = time_exe!(l_bench_exe)
+  puts out.to_s.gsub("\r\n", "\n")
+  l_ms = parse_ms(out)
+end
+
+puts "\n| test | C++ (ms) | L (ms) | L / C++ |"
+puts "|------|---------:|-------:|--------:|"
+%w[A B C].each do |k|
+  c = cpp_ms[k]
+  l = l_ms[k]
+  next unless c && l
+  ratio = c.positive? ? (l / c) : 0.0
+  puts format("| %s | %.3f | %.3f | %.2fx |", k, c, l, ratio)
+end
+
+puts "\nPASS"
 

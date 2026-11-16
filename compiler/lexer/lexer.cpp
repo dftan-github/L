@@ -666,6 +666,8 @@ ast::Token Lexer::lexPunctuation() {
       return makeToken(ast::TokenType::Star, "*", start);
     case '/':
       return makeToken(ast::TokenType::Slash, "/", start);
+    case '%':
+      return makeToken(ast::TokenType::Percent, "%", start);
     case '|':
       return makeToken(ast::TokenType::Pipe, "|", start);
     case '(':

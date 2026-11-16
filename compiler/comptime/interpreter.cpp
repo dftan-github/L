@@ -248,6 +248,7 @@ Value Interpreter::evalExpr(const ast::Expr& expr) {
         if (bin.op == "-") return Value::makeInt(lhs.i - rhs.i);
         if (bin.op == "*") return Value::makeInt(lhs.i * rhs.i);
         if (bin.op == "/") return Value::makeInt(rhs.i == 0 ? 0 : lhs.i / rhs.i);
+        if (bin.op == "%") return Value::makeInt(rhs.i == 0 ? 0 : lhs.i % rhs.i);
         if (bin.op == "<") return Value::makeBool(lhs.i < rhs.i);
         if (bin.op == ">") return Value::makeBool(lhs.i > rhs.i);
         if (bin.op == "<=") return Value::makeBool(lhs.i <= rhs.i);

@@ -189,6 +189,8 @@ COMPOUND_ASSIGN = ROOT.join("tests", "cases", "compound_assign.l")
 INC_DEC = ROOT.join("tests", "cases", "inc_dec.l")
 MEMORY_STRESS = ROOT.join("tests", "cases", "memory_stress.l")
 MEMORY_LEAK_HARD = ROOT.join("tests", "cases", "memory_leak_hard.l")
+LFREE_DOUBLE_FREE = ROOT.join("tests", "cases", "lfree_double_free.l")
+MODULO_TEST = ROOT.join("tests", "cases", "modulo_test.l")
 MULTI_A = ROOT.join("tests", "cases", "multi_a.l")
 MULTI_B = ROOT.join("tests", "cases", "multi_b.l")
 MULTI_MAIN = ROOT.join("tests", "cases", "multi_main.l")
@@ -2785,6 +2787,76 @@ def test_memory_leak_hard_e2e!
   puts "  OK memory_leak_hard e2e (concat + Array<IReader> + capturing lambda → no leaks)"
 end
 
+# `l_free(local)` / `defer l_free(local)` on a compiler-tracked heap local must
+# cancel the automatic free; otherwise the pointer is released twice and the CRT
+# aborts with 0xC0000374. Baseline (before the fix) crashed here.
+def test_lfree_double_free_e2e!
+  assert!(File.exist?(LFREE_DOUBLE_FREE),
+          "lfree_double_free case not found: #{LFREE_DOUBLE_FREE}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("lfree_double_free.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s, *with_runtime(STDLIB_STRING, LFREE_DOUBLE_FREE)
+  )
+  assert!(status.success?,
+          "compile lfree_double_free failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "lfree_double_free.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?,
+          "lfree_double_free.exe exited #{st.exitstatus} (0xC0000374 = double free)\n#{err}\n#{out}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(
+    normalized.include?("no double free, no leak\n"),
+    "expected \"no double free, no leak\", got #{normalized.inspect}"
+  )
+  %w[statement defer nested].each do |kind|
+    assert!(
+      normalized.include?("#{kind} delta: 0\n"),
+      "expected #{kind} delta 0, got #{normalized.inspect}"
+    )
+  end
+
+  puts "  OK lfree_double_free e2e (explicit l_free / defer l_free cancel auto-free once)"
+end
+
+# `%` remainder: same precedence as `*` / `/`, signed srem on ints, frem on f64.
+def test_modulo_e2e!
+  assert!(File.exist?(MODULO_TEST), "modulo_test case not found: #{MODULO_TEST}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("modulo_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(MODULO_TEST))
+  assert!(status.success?,
+          "compile modulo_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "modulo_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "modulo_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  expected = <<~OUT
+    1
+    0
+    0
+    4
+    1
+    -1
+    1
+    7
+    1.5
+    20
+  OUT
+  assert!(normalized == expected,
+          "modulo output expected #{expected.inspect}, got #{normalized.inspect}")
+
+  puts "  OK modulo e2e (precedence, associativity, signed, i64 width, f64)"
+end
+
 def test_multi_file_e2e!
   assert!(File.exist?(MULTI_MAIN), "multi_main case not found: #{MULTI_MAIN}")
   assert!(File.exist?(MULTI_A), "multi_a case not found: #{MULTI_A}")
@@ -4628,6 +4700,8 @@ def main
     test_inc_dec_e2e!
     test_memory_stress_e2e!
     test_memory_leak_hard_e2e!
+    test_lfree_double_free_e2e!
+    test_modulo_e2e!
     test_multi_file_e2e!
     test_arena_e2e!
     test_string_interp_e2e!
