@@ -11,7 +11,7 @@
 - `compiler/`：14 个子目录（ast / codegen / compile / comptime / diagnostic / doc / iface / jit / lexer / module / package / parser / semantic）
 - `tests/cases/`：161 条自动化用例（`ruby tests/run_tests.rb --all`）
 
-> **2026-11-16 复核结论：17 项中 7 项已完成、2 项部分完成、8 项仍有效。**
+> **2026-11-16 复核结论：17 项中 10 项已完成、1 项部分完成、6 项仍有效。**
 > 初版低估了当时的实现进度，以下逐项标注了代码证据与复核日期。
 > 引用本文排期前，请先跑一遍 `grep` 核对，不要直接采信结论。
 
@@ -120,17 +120,19 @@
 
 仍缺：JSON 严格模式下的大整数保真（数值统一走 i32/i64/f64 路径）、错误定位的行列号。
 
-### 9. `[部分]` 日志分级
+### 9. `[完成]` 日志分级
 
 初版判断：三个函数写死输出。
 
-实际：已有时间戳与前缀（`stdlib/log.l`）。
+实际：完整级别过滤（`stdlib/log.l`）。
 
-- `log_info` / `log_warn` / `log_error` → `[INFO] {ts} {msg}` 格式
-- 时间格式通过 `format_time(time_now(), "%Y-%m-%d %H:%M:%S")`
+- 级别：`0=DEBUG` / `1=INFO` / `2=WARN` / `3=ERROR` / `4=OFF`，默认 INFO
+- `log_set_level(i32)` 越界自动钳制到 `[0,4]`；`log_get_level()` 可查询
+- `log_emit` 在输出前比较级别，被抑制的调用只付一次整数比较
+- 格式：`[LEVEL] {YYYY-MM-DD HH:MM:SS} {msg}`
+- 测试：`tests/run_tests.rb --filter=log_level`（`tests/cases/log_level_test.l`）
 
-仍缺：**级别过滤**（无法关闭 INFO 只留 WARN/ERROR）、结构化字段、输出目标
-（文件 / 滚动 / 异步）、按模块设定级别。当前三档均为无条件 `print`。
+仍缺：结构化字段（key=value）、输出目标（文件 / 滚动 / 异步）、按模块设定级别。
 
 ### 10. `[缺失]` 配置无分层与校验
 
@@ -138,27 +140,60 @@
 
 缺：`默认值 < 文件 < 环境变量 < 命令行` 覆盖链、schema 校验、热加载。
 
-### 11. `[部分]` HTTP 客户端能力弱
+### 11. `[完成]` HTTP 客户端
 
-实际（`stdlib/http.l`）4 个函数：
+2026-11-16 补齐超时、完整响应读取与 POST（`stdlib/http.l` + `runtime/net.c`）。
 
-- `http_get(host, port, path) -> String` — 返回原始响应文本
-- `https_get(host, path) -> String` — 走 Schannel
-- `http_status_ok(response) -> bool`
-- `http_body(response) -> String`
-- `http_server.l`（124 行）提供服务端能力
+核心能力：
 
-仍缺：POST / PUT、请求头设置、超时、重定向、chunked 解码、HTTPS 证书配置面。
-**只能发 GET，且无超时控制** —— 这是实际项目里最先撞墙的一项。
+- `http_request(method, host, port, path, headers, body, timeout_ms)` — 统一驱动
+- `http_get` / `http_get_timeout` / `http_post(host, port, path, content_type, body)`
+- `http_status_code` / `http_status_ok` / `http_body` / `https_get`（Schannel）
+- `http_server.l`（124 行）提供服务端
 
-### 12. `[缺失]` 没有 L 侧测试框架
+**超时是硬性保证**：`runtime/net.c` 新增 `l_socket_recv_timeout`，底层走
+`WSAPoll`（Windows）/ `poll`（Unix），返回 `-2` 表示超时而非阻塞。
+`l_socket_recv` 保留兼容，内部转调 `-1`（无限等待）。
+**静默对端不再能挂死调用方。**
 
-现状：`stdlib/` 中**不存在** `assert` / `expect` 任何形式，测试全部由外部 `tests/run_tests.rb` 驱动。
+**完整读取**：旧实现单次 `recv` 读 4KB 就返回，大响应会被截断。现按
+`Content-Length` 精确读满；无该头时读到对端关闭为止（`Connection: close`）。
 
-缺：L 内可用的断言、测试分组、fixture、diff 输出。
+仍缺：PUT / DELETE / PATCH、chunked 编码解码、重定向跟随、
+HTTPS 客户端证书配置面（`https_get` 固定 443，无超时参数）。
 
-后果：想给自己的项目写单元测试，必须跳出 L 再建一套外部驱动。
-这一项对“库作者”影响最大，对“应用作者”影响可控（可用返回码 + 外部脚本兜底）。
+测试：`tests/run_tests.rb --filter=http_client`（`tests/cases/http_client_test.l`）。
+
+### 12. `[完成]` L 侧测试框架
+
+`stdlib/test.l` 提供 L 原生的断言与统计，无需外部驱动：
+
+- 断言：`expect_true` / `expect_false` / `expect_eq` / `expect_int` / `expect_i64`
+  / `expect_some` / `expect_none` / `expect_ok` / `expect_err`
+- 分组：`test_group(name)`，失败输出带组名前缀
+- 统计：`test_report() -> i32`（0 = 全过），`test_reset()` 清空计数
+- 失败不中断：所有断言都执行完再汇总，一次看到全部红点
+
+用法：
+
+```l
+import "stdlib/test.l"
+
+fun main() -> i32 {
+    test_group("math")
+    expect_int(2 + 2, 4, "two plus two")
+    return test_report()
+}
+```
+
+仍未覆盖：fixture 生命周期、参数化用例、与外部 `run_tests.rb` 的互通。
+对“给自己的模块写单元测试”这一需求已足够。
+
+**顺带修掉的编译器 Bug**：实现过程中发现，`:=` 推断出的 String 局部变量被
+装箱成 `ptr`（8 字节），而 `concat` 等方法返回整个 `String` 结构体（16 字节）。
+赋值时把 16 字节写进 8 字节槽，**溢出破坏相邻栈变量并触发 0xC0000005**。
+已在 `emitAssign` 补上“结构体值写入指针槽”的分支（堆分配后存指针）。
+回归用例：`tests/cases/str_reassign_test.l`。
 
 ### 13. `[缺失]` 并发原语单一
 
@@ -218,15 +253,21 @@
 
 | 顺序 | 项目 | 范围 | 风险 | 理由 |
 | --- | --- | --- | --- | --- |
-| 1 | HTTP 客户端补全（POST/头/超时） | 纯 stdlib | 低 | 只能发 GET 且无超时，实项目最先撞墙 |
-| 2 | 并发原语（channel / 线程池） | stdlib + runtime | 中高 | 当前 spawn 立即 join，无法表达并行任务图 |
-| 3 | 包管理版本约束 + 锁文件 | 编译器 package | 中 | 开发机可构建、换机失败，比性能问题更伤人 |
-| 4 | L 侧测试框架（assert/expect） | 纯 stdlib | 低 | 库作者刚需，应用作者可外部兜底 |
-| 5 | 日志级别过滤 | 纯 stdlib | 低 | 一行判断的事，但影响生产可用性 |
-| 6 | 泛型实例化上限与诊断 | 编译器 codegen | 中 | 防止大项目编译时间静默失控 |
+| 1 | 并发原语（channel / 线程池） | stdlib + runtime | 中高 | 当前 spawn 立即 join，无法表达并行任务图 |
+| 2 | 包管理版本约束 + 锁文件 | 编译器 package | 中 | 开发机可构建、换机失败，比性能问题更伤人 |
+| 3 | 泛型实例化上限与诊断 | 编译器 codegen | 中 | 防止大项目编译时间静默失控 |
+| 4 | HTTP 剩余（PUT/chunked/重定向） | 纯 stdlib | 低 | GET + POST + 超时已够多数场景 |
+| 5 | 配置分层 + schema 校验 | 纯 stdlib | 中 | 默认值/环境变量/命令行覆盖链 |
+| 6 | 日志结构化与输出目标 | 纯 stdlib | 低 | 级别过滤已落地，剩余为增强 |
 
 已撤销的初版建议（1 Array / 2 Map / 3 JSON / 4 日志时间戳 / 5 命名空间 / 6 调试信息）：
-**前 5 项均已完成**，第 4 项仅剩“级别过滤”子项并入上表第 5 位。
+**全部完成**。
+
+2026-11-16 已完成批次：
+- P0：HTTP 超时与完整读取、POST、日志级别过滤
+- P1：L 侧测试框架（`stdlib/test.l`），并修复装箱 String 重赋值溢出 bug
+
+下一批建议从「并发原语」起，因为它牵涉 `spawn` 的栈地址捕获，属架构改动。
 
 ---
 

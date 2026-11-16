@@ -21,10 +21,14 @@ void* l_alloc(size_t size);
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 #endif
+
+/* Defined below; l_socket_recv forwards to it with a blocking deadline. */
+int32_t l_socket_recv_timeout(int32_t fd, void* buffer, int32_t len, int32_t timeout_ms);
 
 #ifdef _WIN32
 static INIT_ONCE g_wsa_once = INIT_ONCE_STATIC_INIT;
@@ -215,6 +219,17 @@ int32_t l_socket_send(int32_t fd, const void* data, int32_t len) {
 /* Recv into buffer[0..len). Always NUL-terminates when len > 0 by leaving one
  * byte for '\0' (reads at most len-1 payload bytes). Returns payload bytes. */
 int32_t l_socket_recv(int32_t fd, void* buffer, int32_t len) {
+  return l_socket_recv_timeout(fd, buffer, len, -1);
+}
+
+/* Recv with an absolute deadline: timeout_ms < 0 blocks, 0 means poll once.
+ * Returns:
+ *   > 0  payload bytes read
+ *     0  peer closed the connection
+ *    -1  error
+ *    -2  timed out (nothing arrived before the deadline)
+ * Same NUL-termination contract as l_socket_recv (reserves one byte). */
+int32_t l_socket_recv_timeout(int32_t fd, void* buffer, int32_t len, int32_t timeout_ms) {
   if (fd < 0 || buffer == NULL || len <= 0) {
     return -1;
   }
@@ -226,6 +241,21 @@ int32_t l_socket_recv(int32_t fd, void* buffer, int32_t len) {
   const int32_t max_payload = len - 1;
 #ifdef _WIN32
   SOCKET s = (SOCKET)(UINT_PTR)(uint32_t)fd;
+  if (timeout_ms >= 0) {
+    WSAPOLLFD pfd;
+    pfd.fd = s;
+    pfd.events = POLLRDNORM;
+    pfd.revents = 0;
+    int pr = WSAPoll(&pfd, 1, timeout_ms);
+    if (pr == 0) {
+      buf[0] = '\0';
+      return -2;
+    }
+    if (pr < 0) {
+      buf[0] = '\0';
+      return -1;
+    }
+  }
   int n = recv(s, buf, (int)max_payload, 0);
   if (n == SOCKET_ERROR) {
     buf[0] = '\0';
@@ -234,6 +264,21 @@ int32_t l_socket_recv(int32_t fd, void* buffer, int32_t len) {
   buf[n] = '\0';
   return (int32_t)n;
 #else
+  if (timeout_ms >= 0) {
+    struct pollfd pfd;
+    pfd.fd = (int)fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int pr = poll(&pfd, 1, timeout_ms);
+    if (pr == 0) {
+      buf[0] = '\0';
+      return -2;
+    }
+    if (pr < 0) {
+      buf[0] = '\0';
+      return -1;
+    }
+  }
   ssize_t n = recv((int)fd, buf, (size_t)max_payload, 0);
   if (n < 0) {
     buf[0] = '\0';

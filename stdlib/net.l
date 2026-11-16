@@ -8,6 +8,7 @@ extern module c_net {
     fun l_resolve_ipv4(ptr host) -> ptr
     fun l_socket_send(i32 fd, ptr data, i32 len) -> i32
     fun l_socket_recv(i32 fd, ptr buffer, i32 len) -> i32
+    fun l_socket_recv_timeout(i32 fd, ptr buffer, i32 len, i32 timeout_ms) -> i32
     fun l_socket_close(i32 fd) -> void
     fun l_https_get(ptr host, i32 port, ptr path) -> ptr
 }

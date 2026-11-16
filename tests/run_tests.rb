@@ -131,6 +131,7 @@ STDLIB_JSON = ROOT.join("stdlib", "json.l")
 STDLIB_HTTP = ROOT.join("stdlib", "http.l")
 STDLIB_HTTP_SERVER = ROOT.join("stdlib", "http_server.l")
 STDLIB_LOG = ROOT.join("stdlib", "log.l")
+STDLIB_TEST = ROOT.join("stdlib", "test.l")
 STDLIB_CONFIG = ROOT.join("stdlib", "config.l")
 STRING_EXT_TEST = ROOT.join("tests", "cases", "string_ext_test.l")
 PATH_FS_EXT_TEST = ROOT.join("tests", "cases", "path_fs_ext_test.l")
@@ -1669,6 +1670,98 @@ def test_http_stdlib_e2e!
   assert!(n.include?("hello_stdlib_http"), "expected body, got #{n.inspect}")
   assert!(n.include?("http_stdlib_ok"), "expected http_stdlib_ok, got #{n.inspect}")
   puts "  OK http_stdlib e2e (serve_once + http_get + join)"
+end
+
+# P0-1: bounded timeout, full-body read, POST, status/content-length helpers.
+def test_http_client_e2e!
+  src = ROOT.join("tests", "cases", "http_client_test.l")
+  assert!(File.exist?(src), "http_client_test not found")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("http_client_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(
+      STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_NET, STDLIB_TIME, STDLIB_THREAD,
+      STDLIB_HTTP, STDLIB_HTTP_SERVER, src
+    )
+  )
+  assert!(status.success?, "compile http_client_test failed\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "http_client_test exited #{st.exitstatus}\n#{err}\n#{out}")
+  n = out.gsub("\r\n", "\n")
+  assert!(n.include?("timeout_ok"), "expected timeout_ok, got #{n.inspect}")
+  assert!(n.include?("http_client_ok"), "expected http_client_ok, got #{n.inspect}")
+  puts "  OK http_client e2e (timeout + full body + POST + helpers)"
+end
+
+# P0-3: log level filter must suppress lower severities and clamp bad input.
+def test_log_level_e2e!
+  src = ROOT.join("tests", "cases", "log_level_test.l")
+  assert!(File.exist?(src), "log_level_test not found")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("log_level_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(STDLIB_STRING, STDLIB_TIME, STDLIB_LOG, src)
+  )
+  assert!(status.success?, "compile log_level_test failed\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "log_level_test exited #{st.exitstatus}\n#{err}\n#{out}")
+  n = out.gsub("\r\n", "\n")
+  # Visible: WARN/ERROR at level 2, DEBUG after clamping to 0. Hidden: everything else.
+  assert!(n.include?("warn_visible"), "expected warn_visible, got #{n.inspect}")
+  assert!(n.include?("error_visible"), "expected error_visible, got #{n.inspect}")
+  assert!(n.include?("debug_visible"), "expected debug_visible, got #{n.inspect}")
+  assert!(!n.include?("debug_hidden"), "DEBUG leaked at level 2: #{n.inspect}")
+  assert!(!n.include?("info_hidden"), "INFO leaked at level 2: #{n.inspect}")
+  assert!(!n.include?("error_hidden"), "ERROR leaked at OFF: #{n.inspect}")
+  assert!(n.include?("log_level_ok"), "expected log_level_ok, got #{n.inspect}")
+  puts "  OK log_level e2e (filter + clamp)"
+end
+
+# P1: L-native test framework — assertions count failures without aborting,
+# reset clears state, and test_report maps failures to a non-zero exit code.
+def test_test_framework_e2e!
+  src = ROOT.join("tests", "cases", "test_framework_test.l")
+  assert!(File.exist?(src), "test_framework_test not found")
+  assert!(File.exist?(STDLIB_TEST), "stdlib test not found: #{STDLIB_TEST}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("test_framework_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_RESULT, STDLIB_TEST, src)
+  )
+  assert!(status.success?, "compile test_framework_test failed\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "test_framework_test exited #{st.exitstatus}\n#{err}\n#{out}")
+  n = out.gsub("\r\n", "\n")
+  assert!(n.include?("test_framework_ok"), "expected test_framework_ok, got #{n.inspect}")
+  # Deliberate failures must be reported, not swallowed.
+  assert!(n.include?("deliberate_true_fail"), "expected deliberate failure label, got #{n.inspect}")
+  assert!(n.include?("expected: 2"), "expected 'expected: 2' diff line, got #{n.inspect}")
+  puts "  OK test_framework e2e (assertions + counts + reset + report)"
+end
+
+# Regression: boxed-string reassignment must not overflow the pointer slot.
+def test_str_reassign_e2e!
+  src = ROOT.join("tests", "cases", "str_reassign_test.l")
+  assert!(File.exist?(src), "str_reassign_test not found")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("str_reassign_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(STDLIB_STRING, STDLIB_ARRAY, src)
+  )
+  assert!(status.success?, "compile str_reassign_test failed\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "str_reassign_test exited #{st.exitstatus}\n#{err}\n#{out}")
+  n = out.gsub("\r\n", "\n")
+  assert!(n.include?("str_reassign_ok"), "expected str_reassign_ok, got #{n.inspect}")
+  puts "  OK str_reassign e2e (boxed String reassignment)"
 end
 
 def test_regex_e2e!
@@ -4653,6 +4746,10 @@ def main
     test_join_e2e!
     test_log_config_e2e!
     test_http_stdlib_e2e!
+    test_http_client_e2e!
+    test_log_level_e2e!
+    test_test_framework_e2e!
+    test_str_reassign_e2e!
     test_regex_e2e!
     test_regex_overflow_e2e!
     test_process_e2e!
