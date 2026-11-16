@@ -1,12 +1,11 @@
-// L vs C++ benchmark suite (native .exe, -O3).
-// Three aligned workloads; each prints its own elapsed milliseconds.
+// L vs C++ benchmark suite (native .exe, -O3). Native codegen only — never
+// `l eval` or the comptime interpreter.
 //
-//   A dense arithmetic loop      1e8 float accumulations (non-foldable shape)
-//   B heap object creation       1e7 Point{i32,i32} objects over 10 arena batches
-//   C string-keyed map           1e6 puts over a fixed 1e4-key pool
+//   A dense float arithmetic   1e8 iterations of sum += i * 2.5
+//   B object create + release  1e6 `heap Point` objects, reclaimed by auto-free
+//   C string map               1e6 short keys inserted, then 1e6 lookups
 //
-// Build (AOT, never `l eval` / the comptime interpreter):
-//   l -O3 -o bench_l.exe stdlib/*.l benchmarks/bench_l.l
+// Build: l -O3 -o bench_l.exe stdlib/*.l benchmarks/bench_l.l
 
 import "../stdlib/string.l"
 import "../stdlib/optional.l"
@@ -23,60 +22,59 @@ class Point {
     }
 }
 
-// A. Dense arithmetic: 1e8 iterations of a float accumulation. Float addition is
-// not reassociable, so LLVM cannot derive a closed form and the loop genuinely
-// runs (an integer `sum += i*2+1` would be folded into one polynomial at -O3 on
-// both compilers — verified). The C++ twin uses the exact same expression.
+// A. Dense float arithmetic: 1e8 iterations. Float addition is not
+// reassociable, so this survives -O3 as a real loop (an integer accumulator
+// would be folded into one polynomial by both compilers).
 fun bench_arith() -> f64 {
     f64 sum = 0.0
     i32 i = 0
     while i < 100000000 {
-        sum = sum + i * 0.5
+        sum = sum + i * 2.5
         i = i + 1
     }
     return sum
 }
 
-// B. Heap object creation: 10 batches of 1e6 objects, each batch a two-i32 Point
-// built from one arena block (one bump allocation serves the whole batch, then
-// the block is released). 1e7 objects total so the run lands in the hundreds of
-// milliseconds and the wall-clock timer resolves it reliably.
+// B. Object create + release: 1e6 two-field `heap` objects, one per iteration.
+// Each object is a real `l_alloc`; nothing is freed by hand, so the whole batch
+// is reclaimed by the compiler's auto-free injection at scope exit.
 fun bench_objects() -> i64 {
-    i64 acc! = 0
-    i32 batch! = 0
-    while batch < 10 {
-        a := arena(16777216)
-        i32 i! = 0
-        while i < 1000000 {
-            p := a.new(Point(i, i + 1))
-            acc! = acc + p.x + p.y
-            i! = i + 1
-        }
-        batch! = batch + 1
+    i64 acc = 0
+    i32 i = 0
+    while i < 1000000 {
+        p := heap Point(i, i + 1)
+        acc = acc + p.x + p.y
+        i = i + 1
     }
     return acc
 }
 
-// C. String hashing: keyed map inserts over a fixed 1e4-key pool. Keys are built
-// once (excluded from timing), then 1e6 puts (100 rounds x 1e4) measure the map's
-// hash + probe path — not string construction. Same shape as the C++ twin.
+// C. String map: build 1e6 short keys, insert every one, then look up every one.
+// The map must actually hold 1e6 distinct entries, so the key space is 1e6 wide.
 fun bench_strings() -> i32 {
     keys := Array<String>()
-    i32 i! = 0
-    while i < 10000 {
-        keys.push("key_" + i)
-        i! = i + 1
+    i32 i = 0
+    while i < 1000000 {
+        keys.push("k" + i)
+        i = i + 1
     }
     m := Map<i32>()
-    i32 round! = 0
-    while round < 100 {
-        i32 j! = 0
-        while j < 10000 {
-            m.put(keys.get(j), j)
-            j! = j + 1
-        }
-        round! = round + 1
+    i = 0
+    while i < 1000000 {
+        m.put(keys.get(i), i)
+        i = i + 1
     }
+    // Lookups: sum the values back so the reads cannot be dropped.
+    i64 hits = 0
+    i = 0
+    while i < 1000000 {
+        v := m.get(keys.get(i))
+        if v.is_some() {
+            hits = hits + 1
+        }
+        i = i + 1
+    }
+    print("C lookups hit: " + hits)
     return m.len()
 }
 
@@ -84,18 +82,21 @@ fun main() -> i32 {
     t0 := time_now_ms()
     a := bench_arith()
     t1 := time_now_ms()
-    print("A arith      : " + (t1 - t0) + " ms (sum=" + a + ")")
+    print("A arith   : " + (t1 - t0) + " ms")
+    print("  sum=" + a)
 
     t2 := time_now_ms()
     b := bench_objects()
     t3 := time_now_ms()
-    print("B objects    : " + (t3 - t2) + " ms (acc=" + b + ")")
+    print("B objects : " + (t3 - t2) + " ms")
+    print("  acc=" + b)
 
     t4 := time_now_ms()
     c := bench_strings()
     t5 := time_now_ms()
-    print("C strings    : " + (t5 - t4) + " ms (map_size=" + c + ")")
+    print("C strings : " + (t5 - t4) + " ms")
+    print("  map_size=" + c)
 
-    print("L total      : " + (t5 - t0) + " ms")
+    print("L total   : " + (t5 - t0) + " ms")
     return 0
 }

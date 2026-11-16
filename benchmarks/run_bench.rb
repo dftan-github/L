@@ -144,20 +144,29 @@ def parse_ms(text)
   end.to_h
 end
 
-cpp_ms = nil
-l_ms = nil
+cpp_runs = []
+l_runs = []
 3.times do |round|
   puts "\nRound #{round + 1}"
   puts "--- C++ (bench_cpp.exe) ---"
   _, out = time_exe!(cpp_exe)
   puts out.to_s.gsub("\r\n", "\n")
-  cpp_ms = parse_ms(out)
+  cpp_runs << parse_ms(out)
 
   puts "--- L (bench_l.exe) ---"
   _, out = time_exe!(l_bench_exe)
   puts out.to_s.gsub("\r\n", "\n")
-  l_ms = parse_ms(out)
+  l_runs << parse_ms(out)
 end
+
+# Median of the 3 rounds — steady-state timing, robust to one noisy run.
+def median(values)
+  sorted = values.sort
+  sorted[sorted.size / 2]
+end
+
+cpp_ms = %w[A B C].to_h { |k| [k, median(cpp_runs.map { |r| r[k] }.compact)] }
+l_ms = %w[A B C].to_h { |k| [k, median(l_runs.map { |r| r[k] }.compact)] }
 
 puts "\n| test | C++ (ms) | L (ms) | L / C++ |"
 puts "|------|---------:|-------:|--------:|"

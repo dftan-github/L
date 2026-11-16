@@ -1,9 +1,9 @@
 // C++ side of the L vs C++ benchmark suite (-O3).
 // Workloads mirror benchmarks/bench_l.l one-to-one; every section prints ms.
 //
-//   A dense arithmetic loop      1e8 float accumulations (non-foldable shape)
-//   B heap object creation       1e7 Point{i32,i32} objects over 10 batch blocks
-//   C string-keyed map           1e6 puts over a fixed 1e4-key pool
+//   A dense float arithmetic   1e8 iterations of sum += i * 2.5
+//   B object create + release  1e6 `new Point` objects, deleted each iteration
+//   C string map               1e6 short keys inserted, then 1e6 lookups
 
 #include <chrono>
 #include <cstdint>
@@ -26,51 +26,54 @@ double ms_since(Clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(t1 - t0).count();
 }
 
-// A. Dense arithmetic — 1e8 iterations of a float accumulation. Float addition is
-// not reassociable, so LLVM cannot derive a closed form and the loop genuinely
-// runs (an integer `sum += i*2+1` would be folded into one polynomial at -O3 on
-// both compilers). The L twin uses the exact same expression.
+// A. Dense float arithmetic — 1e8 iterations. Float addition is not
+// reassociable, so this survives -O3 as a real loop, exactly like the L twin.
 double bench_arith() {
     double sum = 0.0;
     for (std::int32_t i = 0; i < 100000000; ++i) {
-        sum = sum + i * 0.5;
+        sum = sum + i * 2.5;
     }
     return sum;
 }
 
-// B. Heap object creation — 10 batches of 1e6 two-field objects. Each batch comes
-// from one bump-allocated block (matching L's `arena(16777216)`: one allocation
-// serves the whole batch, released once). 1e7 objects total.
+// B. Object create + release — 1e6 two-field objects, each allocated with `new`
+// and released with `delete` (the C++ counterpart of L's `heap Point` + auto-free).
+// `p` is passed through an opaque `sink` so the allocator cannot prove the pair
+// dead and elide it (without that barrier this loop compiles to nothing at -O3).
+volatile std::int64_t sink_b = 0;
+
 std::int64_t bench_objects() {
     std::int64_t acc = 0;
-    for (std::int32_t batch = 0; batch < 10; ++batch) {
-        std::vector<Point> block(1000000);
-        for (std::int32_t i = 0; i < 1000000; ++i) {
-            Point* p = &block[static_cast<std::size_t>(i)];
-            p->x = i;
-            p->y = i + 1;
-            acc = acc + p->x + p->y;
-        }
+    for (std::int32_t i = 0; i < 1000000; ++i) {
+        Point* p = new Point{i, i + 1};
+        acc = acc + p->x + p->y;
+        sink_b = acc;
+        delete p;
     }
     return acc;
 }
 
-// C. String hashing — keyed map inserts over a fixed 1e4-key pool. Keys are built
-// once (excluded from timing), then 1e6 puts (100 rounds x 1e4) measure the map's
-// hash + probe path, not string construction. Mirrors the L twin.
+// C. String map — build 1e6 short keys, insert every one, then look up every one.
 std::int32_t bench_strings() {
     std::vector<std::string> keys;
-    keys.reserve(10000);
-    for (std::int32_t i = 0; i < 10000; ++i) {
-        keys.push_back("key_" + std::to_string(i));
+    keys.reserve(1000000);
+    for (std::int32_t i = 0; i < 1000000; ++i) {
+        keys.push_back("k" + std::to_string(i));
     }
     std::unordered_map<std::string, std::int32_t> m;
-    m.reserve(16384);
-    for (std::int32_t round = 0; round < 100; ++round) {
-        for (std::int32_t j = 0; j < 10000; ++j) {
-            m[keys[static_cast<std::size_t>(j)]] = j;
+    m.reserve(1048576);
+    for (std::int32_t i = 0; i < 1000000; ++i) {
+        m[keys[static_cast<std::size_t>(i)]] = i;
+    }
+    // Lookups: sum the hits so the reads cannot be dropped.
+    std::int64_t hits = 0;
+    for (std::int32_t i = 0; i < 1000000; ++i) {
+        auto it = m.find(keys[static_cast<std::size_t>(i)]);
+        if (it != m.end()) {
+            ++hits;
         }
     }
+    std::printf("C lookups hit: %lld\n", static_cast<long long>(hits));
     return static_cast<std::int32_t>(m.size());
 }
 
@@ -82,17 +85,19 @@ int main(int argc, char** argv) {
 
     auto t0 = Clock::now();
     const double a = bench_arith();
-    std::printf("A arith      : %.3f ms (sum=%.6g)\n", ms_since(t0), a);
+    std::printf("A arith   : %.3f ms\n", ms_since(t0));
+    std::printf("  sum=%.6g\n", a);
 
     auto t1 = Clock::now();
     const std::int64_t b = bench_objects();
-    std::printf("B objects    : %.3f ms (acc=%lld)\n", ms_since(t1),
-                static_cast<long long>(b));
+    std::printf("B objects : %.3f ms\n", ms_since(t1));
+    std::printf("  acc=%lld\n", static_cast<long long>(b));
 
     auto t2 = Clock::now();
     const std::int32_t c = bench_strings();
-    std::printf("C strings    : %.3f ms (map_size=%d)\n", ms_since(t2), c);
+    std::printf("C strings : %.3f ms\n", ms_since(t2));
+    std::printf("  map_size=%d\n", c);
 
-    std::printf("C++ total    : %.3f ms\n", ms_since(t0));
+    std::printf("C++ total : %.3f ms\n", ms_since(t0));
     return 0;
 }
