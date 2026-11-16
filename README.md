@@ -4,7 +4,7 @@
 
 ![Build Passing](https://img.shields.io/badge/build-passing-brightgreen)
 ![LLVM](https://img.shields.io/badge/LLVM-22.1.0-blue)
-![Tests](https://img.shields.io/badge/tests-148%20cases-success)
+![Tests](https://img.shields.io/badge/tests-161%20cases-success)
 
 > Ship the few lines the business actually needs. Leave the ceremony, the boilerplate
 > and the memorisation tax to the compiler.
@@ -21,6 +21,7 @@
 | 4 | [Code-as-Config (`CPropertys` / Typed Config)](#4-code-as-config--cpropertys--typed-config) | [`examples/typed_config.l`](examples/typed_config.l) · [`tests/cases/typed_cfg.l`](tests/cases/typed_cfg.l) |
 | 5 | [Metaprogramming (`LCMD` / `comptime`)](#5-metaprogramming--lcmd-and-comptime) | [`tests/cases/lcmd_path.l`](tests/cases/lcmd_path.l) · [`tests/cases/lcmd_l_callback.l`](tests/cases/lcmd_l_callback.l) |
 | 6 | [Enterprise-Grade Engineering](#6-enterprise-grade-engineering) | [`tests/run_tests.rb`](tests/run_tests.rb) · [`compiler/`](compiler) |
+| 7 | [Performance vs `clang++ -O3`](#7-performance--measured-against-clang-o3) | [`benchmarks/`](benchmarks) · [`benchmarks/run_bench.rb`](benchmarks/run_bench.rb) |
 
 ---
 
@@ -215,7 +216,7 @@ hands a monotonic `i64` to generated code so injected symbols never collide.
 
 ## 6. Enterprise-Grade Engineering
 
-The language is not a toy: 148 end-to-end cases gate every commit, covering lexer,
+The language is not a toy: 161 end-to-end cases gate every commit, covering lexer,
 parser, codegen, concurrency, FFI, metaprogramming and the doc generator.
 
 ```console
@@ -236,6 +237,40 @@ $ ruby tests/run_tests.rb --all        # full sweep
 | Benchmarks (`-O3`) | [`benchmarks/`](benchmarks) · [`benchmarks/run_bench.rb`](benchmarks/run_bench.rb) |
 
 **Real source:** [`tests/run_tests.rb`](tests/run_tests.rb) · [`compiler/`](compiler)
+
+---
+
+## 7. Performance — Measured Against `clang++ -O3`
+
+L compiles through LLVM and is linked with **LTO**, so the C runtime is inlined into
+generated code rather than called across a module boundary. The numbers below come from
+[`benchmarks/run_bench.rb`](benchmarks/run_bench.rb) (3 rounds, median), same machine,
+same `-O3` flag on both sides.
+
+**Strict** — identical semantics on both sides:
+
+| Test | What it does | C++ (ms) | L (ms) | L / C++ |
+| --- | --- | ---: | ---: | ---: |
+| A | 1e8 `f64` accumulations (`sum += i * 2.5`) | 74.05 | 75.00 | **1.01x** |
+| C | 1e6 string-Map inserts + 1e6 lookups | 393.32 | 600.00 | **1.53x** |
+
+**Free-for-all** — each side at its own best:
+
+| Test | What it does | C++ (ms) | L (ms) | L / C++ |
+| --- | --- | ---: | ---: | ---: |
+| A | string buffer appends | 13.27 | 14.00 | **1.06x** |
+| C | libm `sin` / `cos` float math | 100.43 | 126.00 | **1.25x** |
+
+Numeric loops land within measurement noise of `clang++ -O3` — same optimizer, no
+generational gap. The honest headline is the Map row: **1.5x of C++**, because open
+addressing probe loops are the one place where hand-written C still wins. FNV-1a hashing
+and `str_eq` are emitted as inline IR in codegen, which took that benchmark from 727ms
+to 600ms.
+
+> Scope: these are two narrow micro-benchmarks (one arithmetic loop, one hash table).
+> They measure the optimizer and the core data structures, not every workload. Heavy
+> `String` concatenation, dense object creation and cross-module calls have not been
+> benchmarked yet — do not generalise from this table.
 
 ---
 
@@ -263,12 +298,12 @@ L removes the tax instead of documenting it.
 5. **Metaprogramming in one language.** `//LCMD_` directives call L functions that
    return L source injected into the AST; `comptime` executes in the frontend and is
    stripped before codegen. No runtime cost, no foreign macro dialect.
-6. **Engineering that holds.** 148 end-to-end Ruby cases, incremental execution,
+6. **Engineering that holds.** 161 end-to-end Ruby cases, incremental execution,
    separate `-O3` benchmarks, LLVM 22.1.0 codegen with ORC JIT for `--eval` and `--repl`.
 
 L is compiled and statically, strongly typed. `:=` only lets you omit a type name the
 compiler already knows — it never turns the language dynamic. Short like a script, fast
-like C, checked at compile time.
+like C, checked at compile time — and [measured against it](#7-performance--measured-against-clang-o3).
 
 ---
 
