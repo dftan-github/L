@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <memory>
 #include <string>
@@ -122,6 +122,24 @@ private:
   llvm::Type* localSlotType(llvm::Value* slot);
   // Look up a C ABI symbol previously declared via `extern module` (no auto-create).
   llvm::Function* requireExtern(const std::string& name);
+
+  // [performance-first] Replace `l_hash_string` / `l_str_eq` calls with inline IR. The C
+  // runtime implementations stay as-is (other front ends / FFI users rely on
+  // them); Codegen simply stops emitting the call in favor of straight-line
+  // instructions, which removes the out-of-module indirection from every Map
+  // probe. Returns nullptr when the callee is not one of the two.
+  llvm::Value* tryEmitInlinedStringBuiltin(const ast::CallExpr& call,
+                                           const std::vector<llvm::Value*>& args);
+
+  // FNV-1a (64-bit) over a C string of `len` bytes, emitted as a load/xor/mul
+  // loop. `len` is i64.
+  llvm::Value* emitInlineStringHash(llvm::Value* cstr, llvm::Value* len,
+                                    const std::string& name_hint);
+
+  // Byte-wise C-string equality, emitted as a compare loop. NULL-safe like the
+  // runtime version: equal pointers are equal, any NULL operand is not equal.
+  llvm::Value* emitInlineStringEq(llvm::Value* a, llvm::Value* b,
+                                  const std::string& name_hint);
   bool declareExternFunc(const ast::FuncDeclStmt& fn);
   llvm::Type* llvmTypeForTypeName(const std::string& name);
   // ABI type for a formal parameter: class → ptr, interface → fat ptr, else value.

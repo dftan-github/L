@@ -1,4 +1,4 @@
-#include "codegen/codegen.hpp"
+﻿#include "codegen/codegen.hpp"
 
 #include <cstdint>
 #include <iostream>
@@ -605,6 +605,159 @@ llvm::Function* Codegen::requireExtern(const std::string& name) {
   }
   error("undeclared external function '" + name +
         "' (declare it with `extern module` in stdlib)");
+  return nullptr;
+}
+
+// [performance-first] FNV-1a 64-bit over an in-memory C string, emitted as straight-line IR.
+// Per byte: load i8 -> zext i64 -> xor acc -> mul prime. The loop is a
+// rotate-free 2-PHI loop, so LLVM keeps it tight and inlines the whole thing at
+// the call site (no function body is generated — these are instructions only).
+llvm::Value* Codegen::emitInlineStringHash(llvm::Value* cstr, llvm::Value* len,
+                                           const std::string& name_hint) {
+  llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+  llvm::BasicBlock* entry_bb = builder_.GetInsertBlock();
+  llvm::BasicBlock* loop_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".hash.loop", fn);
+  llvm::BasicBlock* body_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".hash.body", fn);
+  llvm::BasicBlock* done_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".hash.done", fn);
+
+  // FNV-1a constants: offset basis 14695981039346656037, prime 1099511628211.
+  const llvm::APInt kOffset(64, 0xcbf29ce484222325ULL);
+  const llvm::APInt kPrime(64, 0x100000001b3ULL);
+  llvm::Value* seed = llvm::ConstantInt::get(i64Ty(), kOffset);
+  llvm::Value* prime = llvm::ConstantInt::get(i64Ty(), kPrime);
+
+  builder_.CreateBr(loop_bb);
+
+  builder_.SetInsertPoint(loop_bb);
+  llvm::PHINode* idx = builder_.CreatePHI(i64Ty(), 2, name_hint + ".hash.idx");
+  llvm::PHINode* acc = builder_.CreatePHI(i64Ty(), 2, name_hint + ".hash.acc");
+  idx->addIncoming(llvm::ConstantInt::get(i64Ty(), 0), entry_bb);
+  acc->addIncoming(seed, entry_bb);
+  llvm::Value* in_range = builder_.CreateICmpSLT(idx, len, name_hint + ".hash.cont");
+  builder_.CreateCondBr(in_range, body_bb, done_bb);
+
+  builder_.SetInsertPoint(body_bb);
+  llvm::Value* byte_ptr = builder_.CreateGEP(llvm::Type::getInt8Ty(globalContext()), cstr,
+                                             {idx}, name_hint + ".hash.ptr");
+  llvm::Value* byte = builder_.CreateLoad(llvm::Type::getInt8Ty(globalContext()), byte_ptr,
+                                          name_hint + ".hash.byte");
+  llvm::Value* byte64 = builder_.CreateZExt(byte, i64Ty(), name_hint + ".hash.zext");
+  llvm::Value* mixed = builder_.CreateXor(acc, byte64, name_hint + ".hash.xor");
+  llvm::Value* next_acc = builder_.CreateMul(mixed, prime, name_hint + ".hash.mul");
+  llvm::Value* next_idx = builder_.CreateAdd(idx, llvm::ConstantInt::get(i64Ty(), 1),
+                                             name_hint + ".hash.next");
+  idx->addIncoming(next_idx, body_bb);
+  acc->addIncoming(next_acc, body_bb);
+  builder_.CreateBr(loop_bb);
+
+  builder_.SetInsertPoint(done_bb);
+  return acc;
+}
+
+// [performance-first] Inline C-string equality returning i32 (1 / 0), matching the runtime's
+// NULL-safe contract: identical pointers are equal; any NULL operand is not.
+llvm::Value* Codegen::emitInlineStringEq(llvm::Value* a, llvm::Value* b,
+                                         const std::string& name_hint) {
+  llvm::Function* fn = builder_.GetInsertBlock()->getParent();
+  llvm::BasicBlock* entry_bb = builder_.GetInsertBlock();
+  llvm::BasicBlock* same_ptr_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".eq.same", fn);
+  llvm::BasicBlock* null_chk_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".eq.nullchk", fn);
+  llvm::BasicBlock* loop_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".eq.loop", fn);
+  llvm::BasicBlock* body_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".eq.body", fn);
+  llvm::BasicBlock* next_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".eq.next", fn);
+  llvm::BasicBlock* unequal_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".eq.unequal", fn);
+  llvm::BasicBlock* equal_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".eq.equal", fn);
+  llvm::BasicBlock* done_bb =
+      llvm::BasicBlock::Create(globalContext(), name_hint + ".eq.done", fn);
+
+  llvm::Type* i8t = llvm::Type::getInt8Ty(globalContext());
+  llvm::Value* zero32 = llvm::ConstantInt::get(i32Ty(), 0);
+  llvm::Value* one32 = llvm::ConstantInt::get(i32Ty(), 1);
+  llvm::Value* null_ptr =
+      llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy()));
+
+  // a == b (pointer) -> equal.
+  llvm::Value* same = builder_.CreateICmpEQ(a, b, name_hint + ".eq.sameptr");
+  builder_.CreateCondBr(same, same_ptr_bb, null_chk_bb);
+
+  builder_.SetInsertPoint(same_ptr_bb);
+  builder_.CreateBr(done_bb);
+
+  // a == NULL || b == NULL -> not equal.
+  builder_.SetInsertPoint(null_chk_bb);
+  llvm::Value* a_null = builder_.CreateICmpEQ(a, null_ptr, name_hint + ".eq.anull");
+  llvm::Value* b_null = builder_.CreateICmpEQ(b, null_ptr, name_hint + ".eq.bnull");
+  llvm::Value* any_null = builder_.CreateOr(a_null, b_null, name_hint + ".eq.anynull");
+  builder_.CreateCondBr(any_null, unequal_bb, loop_bb);
+
+  // Byte loop: compare one byte at a time; stop on a mismatch or a terminator.
+  builder_.SetInsertPoint(loop_bb);
+  llvm::PHINode* idx = builder_.CreatePHI(i64Ty(), 2, name_hint + ".eq.idx");
+  idx->addIncoming(llvm::ConstantInt::get(i64Ty(), 0), null_chk_bb);
+  llvm::Value* pa = builder_.CreateGEP(i8t, a, {idx}, name_hint + ".eq.pa");
+  llvm::Value* pb = builder_.CreateGEP(i8t, b, {idx}, name_hint + ".eq.pb");
+  llvm::Value* ca = builder_.CreateLoad(i8t, pa, name_hint + ".eq.ca");
+  llvm::Value* cb = builder_.CreateLoad(i8t, pb, name_hint + ".eq.cb");
+  llvm::Value* differ = builder_.CreateICmpNE(ca, cb, name_hint + ".eq.differ");
+  builder_.CreateCondBr(differ, unequal_bb, body_bb);
+
+  // Equal bytes: a NUL here means both strings ended -> equal.
+  builder_.SetInsertPoint(body_bb);
+  llvm::Value* is_term = builder_.CreateICmpEQ(ca, llvm::ConstantInt::get(i8t, 0),
+                                               name_hint + ".eq.term");
+  builder_.CreateCondBr(is_term, equal_bb, next_bb);
+
+  // Otherwise advance and re-enter the loop.
+  builder_.SetInsertPoint(next_bb);
+  llvm::Value* next_idx =
+      builder_.CreateAdd(idx, llvm::ConstantInt::get(i64Ty(), 1), name_hint + ".eq.inc");
+  idx->addIncoming(next_idx, next_bb);
+  builder_.CreateBr(loop_bb);
+
+  builder_.SetInsertPoint(unequal_bb);
+  builder_.CreateBr(done_bb);
+  builder_.SetInsertPoint(equal_bb);
+  builder_.CreateBr(done_bb);
+
+  builder_.SetInsertPoint(done_bb);
+  llvm::PHINode* result = builder_.CreatePHI(i32Ty(), 3, name_hint + ".eq.result");
+  result->addIncoming(one32, same_ptr_bb);
+  result->addIncoming(zero32, unequal_bb);
+  result->addIncoming(one32, equal_bb);
+  return result;
+}
+
+// [performance-first] Dispatch on the callee name: FNV-1a and str_eq become inline IR.
+llvm::Value* Codegen::tryEmitInlinedStringBuiltin(const ast::CallExpr& call,
+                                                  const std::vector<llvm::Value*>& args) {
+  if (call.callee == "l_hash_string" && args.size() == 1 && args[0] &&
+      args[0]->getType()->isPointerTy()) {
+    // Length comes from libc strlen (always i64 / size_t), avoiding a dependency
+    // on which stdlib declared l_str_len and its i32 return type.
+    llvm::Function* strlen_fn = module_->getFunction("strlen");
+    if (!strlen_fn) {
+      auto* sfty = llvm::FunctionType::get(i64Ty(), {ptrTy()}, false);
+      strlen_fn = llvm::Function::Create(sfty, llvm::Function::ExternalLinkage, "strlen",
+                                         module_.get());
+      strlen_fn->setCallingConv(llvm::CallingConv::C);
+    }
+    llvm::Value* len = builder_.CreateCall(strlen_fn, {args[0]}, "hash.len");
+    return emitInlineStringHash(args[0], len, "l_hash_string");
+  }
+  if (call.callee == "l_str_eq" && args.size() == 2 && args[0] && args[1] &&
+      args[0]->getType()->isPointerTy() && args[1]->getType()->isPointerTy()) {
+    return emitInlineStringEq(args[0], args[1], "l_str_eq");
+  }
   return nullptr;
 }
 
@@ -12155,6 +12308,13 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     }
     args.push_back(v);
   }
+  // [performance-first] Inline hot string primitives straight to IR instead of emitting a
+  // CallInst. Only the instruction stream changes; the runtime symbols and the
+  // language semantics are untouched.
+  if (llvm::Value* inlined = tryEmitInlinedStringBuiltin(call, args)) {
+    return inlined;
+  }
+
   if (callee->getReturnType()->isVoidTy()) {
     builder_.CreateCall(callee, args);
     return llvm::ConstantInt::get(i32Ty(), 0);
