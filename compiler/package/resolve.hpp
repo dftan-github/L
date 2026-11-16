@@ -10,7 +10,8 @@ namespace l::package {
 
 struct ResolvedPackage {
   std::string name;
-  std::string version;
+  std::string version;           // effective version (possibly pinned by l.lock)
+  std::string version_on_disk;   // what vendor/<name>/l.toml actually declares
   std::filesystem::path root;            // vendor/<name>
   std::filesystem::path interface_file;  // .li (preferred) or .l
   std::filesystem::path static_lib;      // .a / .lib (may be empty if missing)
@@ -24,6 +25,10 @@ struct ResolveResult {
   // Directories that the module loader should search for `import name`.
   std::vector<std::filesystem::path> import_search_paths;
   std::vector<std::filesystem::path> link_libs;
+  // Exact versions chosen this run, in dependency order.
+  Lockfile lock;
+  // True when an existing l.lock pinned a version that l.toml no longer allows.
+  bool lockfile_stale = false;
 };
 
 // Walk upward from `start_dir` looking for l.toml; returns that directory (or empty).

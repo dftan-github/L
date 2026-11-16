@@ -775,6 +775,21 @@ int main(int argc, char** argv) {
       for (const fs::path& lib : resolved.link_libs) {
         extra_link_libs.push_back(lib.string());
       }
+      // Refresh l.lock when it is missing, stale, or out of date with l.toml.
+      const fs::path lock_path = pkg_root / "l.lock";
+      bool need_write = resolved.lockfile_stale || !fs::exists(lock_path);
+      if (!need_write) {
+        std::string read_err;
+        l::package::Lockfile on_disk;
+        if (l::package::parseLockfile(lock_path.string(), on_disk, read_err)) {
+          if (l::package::lockfileToString(on_disk) != l::package::lockfileToString(resolved.lock)) {
+            need_write = true;
+          }
+        }
+      }
+      if (need_write && !resolved.lock.packages.empty()) {
+        l::package::writeLockfile(lock_path.string(), resolved.lock);
+      }
     }
   }
 

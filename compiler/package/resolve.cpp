@@ -1,7 +1,10 @@
 #include "package/resolve.hpp"
 
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
+
+#include "package/semver.hpp"
 
 namespace l::package {
 namespace fs = std::filesystem;
@@ -44,10 +47,41 @@ struct CycleCtx {
   std::unordered_map<std::string, Manifest> manifests;  // name → parsed
   std::unordered_set<std::string> visiting;
   std::unordered_set<std::string> visited;
+  std::vector<std::string> resolved_order;  // post-order (deps before dependents)
   std::string cycle_a;
   std::string cycle_b;
   bool cycle = false;
 };
+
+// Verify a dependency's declared constraint against the version found on disk.
+// Emits "[ERROR] package 'x' requires 'y' <constraint>, found <version>".
+bool checkConstraint(const std::string& from, const Dependency& dep,
+                     const std::string& actual_version, std::string& err) {
+  if (dep.version.empty()) {
+    return true;
+  }
+  const VersionConstraint c = parseConstraint(dep.version);
+  if (!c.valid) {
+    err = "[ERROR] package '" + from + "' has invalid version constraint '" +
+          dep.version + "' for '" + dep.name + "'";
+    return false;
+  }
+  if (c.op == VersionConstraint::Op::Any) {
+    return true;
+  }
+  const SemVer v = parseSemVer(actual_version);
+  if (!v.valid) {
+    // A vendor package without a version cannot be validated; importing it is
+    // still allowed (synthetic manifests for version-less vendor drops).
+    return true;
+  }
+  if (!satisfies(v, c)) {
+    err = "[ERROR] package '" + from + "' requires '" + dep.name + "' " +
+          constraintToString(c) + ", found " + (actual_version.empty() ? "<unknown>" : actual_version);
+    return false;
+  }
+  return true;
+}
 
 bool loadManifestFor(CycleCtx& ctx, const fs::path& vendor_root, const std::string& name,
                      Manifest& out, std::string& err) {
@@ -115,10 +149,19 @@ bool walkDeps(CycleCtx& ctx, const fs::path& vendor_root, const std::string& nam
       ctx.visiting.erase(name);
       return false;
     }
+    // Constraint check after the child manifest is loaded (its own version known).
+    auto child = ctx.manifests.find(d.name);
+    const std::string child_version =
+        (child != ctx.manifests.end()) ? child->second.version : std::string();
+    if (!checkConstraint(name, d, child_version, err)) {
+      ctx.visiting.erase(name);
+      return false;
+    }
   }
 
   ctx.visiting.erase(name);
   ctx.visited.insert(name);
+  ctx.resolved_order.push_back(name);
   return true;
 }
 
@@ -176,15 +219,31 @@ ResolveResult resolveDependencies(const fs::path& package_root) {
       }
       return result;
     }
+    // The root's own constraints are checked here: walkDeps only sees edges
+    // declared *inside* vendor packages, never the root manifest's.
+    auto child = ctx.manifests.find(d.name);
+    const std::string child_version =
+        (child != ctx.manifests.end()) ? child->second.version : std::string();
+    std::string root_err;
+    if (!checkConstraint(result.root_manifest.name, d, child_version, root_err)) {
+      result.error = root_err;
+      return result;
+    }
   }
 
-  // Collect resolved packages in dependency order (visited set order is fine for Phase 1).
-  for (const Dependency& d : result.root_manifest.dependencies) {
-    // Include transitive packages discovered during walk.
-    (void)d;
+  // Lockfile: prefer pinned versions from l.lock. A pin that no longer satisfies
+  // its l.toml constraint makes the lock stale — we rebuild it rather than
+  // silently shipping a version the manifest forbids.
+  Lockfile existing;
+  std::string lock_err;
+  const fs::path lock_path = package_root / "l.lock";
+  parseLockfile(lock_path.string(), existing, lock_err);
+  std::unordered_map<std::string, std::string> pinned;
+  for (const LockEntry& e : existing.packages) {
+    pinned[e.name] = e.version;
   }
-  for (const auto& kv : ctx.manifests) {
-    const std::string& name = kv.first;
+
+  for (const std::string& name : ctx.resolved_order) {
     if (name == "<root>" || name == result.root_manifest.name) {
       continue;
     }
@@ -193,9 +252,18 @@ ResolveResult resolveDependencies(const fs::path& package_root) {
       result.error = "[ERROR] missing vendor package '" + name + "' at " + root.string();
       return result;
     }
+    auto man = ctx.manifests.find(name);
+    const std::string disk_version =
+        (man != ctx.manifests.end()) ? man->second.version : std::string();
+    std::string version = disk_version;
+    auto pin = pinned.find(name);
+    if (pin != pinned.end() && !pin->second.empty()) {
+      version = pin->second;
+    }
     ResolvedPackage pkg;
     pkg.name = name;
-    pkg.version = kv.second.version;
+    pkg.version = version;
+    pkg.version_on_disk = disk_version;
     pkg.root = root;
     pkg.interface_file = findInterfaceFile(root, name);
     pkg.static_lib = findStaticLib(root, name);
@@ -208,6 +276,35 @@ ResolveResult resolveDependencies(const fs::path& package_root) {
     result.import_search_paths.push_back(root);
     if (!pkg.static_lib.empty()) {
       result.link_libs.push_back(pkg.static_lib);
+    }
+    LockEntry le;
+    le.name = name;
+    le.version = version;
+    result.lock.packages.push_back(le);
+  }
+
+  // Mark the lock stale when a pin disagrees with what the manifest allows.
+  for (const Dependency& d : result.root_manifest.dependencies) {
+    auto pin = pinned.find(d.name);
+    if (pin == pinned.end()) {
+      continue;
+    }
+    std::string ignored;
+    if (!checkConstraint(result.root_manifest.name, d, pin->second, ignored)) {
+      result.lockfile_stale = true;
+    }
+  }
+
+  // A stale lock must not keep pinning forbidden versions: rewrite entries from
+  // the versions actually on disk so the emitted lock matches reality.
+  if (result.lockfile_stale) {
+    result.lock.packages.clear();
+    for (ResolvedPackage& p : result.packages) {
+      p.version = p.version_on_disk;
+      LockEntry le;
+      le.name = p.name;
+      le.version = p.version_on_disk;
+      result.lock.packages.push_back(le);
     }
   }
 

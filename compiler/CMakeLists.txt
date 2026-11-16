@@ -6,8 +6,9 @@ add_library(l_compiler STATIC
   semantic/semantic.cpp
   codegen/codegen.cpp
   module/loader.cpp
-  package/toml.cpp
-  package/resolve.cpp
+    package/toml.cpp
+    package/semver.cpp
+    package/resolve.cpp
   package/config_host.cpp
   package/lconf_runner.cpp
   diagnostic/diagnostic.cpp
