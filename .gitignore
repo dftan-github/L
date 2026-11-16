@@ -7,3 +7,6 @@ tests/test_out/
 # Built from math_lib.c by the pkg_test runner (rebuilt on every run)
 tests/cases/pkg_test/vendor/**/*.o
 tests/cases/pkg_test/vendor/**/*.a
+
+# Generated lockfile for the pkg_test fixture (rewritten each build)
+tests/cases/pkg_test/l.lock

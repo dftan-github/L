@@ -1764,6 +1764,157 @@ def test_str_reassign_e2e!
   puts "  OK str_reassign e2e (boxed String reassignment)"
 end
 
+# P1-5: layered config override chain (default < file < env < cli).
+def test_config_layered_e2e!
+  src = ROOT.join("tests", "cases", "config_layered_test.l")
+  assert!(File.exist?(src), "config_layered_test not found")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("config_layered_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(
+      STDLIB_STRING, STDLIB_ARRAY, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_IO,
+      STDLIB_FILE, STDLIB_FS, STDLIB_PATH, STDLIB_ENV, STDLIB_JSON,
+      STDLIB_PROPERTIES, STDLIB_RESULT, STDLIB_CONFIG, src
+    )
+  )
+  assert!(status.success?, "compile config_layered_test failed\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "config_layered_test exited #{st.exitstatus}\n#{err}\n#{out}")
+  n = out.gsub("\r\n", "\n")
+  assert!(n.include?("config_layered_ok"), "expected config_layered_ok, got #{n.inspect}")
+  puts "  OK config_layered e2e (default < file < env < cli + typed accessors)"
+end
+
+# P1-6: log sinks (console / file / silent) and structured key-value lines.
+def test_log_sink_e2e!
+  src = ROOT.join("tests", "cases", "log_sink_test.l")
+  assert!(File.exist?(src), "log_sink_test not found")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("log_sink_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(
+      STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_RESULT, STDLIB_IO, STDLIB_FILE,
+      STDLIB_FS, STDLIB_PATH, STDLIB_TIME, STDLIB_LOG, src
+    )
+  )
+  assert!(status.success?, "compile log_sink_test failed\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "log_sink_test exited #{st.exitstatus}\n#{err}\n#{out}")
+  n = out.gsub("\r\n", "\n")
+  assert!(n.include?("log_sink_ok"), "expected log_sink_ok, got #{n.inspect}")
+  # A successful file redirect must keep the console quiet.
+  assert!(!n.include?("file_line_info"), "file line leaked to console: #{n.inspect}")
+  puts "  OK log_sink e2e (file sink + silent + structured kv)"
+end
+
+# P1-4: chunked decoding, PUT / DELETE, hex parsing edge cases.
+def test_http_chunked_e2e!
+  src = ROOT.join("tests", "cases", "http_chunked_test.l")
+  assert!(File.exist?(src), "http_chunked_test not found")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("http_chunked_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler(
+    "-o", exe.to_s,
+    *with_runtime(
+      STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP, STDLIB_NET, STDLIB_TIME,
+      STDLIB_THREAD, STDLIB_HTTP, STDLIB_HTTP_SERVER, src
+    )
+  )
+  assert!(status.success?, "compile http_chunked_test failed\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "http_chunked_test exited #{st.exitstatus}\n#{err}\n#{out}")
+  n = out.gsub("\r\n", "\n")
+  assert!(n.include?("http_chunked_ok"), "expected http_chunked_ok, got #{n.inspect}")
+  puts "  OK http_chunked e2e (dechunk + PUT/DELETE + hex edges)"
+end
+
+# P2: package version constraints (^ ~ >= exact) + l.lock pinning & refresh.
+def test_package_versioning_e2e!
+  base = OUT_DIR.join("pkgver")
+  FileUtils.rm_rf(base)
+  FileUtils.mkdir_p(base.join("vendor", "liba"))
+  FileUtils.mkdir_p(base.join("vendor", "libb"))
+  File.write(base.join("main.l"), "fun main() -> i32 {\n    return 0\n}\n")
+  File.write(base.join("vendor", "liba", "liba.li"), "pub fun a() -> i32\n")
+  File.write(base.join("vendor", "libb", "libb.li"), "pub fun b() -> i32\n")
+  File.write(base.join("vendor", "libb", "l.toml"),
+             "[package]\nname = \"libb\"\nversion = \"2.1.7\"\n")
+
+  set_manifest = lambda do |dep, constraint|
+    File.write(base.join("l.toml"),
+               "[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\n" \
+               "#{dep} = \"#{constraint}\"\n")
+  end
+
+  run = lambda do
+    out, err, st = run_compiler(
+      "--emit-llvm", "-o", base.join("app.ll").to_s, base.join("main.l").to_s
+    )
+    [out.to_s + err.to_s, st]
+  end
+
+  # liba at 1.4.2 on disk.
+  File.write(base.join("vendor", "liba", "l.toml"),
+             "[package]\nname = \"liba\"\nversion = \"1.4.2\"\n")
+
+  # Satisfied constraint → compiles, writes l.lock at the exact version.
+  set_manifest.call("liba", "^1.0")
+  text, st = run.call
+  assert!(st.success?, "caret satisfied should compile\n#{text}")
+  lock = base.join("l.lock")
+  assert!(File.exist?(lock), "l.lock should be written")
+  assert!(File.read(lock).include?("version = \"1.4.2\""), "lock must pin 1.4.2")
+
+  # Unsatisfied caret → error naming the requirement.
+  set_manifest.call("liba", "^2.0")
+  text, st = run.call
+  assert!(!st.success?, "caret violation should fail")
+  assert!(text.include?("requires 'liba' ^2.0.0"), "expected caret error, got #{text}")
+
+  # Unsatisfied tilde.
+  set_manifest.call("libb", "~2.2")
+  text, st = run.call
+  assert!(!st.success?, "tilde violation should fail")
+  assert!(text.include?("requires 'libb' ~2.2.0"), "expected tilde error, got #{text}")
+
+  # Malformed constraint is a distinct diagnostic.
+  set_manifest.call("libb", "^^abc")
+  text, st = run.call
+  assert!(!st.success?, "invalid constraint should fail")
+  assert!(text.include?("invalid version constraint"), "expected invalid-constraint error, got #{text}")
+
+  # Exact pin respected while the manifest still allows it.
+  set_manifest.call("liba", "^1.0")
+  File.write(base.join("vendor", "liba", "l.toml"),
+             "[package]\nname = \"liba\"\nversion = \"1.9.9\"\n")
+  text, st = run.call
+  assert!(st.success?, "pinned build should compile\n#{text}")
+  assert!(File.read(lock).include?("version = \"1.4.2\""), "existing pin must hold on rebuild")
+
+  # Pin becomes illegal → lock refreshes to the on-disk version.
+  set_manifest.call("liba", "^1.5")
+  text, st = run.call
+  assert!(st.success?, "stale-lock rebuild should compile\n#{text}")
+  assert!(File.read(lock).include?("version = \"1.9.9\""), "stale lock must refresh to 1.9.9")
+
+  # Transitive constraint violation is reported with the depending package.
+  File.write(base.join("vendor", "liba", "l.toml"),
+             "[package]\nname = \"liba\"\nversion = \"1.4.2\"\n\n[dependencies]\nlibb = \">=3.0.0\"\n")
+  set_manifest.call("liba", "^1.0")
+  text, st = run.call
+  assert!(!st.success?, "transitive violation should fail")
+  assert!(text.include?("package 'liba' requires 'libb' >=3.0.0"),
+         "expected transitive error, got #{text}")
+
+  FileUtils.rm_rf(base)
+  puts "  OK package_versioning e2e (^ ~ exact, transitive, l.lock pin/refresh)"
+end
+
 def test_regex_e2e!
   assert!(File.exist?(REGEX_TEST), "regex_test not found: #{REGEX_TEST}")
   assert!(File.exist?(STDLIB_REGEX), "stdlib regex not found: #{STDLIB_REGEX}")
@@ -4750,6 +4901,10 @@ def main
     test_log_level_e2e!
     test_test_framework_e2e!
     test_str_reassign_e2e!
+    test_config_layered_e2e!
+    test_log_sink_e2e!
+    test_http_chunked_e2e!
+    test_package_versioning_e2e!
     test_regex_e2e!
     test_regex_overflow_e2e!
     test_process_e2e!

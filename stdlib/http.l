@@ -24,6 +24,31 @@ fun http_take_str(ptr buf, i32 n) -> String {
     return String(copy)
 }
 
+// Case-insensitive prefix test for header names (HTTP header names are
+// case-insensitive per RFC 7230; servers emit any casing).
+pub fun http_starts_with_ci(String s, String prefix) -> bool {
+    n := prefix.length()
+    if n > s.length() {
+        return false
+    }
+    i32 i = 0
+    while i < n {
+        c! := s.char_at(i)
+        p! := prefix.char_at(i)
+        if c >= 65 && c <= 90 {
+            c! = c + 32
+        }
+        if p >= 65 && p <= 90 {
+            p! = p + 32
+        }
+        if c != p {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
 // Parse `Content-Length: N` out of a header block; -1 when absent or malformed.
 fun http_content_length(String response) -> i32 {
     hdr_end := response.index_of(String("\r\n\r\n"))
@@ -38,7 +63,7 @@ fun http_content_length(String response) -> i32 {
         // Header names only appear at line starts.
         if i == 0 || head.char_at(i - 1) == 10 {
             rem := head.slice(i, n - i)
-            if rem.starts_with(lower_key) {
+            if http_starts_with_ci(rem, lower_key) {
                 val := rem.slice(lower_key.length(), rem.length() - lower_key.length())
                 colon := val.index_of(String("\r\n"))
                 if colon >= 0 {
@@ -151,6 +176,123 @@ pub fun http_get_timeout(String host, i32 port, String path, i32 timeout_ms) -> 
 pub fun http_post(String host, i32 port, String path, String content_type, String body) -> String {
     hdr := String("Content-Type: ").concat(content_type).concat(String("\r\n"))
     return http_request(String("POST"), host, port, path, hdr, body, 10000)
+}
+
+pub fun http_put(String host, i32 port, String path, String content_type, String body) -> String {
+    hdr := String("Content-Type: ").concat(content_type).concat(String("\r\n"))
+    return http_request(String("PUT"), host, port, path, hdr, body, 10000)
+}
+
+pub fun http_delete(String host, i32 port, String path) -> String {
+    return http_request(String("DELETE"), host, port, path, String(""), String(""), 10000)
+}
+
+// True when the response headers advertise `Transfer-Encoding: chunked`.
+pub fun http_is_chunked(String response) -> bool {
+    hdr_end := response.index_of(String("\r\n\r\n"))
+    head := response
+    if hdr_end >= 0 {
+        head = response.slice(0, hdr_end)
+    }
+    key := String("transfer-encoding:")
+    n := head.length()
+    i! := 0
+    while i < n {
+        if i == 0 || head.char_at(i - 1) == 10 {
+            rem := head.slice(i, n - i)
+            if http_starts_with_ci(rem, key) {
+                if http_starts_with_ci(rem.slice(key.length(), rem.length() - key.length()), String(" chunked")) {
+                    return true
+                }
+            }
+        }
+        i! = i + 1
+    }
+    return false
+}
+
+// Decode `Transfer-Encoding: chunked` body content into the plain payload.
+// Malformed length lines stop decoding and return what was read so far —
+// a truncated body is better than a hang or a crash.
+pub fun http_dechunk(String chunked_body) -> String {
+    out := String("")
+    n := chunked_body.length()
+    pos! := 0
+    while pos < n {
+        // Read the hex size line.
+        nl := chunked_body.index_of(String("\r\n"))
+        line := String("")
+        if nl >= 0 {
+            // index_of finds the first CRLF; we need the one at/after `pos`.
+            scan! := pos
+            found! := 0 - 1
+            while scan < n - 1 {
+                if chunked_body.char_at(scan) == 13 && chunked_body.char_at(scan + 1) == 10 {
+                    found! = scan
+                    scan! = n
+                } else {
+                    scan! = scan + 1
+                }
+            }
+            if found < 0 {
+                return out
+            }
+            line = chunked_body.slice(pos, found - pos)
+            pos = found + 2
+        }
+        size := http_hex_to_i32(line.trim())
+        if size <= 0 {
+            // 0 marks the end of the body ("0\r\n\r\n" trailer section).
+            return out
+        }
+        if pos + size > n {
+            out = out.concat(chunked_body.slice(pos, n - pos))
+            return out
+        }
+        out = out.concat(chunked_body.slice(pos, size))
+        pos = pos + size
+        // Skip the CRLF that follows each chunk's data.
+        if pos + 1 < n && chunked_body.char_at(pos) == 13 && chunked_body.char_at(pos + 1) == 10 {
+            pos = pos + 2
+        }
+    }
+    return out
+}
+
+// Hex digits → integer. Returns -1 on any invalid character.
+pub fun http_hex_to_i32(String s) -> i32 {
+    n := s.length()
+    if n == 0 {
+        return 0 - 1
+    }
+    acc := 0
+    i32 i = 0
+    while i < n {
+        c := s.char_at(i)
+        d := 0 - 1
+        if c >= 48 && c <= 57 {
+            d = c - 48
+        } else if c >= 97 && c <= 102 {
+            d = c - 87
+        } else if c >= 65 && c <= 70 {
+            d = c - 55
+        }
+        if d < 0 {
+            return 0 - 1
+        }
+        acc = acc * 16 + d
+        i = i + 1
+    }
+    return acc
+}
+
+// Body accessor that transparently dechunks when the response says so.
+pub fun http_body_auto(String response) -> String {
+    raw := http_body(response)
+    if http_is_chunked(response) {
+        return http_dechunk(raw)
+    }
+    return raw
 }
 
 pub fun https_get(String host, String path) -> String {

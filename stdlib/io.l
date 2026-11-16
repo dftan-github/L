@@ -33,6 +33,7 @@ extern module c_io {
     fun l_get_arg(i32 index) -> ptr
     // getenv wrapper; NULL when unset (check with l_ptr_is_null).
     fun l_get_env(ptr name) -> ptr
+    fun l_set_env(ptr name, ptr value) -> i32
     // Filesystem helpers (runtime/sys.c).
     fun l_file_exists(ptr path) -> i32
     fun l_create_dir(ptr path) -> i32

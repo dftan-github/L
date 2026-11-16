@@ -56,6 +56,20 @@ char* l_get_env(const char* name) {
   return getenv(name);
 }
 
+/* Set an environment variable for this process (and children). Returns 0 on
+ * success, non-zero otherwise. Used by layered config overrides in tests and by
+ * programs that derive settings at startup. */
+int32_t l_set_env(const char* name, const char* value) {
+  if (name == NULL || value == NULL) {
+    return -1;
+  }
+#ifdef _WIN32
+  return _putenv_s(name, value) == 0 ? 0 : -1;
+#else
+  return setenv(name, value, 1) == 0 ? 0 : -1;
+#endif
+}
+
 /* 1 if path exists (file or directory), 0 otherwise. */
 int32_t l_file_exists(const char* path) {
   if (path == NULL || path[0] == '\0') {

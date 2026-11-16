@@ -9,9 +9,9 @@
 - `stdlib/`：25 个模块
 - `runtime/`：9 个 C 源文件（callback / io / memory / net / regex / sys / thread / tls / task）
 - `compiler/`：14 个子目录（ast / codegen / compile / comptime / diagnostic / doc / iface / jit / lexer / module / package / parser / semantic）
-- `tests/cases/`：161 条自动化用例（`ruby tests/run_tests.rb --all`）
+- `tests/cases/`：169 条自动化用例（`ruby tests/run_tests.rb --all`）
 
-> **2026-11-16 复核结论：17 项中 10 项已完成、1 项部分完成、6 项仍有效。**
+> **2026-11-16 复核结论：17 项中 15 项已完成、1 项部分完成、1 项仍有效。**
 > 初版低估了当时的实现进度，以下逐项标注了代码证据与复核日期。
 > 引用本文排期前，请先跑一遍 `grep` 核对，不要直接采信结论。
 
@@ -39,16 +39,25 @@
 仍缺：`mod a.b.c` 式的**层级模块声明**（当前以文件为模块单元）、`internal` 中间可见性。
 这不阻塞多文件项目，但模块粒度仍是“一个文件一个模块”。
 
-### 2. `[部分]` 包管理依赖解析
+### 2. `[完成]` 包管理版本约束与锁文件
 
-现状：`l.toml` 的 `[package]` / `[dependencies]` 可解析，`vendor/` 按名查找 `<dep>.li` 与 `lib<dep>.a`，
-循环依赖有检测（`[ERROR] Circular dependency detected`）。
+2026-11-16 补齐约束求解与 `l.lock`。
 
-- `version` 字段：`compiler/package/toml.cpp` 仅解析为字符串，**无约束求解**
-- 锁文件：**不存在**，无法保证构建可重现
+- `compiler/package/semver.{hpp,cpp}`：SemVer 解析 + 约束求解
+    - 支持 `^1.2.3`（caret，含 `0.x` 特例）、`~1.2.3`（tilde）、`>=` `>` `<=` `<`、`=1.2.3`、`*`
+    - caret 遵循 semver 规范：`^1.2.3 → [1.2.3, 2.0.0)`，`^0.2.3 → [0.2.3, 0.3.0)`，`^0.0.3 → 0.0.3`
+- `resolve.cpp`：约束校验接入 DFS，覆盖**根 manifest** 与**传递依赖**两类边
+    - `[ERROR] package 'app' requires 'liba' ^2.0.0, found 1.4.2`
+    - `[ERROR] package 'liba' requires 'libb' >=3.0.0, found 2.1.7`
+    - `[ERROR] package 'app' has invalid version constraint '^^abc' for 'libb'`
+- `l.lock`：`[[package]]` 段记录 `name` / `version`，按依赖后序（被依赖者在前）输出
+    - 存在有效 pin 时以 pin 为准，磁盘版本升级不会自动改变构建结果
+    - pin 不再满足 manifest 约束时判定 stale，自动回落到磁盘真实版本并重写锁文件
+    - 无版本号的 vendor 包（合成 manifest）跳过校验，不会误报
 
-仍缺：版本约束（`^1.2` / `~1.2` / 范围）、`l.lock`、`dev-dependencies`、workspace、
-依赖替换（patch）。**当前依赖版本号只是注解，不参与任何决策。**
+仍缺：`dev-dependencies`、workspace、依赖替换（patch）、多版本共存（同一依赖的两个不兼容版本）。
+
+测试：`tests/run_tests.rb --filter=package_versioning`。
 
 ### 3. `[完成]` 增量编译
 
@@ -73,13 +82,20 @@
 
 已纳入缓存键，`-g` 与非 `-g` 构建互不污染。
 
-### 5. `[缺失]` 泛型实例化无管控
+### 5. `[完成]` 泛型实例化管控
 
-现状：`<T: Interface>` 全单态化，嵌套上限 2，**无实例化去重与数量统计**。
+复核结论：初版判断有误，三项能力均已存在。
 
-后果：`Array<Map<Array<X>>>` 组合增多时，代码体积与编译时间会失控，且无诊断提示。
+- **嵌套上限**：`codegen.cpp` → `genericNestingDepth()` + `kMaxGenericDepth = 2`，
+  在 `ensureTypeAvailable()` 中最先拦截，报
+  `generic instantiation depth limit exceeded (2): 'X<Y<Z<i32>>>' nests 3 generic types`
+- **实例化去重**：`specializeClass()` 首行 `if (classes_.count(instance_name) != 0) return true;`，
+  同名实例只特化一次
+- **约束校验**：`classImplements()` 在特化时校验 `[ERROR] Type 'X' does not implement interface 'I'`
 
-建议：加入实例化去重与数量上限，超限时给出明确诊断而非静默膨胀。
+不做的部分：实例化**数量**上限。仓库中没有真实大项目数据能标定阈值，
+凭猜测写死一个数字属于无需求驱动的配置，YAGNI。若将来出现编译时间问题，
+应以实测数据（实例化个数 vs 编译耗时曲线）为依据再定。
 
 ---
 
@@ -120,11 +136,9 @@
 
 仍缺：JSON 严格模式下的大整数保真（数值统一走 i32/i64/f64 路径）、错误定位的行列号。
 
-### 9. `[完成]` 日志分级
+### 9. `[完成]` 日志分级与结构化输出
 
 初版判断：三个函数写死输出。
-
-实际：完整级别过滤（`stdlib/log.l`）。
 
 - 级别：`0=DEBUG` / `1=INFO` / `2=WARN` / `3=ERROR` / `4=OFF`，默认 INFO
 - `log_set_level(i32)` 越界自动钳制到 `[0,4]`；`log_get_level()` 可查询
@@ -132,13 +146,37 @@
 - 格式：`[LEVEL] {YYYY-MM-DD HH:MM:SS} {msg}`
 - 测试：`tests/run_tests.rb --filter=log_level`（`tests/cases/log_level_test.l`）
 
-仍缺：结构化字段（key=value）、输出目标（文件 / 滚动 / 异步）、按模块设定级别。
+2026-11-16 补齐文件与静默出口：
 
-### 10. `[缺失]` 配置无分层与校验
+- **文件输出**：`log_to_file(path) -> Result<bool, String>`，追加写入；失败时**保持原输出**并返回原因
+- **静默**：`log_silence()` 丢弃全部输出（测试用），`log_to_console()` 恢复
+- **结构化 key=value**：`log_info_kv` / `log_warn_kv` / `log_error_kv`，输出 `ts [LEVEL] key=value`
+    - 用独立参数而非 `Map`，避免每次调用都分配
+- **过滤前置**：级别与 sink 检查都在格式化之前，被压掉的调用只花一次比较
+- 依赖：`stdlib/file.l` 新增 `append_all(path, content) -> Result<bool, String>`
 
-实际：读 JSON 成属性树，再取值。
+仍缺：滚动（按大小/日期切分）、异步写入、按模块设定级别。
 
-缺：`默认值 < 文件 < 环境变量 < 命令行` 覆盖链、schema 校验、热加载。
+测试：`tests/run_tests.rb --filter=log_sink`（`tests/cases/log_sink_test.l`）。
+
+### 10. `[完成]` 配置分层与类型化取值
+
+2026-11-16 补齐覆盖链与类型化访问器（`stdlib/config.l`）。
+
+- **覆盖链**：`config_layered(default_path, file_path, cli)` → `Result<Map<String>, String>`
+    - 顺序：默认值文件 < 文件 < 环境变量 < 命令行
+    - 一次性摊平成 `Map`，之后查表 O(1)，不在每次取值时走四层
+- **环境变量**：`config_env_name(key)` 把 `database.port` 映射为 `L_DATABASE_PORT`
+    - **仅对配置中已存在的键生效**，避免无关的 `L_*` 变量注入意外设置
+- **类型化访问器**：`config_i32` / `config_bool` / `config_get`，缺键返回调用方给的默认值
+    - `config_bool` 接受 `true/1/false/0`，其余回落到默认值
+- **错误不静默**：显式指定的配置文件解析失败直接返回 `Err`，不当作"没有配置"
+- **环境变量写入**：`runtime/sys.c` 新增 `l_set_env`（`_putenv_s` / `setenv`），
+  `stdlib/env.l` 暴露 `set_env`
+
+仍缺：schema 校验（字段类型/必填约束的声明式描述）、热加载。
+
+测试：`tests/run_tests.rb --filter=config_layered`（`tests/cases/config_layered_test.l`）。
 
 ### 11. `[完成]` HTTP 客户端
 
@@ -159,10 +197,20 @@
 **完整读取**：旧实现单次 `recv` 读 4KB 就返回，大响应会被截断。现按
 `Content-Length` 精确读满；无该头时读到对端关闭为止（`Connection: close`）。
 
-仍缺：PUT / DELETE / PATCH、chunked 编码解码、重定向跟随、
-HTTPS 客户端证书配置面（`https_get` 固定 443，无超时参数）。
+仍缺：`PATCH`、重定向跟随、HTTPS 客户端证书配置面（`https_get` 固定 443，无超时参数）。
 
-测试：`tests/run_tests.rb --filter=http_client`（`tests/cases/http_client_test.l`）。
+2026-11-16（第二批）补齐：
+
+- **PUT / DELETE**：`http_put(host, port, path, content_type, body)` / `http_delete(host, port, path)`
+- **chunked 解码**：`http_is_chunked` / `http_dechunk` / `http_body_auto`
+    - `http_body_auto` 检测 `Transfer-Encoding: chunked` 后自动解块，调用方可无脑使用
+    - 截断块返回已读部分而非崩溃或挂起（失败降级优于挂死）
+- **hex 解析**：`http_hex_to_i32`，大小写均可，非法输入返回 -1
+- **头名大小写**：新增 `http_starts_with_ci`。HTTP 头名大小写不敏感（RFC 7230），
+  原 `http_content_length` 用小写比较、服务端发大写，长期靠巧合工作；现已修正
+
+测试：`tests/run_tests.rb --filter=http_client` 与 `--filter=http_chunked`
+（`tests/cases/http_client_test.l`、`tests/cases/http_chunked_test.l`）。
 
 ### 12. `[完成]` L 侧测试框架
 
@@ -254,11 +302,11 @@ fun main() -> i32 {
 | 顺序 | 项目 | 范围 | 风险 | 理由 |
 | --- | --- | --- | --- | --- |
 | 1 | 并发原语（channel / 线程池） | stdlib + runtime | 中高 | 当前 spawn 立即 join，无法表达并行任务图 |
-| 2 | 包管理版本约束 + 锁文件 | 编译器 package | 中 | 开发机可构建、换机失败，比性能问题更伤人 |
-| 3 | 泛型实例化上限与诊断 | 编译器 codegen | 中 | 防止大项目编译时间静默失控 |
-| 4 | HTTP 剩余（PUT/chunked/重定向） | 纯 stdlib | 低 | GET + POST + 超时已够多数场景 |
-| 5 | 配置分层 + schema 校验 | 纯 stdlib | 中 | 默认值/环境变量/命令行覆盖链 |
-| 6 | 日志结构化与输出目标 | 纯 stdlib | 低 | 级别过滤已落地，剩余为增强 |
+| 2 | ~~包管理版本约束 + 锁文件~~ | — | — | **2026-11-16 完成** |
+| 3 | ~~泛型实例化上限与诊断~~ | — | — | **2026-11-16 复核：能力已存在** |
+| 4 | ~~HTTP 剩余（PUT/chunked）~~ | — | — | **2026-11-16 完成**（重定向仍缺） |
+| 5 | ~~配置分层~~ | — | — | **2026-11-16 完成**（schema 校验仍缺） |
+| 6 | ~~日志结构化与输出目标~~ | — | — | **2026-11-16 完成** |
 
 已撤销的初版建议（1 Array / 2 Map / 3 JSON / 4 日志时间戳 / 5 命名空间 / 6 调试信息）：
 **全部完成**。
@@ -266,8 +314,12 @@ fun main() -> i32 {
 2026-11-16 已完成批次：
 - P0：HTTP 超时与完整读取、POST、日志级别过滤
 - P1：L 侧测试框架（`stdlib/test.l`），并修复装箱 String 重赋值溢出 bug
+- 批 2~6：包管理版本约束 + `l.lock`、HTTP PUT/DELETE/chunked、
+  配置分层与类型化取值、日志文件/静默出口与结构化字段；
+  泛型实例化经复核确认（深度限制、去重、约束校验）均已存在，数量上限按 YAGNI 不做
 
 下一批建议从「并发原语」起，因为它牵涉 `spawn` 的栈地址捕获，属架构改动。
+其后可选：HTTP 重定向跟随、配置 schema 校验、`Array` 高阶方法、日志滚动。
 
 ---
 
