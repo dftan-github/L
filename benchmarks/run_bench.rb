@@ -174,7 +174,64 @@ puts "|------|---------:|-------:|--------:|"
   c = cpp_ms[k]
   l = l_ms[k]
   next unless c && l
-  ratio = c.positive? ? (l / c) : 0.0
+  if c < 0.0005
+    puts format("| %s | %.3f | %.3f | n/a (C++ loop elided) |", k, c, l)
+    next
+  end
+  ratio = l / c
+  puts format("| %s | %.3f | %.3f | %.2fx |", k, c, l, ratio)
+end
+
+# ---------------------------------------------------------------------------
+# "Free-for-all" suite (bench_freeforall_cpp.cpp vs bench_freeforall_l.l).
+# Same three workloads with every optimization on the table (reserved buffers,
+# bump arenas, raw byte stores, libm). L side is still AOT -O3 native.
+# ---------------------------------------------------------------------------
+FF_CXX = BENCH_DIR.join("bench_freeforall_cpp.cpp")
+FF_L = BENCH_DIR.join("bench_freeforall_l.l")
+
+ff_cpp_exe = OUT_DIR.join("bench_freeforall_cpp.exe")
+ff_l_exe = OUT_DIR.join("bench_freeforall_l.exe")
+
+puts "\n[free-for-all] Compiling bench_freeforall_cpp.cpp with -O3 ..."
+compile_cpp_o3!(FF_CXX, ff_cpp_exe)
+
+puts "[free-for-all] Compiling bench_freeforall_l.l with -O3 ..."
+compile_o3!([STDLIB_ARRAY, STDLIB_STRING, STDLIB_OPTIONAL, STDLIB_MAP,
+             ROOT.join("stdlib", "thread.l"), ROOT.join("stdlib", "time.l"),
+             FF_L], ff_l_exe)
+
+ff_cpp_runs = []
+ff_l_runs = []
+3.times do |round|
+  puts "\n[free-for-all] Round #{round + 1}"
+  puts "--- C++ (bench_freeforall_cpp.exe) ---"
+  _, out = time_exe!(ff_cpp_exe)
+  puts out.to_s.gsub("\r\n", "\n")
+  ff_cpp_runs << parse_ms(out)
+
+  puts "--- L (bench_freeforall_l.exe) ---"
+  _, out = time_exe!(ff_l_exe)
+  puts out.to_s.gsub("\r\n", "\n")
+  ff_l_runs << parse_ms(out)
+end
+
+ff_cpp_ms = %w[A B C].to_h { |k| [k, median(ff_cpp_runs.map { |r| r[k] }.compact)] }
+ff_l_ms = %w[A B C].to_h { |k| [k, median(ff_l_runs.map { |r| r[k] }.compact)] }
+
+puts "\n[free-for-all] median of 3"
+puts "| test | C++ (ms) | L (ms) | L / C++ |"
+puts "|------|---------:|-------:|--------:|"
+%w[A B C].each do |k|
+  c = ff_cpp_ms[k]
+  l = ff_l_ms[k]
+  next unless c && l
+  # A dead-code-eliminated loop reports 0 ms; the ratio is meaningless, so say so.
+  if c < 0.0005
+    puts format("| %s | %.3f | %.3f | n/a (C++ loop elided) |", k, c, l)
+    next
+  end
+  ratio = l / c
   puts format("| %s | %.3f | %.3f | %.2fx |", k, c, l, ratio)
 end
 
