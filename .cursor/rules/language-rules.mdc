@@ -767,6 +767,15 @@ val := res?
 if val <= 10 { return }
 do_something()
 
+## 111. Code Style: Constants on the Left (Yoda)
+<!-- id:yoda-style -->
+- **Precedence (CRITICAL)**: For boolean operands (`true` / `false`), `!expr` ALWAYS wins over any `==` / `!=` constant form. Write `if !is_x(v)`, NOT `if is_x(v) == false`, NOT `if false == is_x(v)`, NOT `if is_x(v) != true`. The `!` form applies to plain identifiers, field access, and call results alike.
+- **Comparison Order**: For NON-boolean constants in `==` / `!=`, the constant MUST be on the LEFT. Write `if "true" == ver`, NOT `if ver == "true"`. This covers string literals and number literals.
+- **`!=` Rule**: `X != false` and `X != true` are BANNED. Rewrite as `!X` (for `!= false` / `!= true` the sense is inverted — resolve the intent by reading the surrounding branch before rewriting; never invert mechanically).
+- **Variable vs Variable**: When BOTH operands are variables, order is free — keep the natural readable order.
+- **LCMD / comptime Restriction (CRITICAL)**: Inside `__compile_time_handler` / `__on_class_parsed` / `comptime` blocks, operands MUST be plain literals or variables. The upfront tree-walking interpreter (`compiler/comptime/interpreter.cpp`) supports ONLY IntLiteral / BoolLiteral / StringLiteral / Identifier / Call / Binary. It does NOT implement `NewExpr`, so `String("x") == cmd` fails with `unsupported comptime expression`. Write `"x" == cmd`.
+- **Where It Applies**: stdlib / tests / benchmarks / examples — all `.l` files in the repo, no exceptions.
+
 
 ## 999. AI Collaboration Discipline (CRITICAL)
 <!-- id:ai-discipline -->

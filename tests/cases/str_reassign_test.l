@@ -21,7 +21,7 @@ fun main() -> i32 {
 
     // A second reassignment must still be safe (no accumulated overflow).
     line = line.concat(String("!"))
-    if line != String("total 3, passed 7!") {
+    if "total 3, passed 7!" != line {
         print(line)
         print(String("fail: second reassign"))
         return 1
@@ -35,7 +35,7 @@ fun main() -> i32 {
         print(String("fail: sentinel corrupted"))
         return 1
     }
-    if other != String("keep") {
+    if "keep" != other {
         print(String("fail: neighbour corrupted"))
         return 1
     }

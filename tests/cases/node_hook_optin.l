@@ -1,5 +1,5 @@
 pub fun __on_class_parsed(String className) -> String {
-    if className == "UserAuto" {
+    if "UserAuto" == className {
         return "pub fun print_auto_log() -> i32 { return 888; }"
     }
     return ""

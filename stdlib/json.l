@@ -245,13 +245,13 @@ fun parse_number(String tok) -> f64 {
 // Tag 0 marks JSON null; the caller leaves such a node payload-less.
 // (Result<Variant, ...> is avoided: a two-word first argument does not parse.)
 fun parse_scalar(String tok) -> Variant {
-    if tok == "null" {
+    if "null" == tok {
         return Variant(0, l_null_ptr());
     }
-    if tok == "true" {
+    if "true" == tok {
         return Variant.from_bool(true);
     }
-    if tok == "false" {
+    if "false" == tok {
         return Variant.from_bool(false);
     }
     if is_integral_text(tok) {

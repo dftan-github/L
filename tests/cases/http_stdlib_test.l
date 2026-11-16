@@ -7,7 +7,7 @@ fun main() -> i32 {
     sleep(100)
     resp := http_get(String("127.0.0.1"), 18088, String("/"))
     join(hs)
-    if http_status_ok(resp) == false {
+    if !http_status_ok(resp) {
         print("fail status")
         print(resp)
         return 1
@@ -15,7 +15,7 @@ fun main() -> i32 {
     body := http_body(resp)
     print(body)
     needle := String("hello_stdlib_http")
-    if body.contains(needle) == false {
+    if !body.contains(needle) {
         print("fail body")
         return 1
     }

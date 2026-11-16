@@ -3,15 +3,15 @@ fun main() -> i32 {
     t := s.trim()
     hello := String("Hello")
     world := String("World")
-    if t.contains(hello) == false {
+    if !t.contains(hello) {
         print("fail contains")
         return 1
     }
-    if t.starts_with(hello) == false {
+    if !t.starts_with(hello) {
         print("fail starts")
         return 1
     }
-    if t.ends_with(world) == false {
+    if !t.ends_with(world) {
         print("fail ends")
         return 1
     }

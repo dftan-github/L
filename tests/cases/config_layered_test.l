@@ -49,11 +49,11 @@ fun main() -> i32 {
         print(String("fail: config_i32 default"))
         return 1
     }
-    if config_bool(cfg, String("debug"), true) != false {
+    if config_bool(cfg, String("debug"), true) {
         print(String("fail: config_bool"))
         return 1
     }
-    if config_bool(cfg, String("missing_bool"), true) != true {
+    if !config_bool(cfg, String("missing_bool"), true) {
         print(String("fail: config_bool default"))
         return 1
     }

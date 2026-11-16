@@ -11,14 +11,14 @@ fun main() -> i32 {
     f2 := path_join(dir, String("two.txt"))
     write_all(f1, String("hi"))
     copy_file(f1, f2)
-    if file_exists(f2) == false {
+    if !file_exists(f2) {
         print("fail copy")
         return 1
     }
     f3 := path_join(dir, String("three.txt"))
     rename_path(f2, f3)
     listing := read_dir(dir)
-    if listing.is_ok() == false {
+    if !listing.is_ok() {
         print("fail read_dir")
         return 1
     }

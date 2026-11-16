@@ -10,3 +10,9 @@ tests/cases/pkg_test/vendor/**/*.a
 
 # Generated lockfile for the pkg_test fixture (rewritten each build)
 tests/cases/pkg_test/l.lock
+
+# Executor turn reports (Axxx), read back by the analysis chat
+.agent-reports/
+
+# Instruction handoff between the analysis chat and the executor
+.agent-instructions/

@@ -73,19 +73,19 @@ fun main() -> i32 {
         mode = args.get(1)
     }
 
-    if mode == "build" || mode == "all" {
+    if "build" == mode || "all" == mode {
         print("bench_tree_build begin")
         print(bench_tree_build())
         print("bench_tree_build end")
     }
 
-    if mode == "lookup" || mode == "all" {
+    if "lookup" == mode || "all" == mode {
         print("bench_tree_lookup begin")
         print(bench_tree_lookup())
         print("bench_tree_lookup end")
     }
 
-    if mode == "deep" || mode == "all" {
+    if "deep" == mode || "all" == mode {
         print("bench_tree_deep begin")
         print(bench_tree_deep())
         print("bench_tree_deep end")

@@ -4,7 +4,7 @@
 
 ![Build Passing](https://img.shields.io/badge/build-passing-brightgreen)
 ![LLVM](https://img.shields.io/badge/LLVM-22.1.0-blue)
-![Tests](https://img.shields.io/badge/tests-161%20cases-success)
+![Tests](https://img.shields.io/badge/tests-169%20cases-success)
 
 > Ship the few lines the business actually needs. Leave the ceremony, the boilerplate
 > and the memorisation tax to the compiler.

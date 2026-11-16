@@ -3,13 +3,13 @@ fun main() -> i32 {
     payload := "Hello\nL-Lang!\r\n"
 
     ok := File.write_all(path, payload)
-    if ok == false {
+    if !ok {
         print("write failed")
         return 1
     }
 
     res := File.read_all(path)
-    if res.is_some() == false {
+    if !res.is_some() {
         print("read failed")
         return 1
     }

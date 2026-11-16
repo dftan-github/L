@@ -5601,11 +5601,17 @@ llvm::Value* Codegen::emitCast(const ast::CastExpr& expr) {
 
 std::string Codegen::inferTypeFromExpr(const ast::Expr& expr) {
   // Bare `"text"` in `:=` contexts is a String when the stdlib type is loaded.
+  // [A005] Never fall back to `ptr`: a missing stdlib/string.l would otherwise
+  // degrade silently and surface later as "internal: cannot convert a
+  // non-integer value to i32" from the integer print path. Report the real
+  // cause instead; callers treat an empty result as "cannot infer".
   if (expr.kind() == ast::ExprKind::StringLiteral) {
     if (ensureTypeAvailable("String") && isClassType("String")) {
       return "String";
     }
-    return "ptr";
+    error(expr.loc,
+          "string literal requires stdlib/string.l to be compiled in (add it to the source list)");
+    return {};
   }
   if (expr.kind() == ast::ExprKind::FloatLiteral) {
     return "f64";
@@ -6003,12 +6009,12 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   std::string type_name = decl.type_name;
   if (type_name.empty()) {
     if (!decl.init) {
-      error("inferred declaration requires an initializer: " + decl.name);
+      error(decl.loc, "inferred declaration requires an initializer: " + decl.name);
       return false;
     }
     type_name = inferTypeFromExpr(*decl.init);
     if (type_name.empty()) {
-      error("cannot infer type for '" + decl.name + "' from initializer");
+      error(decl.loc, "cannot infer type for '" + decl.name + "' from initializer");
       return false;
     }
   }

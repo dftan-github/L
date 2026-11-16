@@ -217,7 +217,7 @@ fun is_number_token(String s) -> bool {
     }
     i! := 0
     while i < n {
-        if is_digit(s.char_at(i)) == false {
+        if !is_digit(s.char_at(i)) {
             return false
         }
         i! = i + 1
@@ -230,14 +230,14 @@ fun is_ident_token(String s) -> bool {
     if n == 0 {
         return false
     }
-    if is_alpha(s.char_at(0)) == false {
+    if !is_alpha(s.char_at(0)) {
         return false
     }
     i! := 1
     while i < n {
         c := s.char_at(i)
-        if is_alpha(c) == false {
-            if is_digit(c) == false {
+        if !is_alpha(c) {
+            if !is_digit(c) {
                 return false
             }
         }
@@ -312,14 +312,14 @@ fun is_ident_name(String s) -> bool {
     if n == 0 {
         return false
     }
-    if is_alpha(s.char_at(0)) == false {
+    if !is_alpha(s.char_at(0)) {
         return false
     }
     i! := 1
     while i < n {
         c := s.char_at(i)
-        if is_alpha(c) == false {
-            if is_digit(c) == false {
+        if !is_alpha(c) {
+            if !is_digit(c) {
                 if c != 95 {
                     return false
                 }
@@ -1082,13 +1082,13 @@ fun main() -> i32 {
     payload := "Hello\nL-Lang!\r\n"
 
     ok := File.write_all(path, payload)
-    if ok == false {
+    if !ok {
         print("write failed")
         return 1
     }
 
     res := File.read_all(path)
-    if res.is_some() == false {
+    if !res.is_some() {
         print("read failed")
         return 1
     }
@@ -1129,32 +1129,32 @@ fun main() -> i32 {
     print("before:false")
 
     mk := create_dir(dir)
-    if mk.is_ok() == false {
+    if !mk.is_ok() {
         print("create:err")
         return 1
     }
     print("create:ok")
 
-    if file_exists(dir) == false {
+    if !file_exists(dir) {
         print("after:false")
         return 1
     }
     print("after:true")
 
-    if File.write_all(nested, String("fs-ok")) == false {
+    if !File.write_all(nested, String("fs-ok")) {
         print("write:err")
         return 1
     }
 
     rm := remove_file(nested)
-    if rm.is_ok() == false {
+    if !rm.is_ok() {
         print("remove_file:err")
         return 1
     }
     print("remove_file:ok")
 
     rd := remove_dir(dir)
-    if rd.is_ok() == false {
+    if !rd.is_ok() {
         print("remove_dir:err")
         return 1
     }
@@ -1458,7 +1458,7 @@ fun main() -> i32 {
     sleep(100)
     resp := http_get(String("127.0.0.1"), 18088, String("/"))
     join(hs)
-    if http_status_ok(resp) == false {
+    if !http_status_ok(resp) {
         print("fail status")
         print(resp)
         return 1
@@ -1466,7 +1466,7 @@ fun main() -> i32 {
     body := http_body(resp)
     print(body)
     needle := String("hello_stdlib_http")
-    if body.contains(needle) == false {
+    if !body.contains(needle) {
         print("fail body")
         return 1
     }
@@ -1561,14 +1561,14 @@ fun main() -> i32 {
     q := String(l_str_from_byte(34))
     raw := lb + q + String("name") + q + String(":") + q + String("L") + q + String(",") + q + String("n") + q + String(":42,") + q + String("ok") + q + String(":true,") + q + String("x") + q + String(":null") + rb
     parsed := json_parse_object(raw)
-    if parsed.is_ok() == false {
+    if !parsed.is_ok() {
         print("fail parse")
         return 1
     }
     m := parsed.unwrap()
     name_key := String("name")
     name := m.get(name_key)
-    if name.is_some() == false {
+    if !name.is_some() {
         print("fail name")
         return 1
     }
@@ -1753,7 +1753,7 @@ fun main() -> i32 {
     body := lb + q + String("host") + q + String(":") + q + String("127.0.0.1") + q + String(",") + q + String("port") + q + String(":") + q + String("8080") + q + rb
     write_all(path, body)
     cfg_res := load_json_config(path)
-    if cfg_res.is_ok() == false {
+    if !cfg_res.is_ok() {
         print("fail config")
         return 1
     }
@@ -2177,14 +2177,14 @@ fun main() -> i32 {
     f2 := path_join(dir, String("two.txt"))
     write_all(f1, String("hi"))
     copy_file(f1, f2)
-    if file_exists(f2) == false {
+    if !file_exists(f2) {
         print("fail copy")
         return 1
     }
     f3 := path_join(dir, String("three.txt"))
     rename_path(f2, f3)
     listing := read_dir(dir)
-    if listing.is_ok() == false {
+    if !listing.is_ok() {
         print("fail read_dir")
         return 1
     }
@@ -2236,7 +2236,7 @@ fun main() -> i32 {
 //------------------------------------------------
 fun main() -> i32 {
     res := run_capture_stdout(String("echo hello_capture"))
-    if res.is_ok() == false {
+    if !res.is_ok() {
         print("fail launch")
         return 1
     }
@@ -2244,7 +2244,7 @@ fun main() -> i32 {
     out := raw_out.trim()
     print(out)
     needle := String("hello_capture")
-    if out.contains(needle) == false {
+    if !out.contains(needle) {
         print("fail stdout")
         return 1
     }
@@ -2474,15 +2474,15 @@ fun main() -> i32 {
     t := s.trim()
     hello := String("Hello")
     world := String("World")
-    if t.contains(hello) == false {
+    if !t.contains(hello) {
         print("fail contains")
         return 1
     }
-    if t.starts_with(hello) == false {
+    if !t.starts_with(hello) {
         print("fail starts")
         return 1
     }
-    if t.ends_with(world) == false {
+    if !t.ends_with(world) {
         print("fail ends")
         return 1
     }

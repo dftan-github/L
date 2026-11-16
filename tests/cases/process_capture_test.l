@@ -1,6 +1,6 @@
 fun main() -> i32 {
     res := run_capture_stdout(String("echo hello_capture"))
-    if res.is_ok() == false {
+    if !res.is_ok() {
         print("fail launch")
         return 1
     }
@@ -8,7 +8,7 @@ fun main() -> i32 {
     out := raw_out.trim()
     print(out)
     needle := String("hello_capture")
-    if out.contains(needle) == false {
+    if !out.contains(needle) {
         print("fail stdout")
         return 1
     }

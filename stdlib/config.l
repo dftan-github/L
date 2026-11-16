@@ -140,16 +140,18 @@ pub fun config_bool(Map<String> cfg, String key, bool default_val) -> bool {
         return default_val
     }
     s := v.unwrap()
-    if s == String("true") {
+    // [style] Constants on the left (Yoda): a constant can never be null, and a
+    // stray `=` written for `==` is a compile error instead of a silent assign.
+    if "true" == s {
         return true
     }
-    if s == String("1") {
+    if "1" == s {
         return true
     }
-    if s == String("false") {
+    if "false" == s {
         return false
     }
-    if s == String("0") {
+    if "0" == s {
         return false
     }
     return default_val

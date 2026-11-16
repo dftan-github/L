@@ -86,7 +86,7 @@ pub class Map<V> {
         i64 h = l_hash_string(key_cstr)
         i32 idx = l_hash_to_bucket(h, capacity)
         bool placed = false;
-        while placed == false {
+        while !placed {
             if occupied[idx] {
                 if l_str_eq(keys[idx], key_cstr) != 0 {
                     values[idx] = val;
@@ -158,7 +158,7 @@ pub class Map<V> {
                         movable = true;
                     }
                 }
-                if movable == false {
+                if !movable {
                     break
                 }
                 keys[hole] = keys[next]

@@ -46,7 +46,7 @@ fun main() -> i32 {
     sleep(150)
     got := http_get(String("127.0.0.1"), 18192, String("/"))
     join(hs2)
-    if http_status_ok(got) == false {
+    if !http_status_ok(got) {
         print(String("fail: get status"))
         return 1
     }
@@ -64,7 +64,7 @@ fun main() -> i32 {
     sleep(150)
     post := http_post(String("127.0.0.1"), 18193, String("/"), String("text/plain"), String("payload"))
     join(hs3)
-    if http_status_ok(post) == false {
+    if !http_status_ok(post) {
         print(String("fail: post status"))
         return 1
     }

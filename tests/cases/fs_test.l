@@ -9,32 +9,32 @@ fun main() -> i32 {
     print("before:false")
 
     mk := create_dir(dir)
-    if mk.is_ok() == false {
+    if !mk.is_ok() {
         print("create:err")
         return 1
     }
     print("create:ok")
 
-    if file_exists(dir) == false {
+    if !file_exists(dir) {
         print("after:false")
         return 1
     }
     print("after:true")
 
-    if File.write_all(nested, String("fs-ok")) == false {
+    if !File.write_all(nested, String("fs-ok")) {
         print("write:err")
         return 1
     }
 
     rm := remove_file(nested)
-    if rm.is_ok() == false {
+    if !rm.is_ok() {
         print("remove_file:err")
         return 1
     }
     print("remove_file:ok")
 
     rd := remove_dir(dir)
-    if rd.is_ok() == false {
+    if !rd.is_ok() {
         print("remove_dir:err")
         return 1
     }

@@ -1,5 +1,5 @@
 pub fun __compile_time_handler(String path, String cmd, String args) -> String {
-    if path == "User.generate" && cmd == "make_hello" {
+    if "User.generate" == path && "make_hello" == cmd {
         return "pub fun say_hello() -> i32 { return 42; }"
     }
     return ""

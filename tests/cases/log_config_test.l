@@ -7,7 +7,7 @@ fun main() -> i32 {
     body := lb + q + String("host") + q + String(":") + q + String("127.0.0.1") + q + String(",") + q + String("port") + q + String(":") + q + String("8080") + q + rb
     write_all(path, body)
     cfg_res := load_json_config(path)
-    if cfg_res.is_ok() == false {
+    if !cfg_res.is_ok() {
         print("fail config")
         return 1
     }

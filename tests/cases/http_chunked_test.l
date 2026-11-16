@@ -42,7 +42,7 @@ fun main() -> i32 {
     // --- Chunked decode: two chunks + terminator ---
     body := String("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
     got := http_dechunk(body)
-    if got != String("hello world") {
+    if "hello world" != got {
         print(got)
         print(String("fail: chunked decode"))
         return 1
@@ -56,7 +56,7 @@ fun main() -> i32 {
 
     // Truncated chunk (declares 10 bytes, supplies 3) returns what exists.
     trunc := http_dechunk(String("a\r\nabc"))
-    if trunc != String("abc") {
+    if "abc" != trunc {
         print(trunc)
         print(String("fail: truncated chunk should return partial"))
         return 1

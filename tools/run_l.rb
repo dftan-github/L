@@ -122,6 +122,10 @@ end
 def detect_stdlib(text)
   need = {}
   need[:string] = true if text.match?(/\bString\b|\bto_string\b|\.concat\b|\.split\b|from_string\b/)
+  # [A004] A bare string literal (`a := "hi"`) only infers to String when
+  # stdlib/string.l is linked; without it codegen falls back to ptr and print()
+  # dispatches to the integer path. Presence of any double-quoted literal counts.
+  need[:string] = true if text.match?(/"(?:[^"\\\n]|\\.)*"/)
   need[:array] = true if text.match?(/\bArray\b|\[\s*[^\]]|^\s*\[/m) || need[:string]
   need[:optional] = true if text.match?(/\bOptional\b|\.unwrap\b|\.is_some\b|\.is_none\b/)
   need[:result] = true if text.match?(/\bResult\b|\.is_ok\b|\.is_err\b|\bOk\b|\bErr\b/)

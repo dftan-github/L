@@ -8,7 +8,7 @@ fun is_number_token(String s) -> bool {
     }
     i! := 0
     while i < n {
-        if is_digit(s.char_at(i)) == false {
+        if !is_digit(s.char_at(i)) {
             return false
         }
         i! = i + 1
@@ -21,14 +21,14 @@ fun is_ident_token(String s) -> bool {
     if n == 0 {
         return false
     }
-    if is_alpha(s.char_at(0)) == false {
+    if !is_alpha(s.char_at(0)) {
         return false
     }
     i! := 1
     while i < n {
         c := s.char_at(i)
-        if is_alpha(c) == false {
-            if is_digit(c) == false {
+        if !is_alpha(c) {
+            if !is_digit(c) {
                 return false
             }
         }

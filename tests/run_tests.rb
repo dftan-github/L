@@ -64,6 +64,8 @@ STATIC_METHOD_BAD = ROOT.join("tests", "cases", "static_method_bad.l")
 INTERFACE_TEST = ROOT.join("tests", "cases", "interface_test.l")
 DYNAMIC_DISPATCH = ROOT.join("tests", "cases", "dynamic_dispatch.l")
 STRING_TEST = ROOT.join("tests", "cases", "string_test.l")
+STRING_INFER_TEST = ROOT.join("tests", "cases", "string_infer_test.l")
+STRING_NO_STDLIB_BAD = ROOT.join("tests", "cases", "string_literal_no_stdlib_bad.l")
 STDLIB_STRING = ROOT.join("stdlib", "string.l")
 PRINT_FORMAT = ROOT.join("tests", "cases", "print_format.l")
 GENERIC_TEST = ROOT.join("tests", "cases", "generic_test.l")
@@ -1097,6 +1099,51 @@ def test_string_e2e!
   assert!(normalized == "Hello L!", "expected \"Hello L!\", got #{normalized.inspect}")
 
   puts "  OK string_test e2e"
+end
+
+# [A004] Bare `"..."` must infer to String with no `String(...)` constructor
+# anywhere in the program (no type-loading side effect to rely on).
+def test_string_infer_e2e!
+  assert!(File.exist?(STRING_INFER_TEST), "string_infer_test case not found: #{STRING_INFER_TEST}")
+  assert!(File.exist?(STDLIB_STRING), "stdlib string not found: #{STDLIB_STRING}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("string_infer_test.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(STDLIB_STRING, STRING_INFER_TEST))
+  assert!(status.success?, "compile string_infer_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "string_infer_test.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "string_infer_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "hello\neq-ok\n5\nhello!\n", "expected bare-literal output, got #{normalized.inspect}")
+
+  puts "  OK string_infer e2e (\"...\" infers to String without String(...))"
+end
+
+# [A005] Without stdlib/string.l the diagnostic must name the missing module
+# instead of silently degrading the literal to ptr.
+def test_string_literal_no_stdlib_bad!
+  assert!(File.exist?(STRING_NO_STDLIB_BAD),
+          "string_literal_no_stdlib_bad not found: #{STRING_NO_STDLIB_BAD}")
+  stdout, stderr, status = run_compiler("--emit-llvm", STDLIB_MEMORY, STDLIB_IO, STRING_NO_STDLIB_BAD)
+  assert!(!status.success?, "string_literal_no_stdlib_bad.l should fail to compile")
+  combined = "#{stdout}\n#{stderr}"
+  assert!(combined.include?("string literal requires stdlib/string.l"),
+          "expected 'string literal requires stdlib/string.l' diagnostic, got:\n#{combined}")
+  # [A006] The follow-up "cannot infer" line must point at the user's .l file,
+  # not at whichever stdlib module happened to be under codegen at the time.
+  infer_line = combined.lines.find { |l| l.include?("cannot infer type for 'a'") }
+  assert!(infer_line, "expected a 'cannot infer type' diagnostic, got:\n#{combined}")
+  assert!(infer_line.include?("string_literal_no_stdlib_bad.l"),
+          "cannot-infer diagnostic must point at the user file, got: #{infer_line.strip}")
+  # Guard against the old behaviour (pointing into the shipped stdlib dir), not
+  # against the substring "stdlib" — the repo path itself contains it.
+  stdlib_dir = ROOT.join("stdlib").to_s
+  assert!(!infer_line.include?(stdlib_dir),
+          "cannot-infer diagnostic must not point into #{stdlib_dir}, got: #{infer_line.strip}")
+  puts "  OK string_literal_no_stdlib_bad rejected (names stdlib/string.l)"
 end
 
 def test_print_format_e2e!
@@ -4874,6 +4921,8 @@ def main
     test_dynamic_dispatch_e2e!
     test_gen_interface_string!
     test_string_e2e!
+    test_string_infer_e2e!
+    test_string_literal_no_stdlib_bad!
     test_print_format_e2e!
     test_generic_e2e!
     test_generic_constraint_e2e!
