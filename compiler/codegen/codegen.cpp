@@ -7137,6 +7137,18 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
       // Inline struct field/element: ABI passes classes by pointer; store by value.
       // Only deref when the value really points at that struct (not a raw cstr).
       v = builder_.CreateLoad(dest_ty, v, "store.struct.copy");
+    } else if (dest_ty && dest_ty->isPointerTy() && v->getType()->isStructTy()) {
+      // [performance-first] A `:=` String/class local is boxed to `ptr` (8 bytes),
+      // but a method like `concat` hands back the class by value. Storing the
+      // whole struct into the pointer slot overflows the alloca and corrupts
+      // neighbouring locals. Box the value on the heap and keep the pointer.
+      llvm::Value* boxed = builder_.CreateCall(
+          requireExtern("l_alloc"),
+          {llvm::ConstantInt::get(i64Ty(), module_->getDataLayout().getTypeAllocSize(
+                                               v->getType()))},
+          "assign.box");
+      builder_.CreateStore(v, boxed);
+      v = boxed;
     } else if (dest_ty && dest_ty->isStructTy() && v->getType()->isPointerTy()) {
       // Raw pointer into a struct slot: bitcast then load.
       llvm::Value* casted = builder_.CreateBitCast(v, dest_ty->getPointerTo(), "store.cast");
