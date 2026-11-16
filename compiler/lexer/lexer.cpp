@@ -402,6 +402,9 @@ ast::TokenType Lexer::keywordOrType(std::string_view text) {
   if (text == "import") {
     return ast::TokenType::KwImport;
   }
+  if (text == "use") {
+    return ast::TokenType::KwUse;
+  }
   if (text == "pub") {
     return ast::TokenType::KwPub;
   }

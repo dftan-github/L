@@ -736,6 +736,37 @@ alwaysApply: true
 - **Explicit Over Implicit**: Do not add runtime reflection, dynamic dispatch lookups, or hidden string formatting in hot paths. 
 - **Data Layout**: Optimize struct layout to minimize CPU cache misses; pack fields tightly when generating LLVM `StructType`.
 
+## 110. Early Exit / Guard Clauses (CRITICAL)
+<!-- id:early-exit -->
+- **BANNED Deep Nesting**: Do NOT write deeply nested `if-else` chains (max 1 level of nesting).
+- **Guard Clauses First**: At the beginning of functions, use guard clauses (early returns) to handle edge cases (null checks, invalid types, out-of-bounds). Keep the "happy path" (main logic) flat and unindented.
+- **No `else` after `return`**: If a branch ends with `return`, `break`, or `continue`, do NOT use an `else` block. 
+- **L Language Early Exit**: In L code, use the `?` operator for early return on `Result` errors. For boolean guards, use `if !cond { return <fallback> }`. NEVER use naked `return;` unless the function returns `void`.
+
+[Example - C++ Frontend]
+// BAD
+if (expr) {
+    if (isValid(expr)) {
+        // ... do something
+    } else { return error; }
+} else { return error; }
+
+// GOOD
+if (!expr) return error;
+if (!isValid(expr)) return error;
+// ... do something (flat)
+
+[Example - L Code]
+// BAD
+if res.is_ok() {
+    if res.unwrap() > 10 { do_something() }
+}
+
+// GOOD
+val := res?
+if val <= 10 { return }
+do_something()
+
 
 ## 999. AI Collaboration Discipline (CRITICAL)
 <!-- id:ai-discipline -->

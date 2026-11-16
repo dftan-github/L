@@ -53,6 +53,7 @@ enum class TokenType {
   KwSpawn,
   KwComptime,
   KwImport,
+  KwUse,
   KwPub,
   KwStatic,
   KwExtern,

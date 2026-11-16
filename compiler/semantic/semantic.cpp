@@ -348,9 +348,10 @@ void Analyzer::checkExpr(ast::Expr& expr) {
     }
     case ast::ExprKind::MethodCall: {
       auto& call = static_cast<ast::MethodCallExpr&>(expr);
-      // Receiver may be a local *or* a class name for associated calls (`Variant.from_i32`).
+      // Receiver may be a local *or* a class name for associated calls (`Variant.from_i32`),
+      // or a `::` namespace chain (`net::http::Server.start()`).
       if (call.object && call.object->kind() == ast::ExprKind::Identifier) {
-        checkMethodCallReceiver(static_cast<const ast::IdentifierExpr&>(*call.object));
+        checkQualifiedReceiver(static_cast<const ast::IdentifierExpr&>(*call.object));
       } else if (call.object) {
         checkExpr(*call.object);
       }
@@ -504,19 +505,67 @@ void Analyzer::checkMethodCallReceiver(const ast::IdentifierExpr& id) {
   if (imported_modules_.count(id.name) != 0) {
     return;
   }
+  if (use_aliases_.count(id.name) != 0) {
+    return;
+  }
   error(id.loc, "undeclared identifier '" + id.name + "'");
 }
 
-// `mod::fn(...)` — the callee must exist in `mod` AND be declared `pub`.
+// `use` aliases expand a namespace head: `Server::start()` with
+// `use net::http::Server;` resolves to scope `net::http::Server::start`.
+// Returns empty when `head` is not aliased.
+std::string expandUseAlias(
+    const std::unordered_map<std::string, std::string>& aliases, const std::string& head) {
+  auto it = aliases.find(head);
+  return it == aliases.end() ? std::string{} : it->second;
+}
+
+// Expands a `::` chain through `use` aliases; returns the chain unchanged when
+// the head is not aliased.
+std::string expandAliasedScope(
+    const std::unordered_map<std::string, std::string>& aliases, const std::string& chain) {
+  const std::size_t head_len = chain.find("::");
+  const std::string head = chain.substr(0, head_len);
+  const std::string aliased = expandUseAlias(aliases, head);
+  if (aliased.empty()) {
+    return chain;
+  }
+  return head_len == std::string::npos ? aliased : aliased + chain.substr(head_len);
+}
+
+// `a::b::C.m()` / `a::b::mod.fn()`: a `::` chain followed by member access is only
+// valid when the chain names a namespace we imported or aliased.
+void Analyzer::checkQualifiedReceiver(const ast::IdentifierExpr& id) {
+  const std::string& chain = id.name;
+  if (chain.find("::") == std::string::npos) {
+    checkMethodCallReceiver(id);
+    return;
+  }
+  for (std::size_t pos = chain.find("::"); pos != std::string::npos;
+       pos = chain.find("::", pos + 1)) {
+    const std::string prefix = chain.substr(0, pos);
+    if (module_exports_.count(prefix) != 0 || imported_modules_.count(prefix) != 0) {
+      return;
+    }
+  }
+  if (module_exports_.count(expandAliasedScope(use_aliases_, chain)) != 0) {
+    return;
+  }
+  error(id.loc, "unknown namespace '" + chain + "'");
+}
+
+// `a::b::fn(...)` — the callee must exist in module `a::b` AND be `pub`.
 void Analyzer::checkScopedCallTarget(const ast::ScopedCallExpr& sc) {
-  auto mit = module_exports_.find(sc.module);
+  // Alias head (`Server::start`) expands to the full namespace scope first.
+  const std::string module = expandAliasedScope(use_aliases_, sc.module);
+  auto mit = module_exports_.find(module);
   if (mit == module_exports_.end()) {
     error(sc.loc,
-          "unknown module '" + sc.module + "' in '" + sc.module + "::" + sc.callee + "'");
+          "unknown module '" + module + "' in '" + module + "::" + sc.callee + "'");
     return;
   }
   if (mit->second.find(sc.callee) == mit->second.end()) {
-    error(sc.loc, "'" + sc.callee + "' is not a pub function of module '" + sc.module + "'");
+    error(sc.loc, "'" + sc.callee + "' is not a pub function of module '" + module + "'");
   }
 }
 
@@ -1174,8 +1223,11 @@ bool Analyzer::interfaceHasMethod(const std::string& iface_name,
   return false;
 }
 
-std::string Analyzer::memberAccessType(const std::string& obj_ty,
+std::string Analyzer::memberAccessType(const std::string& raw_ty,
                                        const std::string& member) const {
+  // Namespaced receiver (`net::http::Server.port`): only the leaf names the class.
+  const std::size_t sep = raw_ty.rfind("::");
+  const std::string obj_ty = sep == std::string::npos ? raw_ty : raw_ty.substr(sep + 2);
   auto cit = classes_.find(obj_ty);
   if (cit == classes_.end() || !cit->second) {
     return {};
@@ -1284,7 +1336,7 @@ std::string Analyzer::inferExprType(const ast::Expr& expr) const {
     case ast::ExprKind::ScopedCall: {
       // Return type comes from the target module's exported declaration.
       const auto& sc = static_cast<const ast::ScopedCallExpr&>(expr);
-      auto mit = module_exports_.find(sc.module);
+      auto mit = module_exports_.find(expandAliasedScope(use_aliases_, sc.module));
       if (mit == module_exports_.end()) {
         return {};
       }
@@ -1659,6 +1711,7 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
   module_exports_.clear();
   active_generic_constraints_.clear();
   imported_modules_.clear();
+  use_aliases_.clear();
   readonly_names_.clear();
   in_sync_ = false;
   in_spawn_ = false;
@@ -1666,6 +1719,11 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
   pushScope();  // module / global locals (mostly functions)
 
   const std::size_t errors_before = diags.errorCount();
+  // Register `use` aliases before any module-level scan so the LCMD interpreter
+  // and visibility checks can resolve aliased heads.
+  for (const ast::UseAlias& u : module.usages) {
+    use_aliases_[u.alias] = u.scope;
+  }
   (void)mergePartialClasses(module);
   // After merging, every class is a single ClassDeclStmt, so a uniform scan also
   // catches duplicates that were spread across partial parts ([delegate]).
@@ -1677,7 +1735,17 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
   injectAutoCloneMethods(module);
   injectAutoToStringMethods(module);
   for (const std::string& m : module.imported_modules) {
+    // Register the module under every import spelling: the full hierarchical chain
+    // (`net::http::server`) and its bare leaf (`server`), which keeps simple
+    // single-level call sites readable.
     imported_modules_.insert(m);
+    const std::size_t sep = m.rfind("::");
+    if (sep != std::string::npos) {
+      imported_modules_.insert(m.substr(sep + 2));
+    }
+  }
+  for (const ast::UseAlias& u : module.usages) {
+    use_aliases_[u.alias] = u.scope;
   }
   for (const ast::StmtPtr& stmt : module.stmts) {
     if (!stmt) {
@@ -1734,6 +1802,7 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
   module_exports_.clear();
   active_generic_constraints_.clear();
   imported_modules_.clear();
+  use_aliases_.clear();
   diags_ = nullptr;
   return diags.errorCount() == errors_before;
 }

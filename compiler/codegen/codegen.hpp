@@ -72,6 +72,10 @@ private:
     std::vector<std::string> type_args;
     std::string template_name;  // "Array" when name is "Array<i32>"
     std::string ir_name;        // LLVM-friendly name (Array_i32)
+    // Set once this specialization's method bodies have been emitted. An early
+    // `ensureTypeId` during struct layout registers the functions while the
+    // bodies are still deferred, so the body pass must not be skipped.
+    bool bodies_emitted = false;
   };
 
   // Property fallback ([property]): `u.age` → get_age/set_age else physical age_.
@@ -185,6 +189,25 @@ private:
   bool initClassAtPtr(llvm::Value* base, const ClassInfo& info, const ast::NewExpr& neu);
   bool initClassFromNew(llvm::AllocaInst* alloca, const ClassInfo& info,
                         const ast::NewExpr& neu);
+  // Call `init(...)` for `Class(...)` / `pkg::Class(...)` constructor sugar.
+  llvm::Value* emitClassInitCall(const ClassInfo& info, const ast::NewExpr& neu,
+                                 llvm::Value* this_ptr, const std::vector<ast::CallArg>& args);
+  // Copy a class value from its stack slot into a destination stack slot.
+  bool initStackClassFromPtr(llvm::Value* alloca, const ClassInfo& info,
+                             llvm::Value* src_ptr, const std::string& name);
+  // Heap-allocate + init a class instance (auto-free / `drop()` owners).
+  llvm::Value* emitHeapClassAllocAndInit(const ClassInfo& info, const ast::NewExpr& neu,
+                                         const std::string& name);
+  // Build a stack class value in `slot` from the decl's initializer.
+  bool emitStackClassInit(llvm::AllocaInst* slot, const ClassInfo& info,
+                          const ast::VarDeclStmt& decl);
+  // Emit `init(args)` with the resolved this* as first parameter.
+  bool emitInitArgs(const ClassInfo& info, const ast::NewExpr& neu, llvm::Function* init_fn,
+                    llvm::Value* base);
+  // Shared lowering: explicit arg list + optional init signature AST.
+  llvm::Value* emitInitArgsWith(const ClassInfo& info, const ast::NewExpr& neu,
+                                llvm::Function* init_fn, const ast::FuncDeclStmt* init_ast,
+                                llvm::Value* base, const std::vector<ast::CallArg>& args);
   llvm::Value* classObjectPtr(const std::string& name);
 
   static bool splitGenericType(const std::string& name, std::string& base,
@@ -223,6 +246,8 @@ private:
   bool ensureTypeAvailable(const std::string& name);
   bool specializeClass(const ast::ClassDeclStmt& tmpl, const std::vector<std::string>& args,
                        const std::string& instance_name);
+  // Emit method bodies deferred during the struct pass (declarations exist).
+  bool drainPendingGenericBodies();
   // Max nesting for `G<...>` instantiation (Array<Optional<i32>> = 2).
   static constexpr unsigned kMaxGenericDepth = 2;
   // Syntactic nesting count of a type name (`Array<Optional<i32>>` → 2).
@@ -240,6 +265,8 @@ private:
 
   llvm::Value* toI1(llvm::Value* v);
   llvm::Value* toI32(llvm::Value* v);
+  // Widen/narrow a scalar to the declared storage type (i32 → i64 → f64).
+  llvm::Value* coerceScalarTo(llvm::Value* v, llvm::Type* target);
   bool emitStmtList(const std::vector<ast::StmtPtr>& stmts);
   bool emitStmtListScoped(const std::vector<ast::StmtPtr>& stmts);
   void branchTo(llvm::BasicBlock* bb);
@@ -297,6 +324,15 @@ private:
   // `mod::fn(...)` — resolves through module_exports_ (pub-only) then issues the
   // same ABI call the unprefixed form would.
   llvm::Value* emitScopedCall(const ast::ScopedCallExpr& call);
+  // `a::b::fn(...)` — exported-function call shared by scoped and qualified forms.
+  llvm::Value* emitExportedCall(const std::string& scope, const std::vector<ast::CallArg>& args,
+                                const std::string& display, const ast::SourceLocation& loc);
+  // `a::b::X.m()` / aliased `X.m()` — namespace chain resolves to a module export.
+  llvm::Value* emitQualifiedFreeCall(const ast::MethodCallExpr& call,
+                                     const ast::IdentifierExpr& id);
+  // Namespace export reached through a `.` receiver — same ABI as a free call.
+  llvm::Value* emitMethodAsFreeCall(const ast::FuncDeclStmt& fn,
+                                    const ast::MethodCallExpr& call);
   // String operand → its raw C string pointer (spills value-typed operands).
   llvm::Value* stringOperandToCStr(llvm::Value* v, const std::string& ty,
                                    const ast::Expr& e);
@@ -440,6 +476,9 @@ private:
 
   void error(const std::string& message);
   void error(const ast::SourceLocation& loc, const std::string& message);
+  // Set by the first `error(...)`: body emission stops so the half-built
+  // module is never lowered (backend crashes mask the real diagnostic).
+  bool in_error_ = false;
   void ensureDataLayout();
   ast::SourceLocation defaultLoc() const;
 
@@ -506,6 +545,12 @@ private:
   // declare method signatures but must defer bodies until every body is sized.
   bool in_struct_pass_ = false;
   std::vector<std::string> pending_generic_bodies_;
+  // Forward-declared functions that return a type only materialized by the class
+  // passes below (`http::make_config() -> Config`). Declared as ptr already.
+  std::vector<const ast::FuncDeclStmt*> deferred_return_types_;
+  // Classes whose field layout hit a still-opaque struct; retried after each
+  // successful layout so declaration order does not matter.
+  std::vector<const ast::ClassDeclStmt*> deferred_bodies_;
   std::unordered_map<std::string, InterfaceInfo> interfaces_;
   std::unordered_map<std::string, const ast::FuncDeclStmt*> generic_templates_;
   std::unordered_map<std::string, const ast::FuncDeclStmt*> concrete_funcs_;  // for KW reorder
@@ -518,6 +563,8 @@ private:
   // Cross-module exports: module stem → (pub name → declaration).
   std::unordered_map<std::string, std::unordered_map<std::string, const ast::FuncDeclStmt*>>
       module_exports_;
+  // `use` aliases: alias → namespace scope (`Server` → `net::http::Server`).
+  std::unordered_map<std::string, std::string> use_aliases_;
   std::string current_module_;
   llvm::StructType* fat_ptr_ty_ = nullptr;
 

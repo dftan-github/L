@@ -8,6 +8,8 @@
 #   ruby tests/run_tests.rb --all        # force every test, ignore cache (human)
 #   ruby tests/run_tests.rb --filter=kw  # targeted run (AI default)
 #   ruby tests/run_tests.rb --all --filter=delegate
+#   ruby tests/run_tests.rb --all --skip=memory_leak_hard   # leave known-red out
+#   ruby tests/run_tests.rb --all --skip=a,b                # several at once
 #
 # Policy: compiles with -O0; fail-fast on first FAIL; AI must use --filter only.
 
@@ -204,6 +206,8 @@ MINI_PARSER_TEST = ROOT.join("tests", "cases", "mini_parser_test.l")
 CONFIG_PARSER = ROOT.join("examples", "config_parser.l")
 CONFIG_TEST = ROOT.join("tests", "cases", "config_test.l")
 SORT_TEST = ROOT.join("tests", "cases", "sort_test.l")
+NAMESPACE_TEST = ROOT.join("tests", "cases", "namespace_test.l")
+NAMESPACE_MODULE = ROOT.join("tests", "cases", "net_server.l")
 NODE_HOOK_OPTIN = ROOT.join("tests", "cases", "node_hook_optin.l")
 NODE_HOOK_OPTIN_OFF = ROOT.join("tests", "cases", "node_hook_optin_off.l")
 MOD_MATH = ROOT.join("tests", "cases", "mod_math.l")
@@ -610,18 +614,24 @@ end
 def parse_runner_args!(argv)
   force_all = false
   filter = nil
+  skip = []
   argv.each do |a|
     case a
     when "--all"
       force_all = true
     when /\A--filter=(.*)\z/
       filter = Regexp.last_match(1)
+    when /\A--skip=(.*)\z/
+      # `--skip=a` or `--skip=a,b` — comma-separated name substrings.
+      skip.concat(Regexp.last_match(1).split(",").map(&:strip).reject(&:empty?))
     when "--help", "-h"
       puts <<~HELP
         L test runner
           (default)           smart incremental — skip unchanged PASS cases
           --all               force every selected test (ignore cache)
           --filter=keyword    only tests whose name or input path matches keyword
+          --skip=keyword      drop tests whose name matches (comma-separated list).
+                              Counted as SKIP, never a fail-fast stop.
       HELP
       exit 0
     else
@@ -629,7 +639,15 @@ def parse_runner_args!(argv)
       exit 2
     end
   end
-  [force_all, filter]
+  [force_all, filter, skip]
+end
+
+# `--skip` deliberately matches the TEST NAME only (not fixture paths): the
+# intent is "leave this known-red case out of the run", and fixture paths are
+# shared across many tests.
+def test_skipped_by_flag?(name, skip)
+  return false if skip.nil? || skip.empty?
+  skip.any? { |k| name.to_s.downcase.include?(k.downcase) }
 end
 def test_golden_dump_tokens!
   assert!(File.exist?(GOLDEN), "golden case not found: #{GOLDEN}")
@@ -3044,6 +3062,22 @@ def test_sort_e2e!
   puts "  OK sort_test e2e (bubble_sort Array<i32>)"
 end
 
+def test_namespace_alias_e2e!
+  assert!(File.exist?(NAMESPACE_TEST), "namespace_test case not found: #{NAMESPACE_TEST}")
+  assert!(File.exist?(NAMESPACE_MODULE), "net_server fixture not found: #{NAMESPACE_MODULE}")
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("namespace_test.exe")
+  FileUtils.rm_f(exe)
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(STDLIB_STRING, NAMESPACE_MODULE, NAMESPACE_TEST))
+  assert!(status.success?, "compile namespace_test failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "namespace_test.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  assert!(normalized == "hello a\nhello b\n8080\n9\n",
+          "expected namespace alias output, got #{normalized.inspect}")
+  puts "  OK namespace_test e2e (use alias + type alias)"
+end
+
 def test_type_promotion_e2e!
   assert!(File.exist?(TYPE_PROMOTION), "type_promotion case not found: #{TYPE_PROMOTION}")
 
@@ -4605,6 +4639,7 @@ def main
     test_mini_parser_e2e!
     test_config_e2e!
     test_sort_e2e!
+    test_namespace_alias_e2e!
     test_for_in_e2e!
     test_generic_inference_e2e!
     test_optional_e2e!
@@ -4663,12 +4698,14 @@ def main
     test_cli_run_plugin_framework_e2e!
   ]
 
-  force_all, filter = parse_runner_args!(ARGV)
+  force_all, filter, skip = parse_runner_args!(ARGV)
   filter = nil if filter && filter.empty?
 
   $stdout.sync = true
   $stderr.sync = true
 
+  # `--skip=` cases stay in the run so they are reported as SKIP (never a
+  # fail-fast stop); only `--filter` actually shrinks the selected set.
   selected = suite.select { |name| test_matches_filter?(name, filter) }
   if selected.empty?
     warn color("no tests matched filter=#{filter.inspect}", RED)
@@ -4677,6 +4714,7 @@ def main
 
   mode = force_all ? "ALL (cache ignored)" : "INCREMENTAL (skip unchanged PASS)"
   mode += " filter=#{filter.inspect}" if filter
+  mode += " skip=#{skip.join(',')}" unless skip.empty?
 
   cache = load_test_cache
   # Frozen view for skip decisions. `record_test_pass!` refreshes `cache["files"]`
@@ -4697,6 +4735,12 @@ def main
     n = i + 1
     key = name.to_s
     entry = cache["tests"][key]
+
+    if test_skipped_by_flag?(name, skip)
+      puts color("[#{n}/#{total}] [SKIP] #{name} (--skip)", YELLOW)
+      skipped += 1
+      next
+    end
 
     if !force_all && test_can_skip?(name, decision_cache["tests"][key], decision_cache)
       puts color("[#{n}/#{total}] [SKIP] #{name}", YELLOW)

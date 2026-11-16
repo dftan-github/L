@@ -1,0 +1,25 @@
+{
+  "name": "l-prompt-mailbox",
+  "displayName": "L Prompt Mailbox",
+  "version": "0.1.0",
+  "description": "Watches prompt.txt in the workspace root and injects its contents into the active Cursor Chat input.",
+  "main": "extension.js",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "lPromptMailbox.start",
+        "title": "L Prompt Mailbox: Start Watching"
+      },
+      {
+        "command": "lPromptMailbox.stop",
+        "title": "L Prompt Mailbox: Stop Watching"
+      }
+    ]
+  }
+}

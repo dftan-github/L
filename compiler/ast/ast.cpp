@@ -56,6 +56,7 @@ const char* toString(TokenType type) {
     case TokenType::KwSpawn: return "KwSpawn";
     case TokenType::KwComptime: return "KwComptime";
     case TokenType::KwImport: return "KwImport";
+    case TokenType::KwUse: return "KwUse";
     case TokenType::KwPub: return "KwPub";
     case TokenType::KwStatic: return "KwStatic";
     case TokenType::KwExtern: return "KwExtern";
@@ -173,7 +174,15 @@ void CallExpr::dump(std::ostream& out, int indent) const {
 
 void ScopedCallExpr::dump(std::ostream& out, int indent) const {
   pad(out, indent);
-  out << "ScopedCallExpr " << module << "::" << callee << " [" << args.size() << "]\n";
+  out << "ScopedCallExpr ";
+  if (!path.empty()) {
+    for (const std::string& seg : path) {
+      out << seg << "::";
+    }
+  } else {
+    out << module << "::";
+  }
+  out << callee << " [" << args.size() << "]\n";
   for (const CallArg& arg : args) {
     arg.dump(out, indent + 1);
   }
@@ -545,7 +554,33 @@ void InterfaceDeclStmt::dump(std::ostream& out, int indent) const {
 
 void ImportStmt::dump(std::ostream& out, int indent) const {
   pad(out, indent);
-  out << "ImportStmt \"" << path << "\"\n";
+  out << "ImportStmt \"";
+  if (!path_segments.empty()) {
+    for (std::size_t i = 0; i < path_segments.size(); ++i) {
+      if (i != 0) {
+        out << "::";
+      }
+      out << path_segments[i];
+    }
+  } else {
+    out << path;
+  }
+  out << "\"\n";
+}
+
+void UseStmt::dump(std::ostream& out, int indent) const {
+  pad(out, indent);
+  out << "UseStmt ";
+  for (std::size_t i = 0; i < path.size(); ++i) {
+    if (i != 0) {
+      out << "::";
+    }
+    out << path[i];
+  }
+  if (!alias.empty()) {
+    out << " as " << alias;
+  }
+  out << "\n";
 }
 
 void ExternModuleStmt::dump(std::ostream& out, int indent) const {
@@ -616,6 +651,11 @@ void DirectiveStmt::dump(std::ostream& out, int indent) const {
 void Module::dump(std::ostream& out, int indent) const {
   pad(out, indent);
   out << "Module\n";
+  for (const UseAlias& u : usages) {
+    pad(out, indent + 1);
+    out << "UseAlias " << u.alias << " -> " << (u.scope.empty() ? "<local>" : u.scope)
+        << (u.is_type ? " (type)" : "") << "\n";
+  }
   for (const auto& h : init_hooks) {
     if (h) {
       pad(out, indent + 1);

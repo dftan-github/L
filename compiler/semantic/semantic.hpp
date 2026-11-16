@@ -103,6 +103,8 @@ private:
   void checkMethodCallReceiver(const ast::IdentifierExpr& id);
   // `mod::fn(...)` visibility against the target module's exports.
   void checkScopedCallTarget(const ast::ScopedCallExpr& sc);
+  // `a::b::X.m()` — namespace chains are allowed as method-call receivers.
+  void checkQualifiedReceiver(const ast::IdentifierExpr& id);
   // `return;` legality plus returned-lambda escape marking.
   void checkReturnStatement(ast::ReturnStmt& ret);
   // Cheap static type of one arithmetic operand (empty when unknown).
@@ -146,6 +148,9 @@ private:
   std::unordered_map<std::string, std::string> active_generic_constraints_;
   // Imported package/module stems (`import math_lib` → math_lib.add(...)).
   std::unordered_set<std::string> imported_modules_;
+  // `use` aliases: alias → namespace scope (`use net::http::Server` → net::http::Server).
+  // Lets an alias head a `::` chain (`Server::start()`) or name a class (`Server(...)`).
+  std::unordered_map<std::string, std::string> use_aliases_;
   // Enclosing function while checking its body (escape analysis for returned lambdas).
   ast::FuncDeclStmt* current_fn_ = nullptr;
 };

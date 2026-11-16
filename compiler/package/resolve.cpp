@@ -216,6 +216,23 @@ ResolveResult resolveDependencies(const fs::path& package_root) {
     result.import_search_paths.push_back(vendor);
   }
   result.import_search_paths.push_back(package_root);
+  // Sub-packages: manifest files below the root (e.g. `vendor/x`). Their
+  // directory becomes an import base, so `import helper` inside them resolves
+  // to a sibling `helper.l` instead of the root tree.
+  {
+    std::error_code sec;
+    auto it = fs::recursive_directory_iterator(
+        package_root, fs::directory_options::follow_directory_symlink, sec);
+    const auto end = fs::end(it);
+    for (; !sec && it != end; it.increment(sec)) {
+      if (!it->is_regular_file() || it->path().filename() != "l.toml") {
+        continue;
+      }
+      if (it->path().parent_path() != package_root) {
+        result.import_search_paths.push_back(it->path().parent_path());
+      }
+    }
+  }
   result.ok = true;
   return result;
 }

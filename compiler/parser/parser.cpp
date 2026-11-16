@@ -176,6 +176,9 @@ ast::StmtPtr Parser::parseStatement() {
   if (check(ast::TokenType::KwImport)) {
     return parseImportStmt();
   }
+  if (check(ast::TokenType::KwUse)) {
+    return parseUseStmt();
+  }
   if (check(ast::TokenType::KwExtern)) {
     return parseExternModule();
   }
@@ -704,7 +707,8 @@ bool Parser::maybeConsumeStmtSemicolon() {
       check(ast::TokenType::KwConst) || check(ast::TokenType::KwConstd) ||
       check(ast::TokenType::KwFun) || check(ast::TokenType::KwClass) ||
       check(ast::TokenType::KwPartial) || check(ast::TokenType::KwPub) ||
-      check(ast::TokenType::KwImport) || check(ast::TokenType::LcmdDirective) ||
+      check(ast::TokenType::KwImport) || check(ast::TokenType::KwUse) ||
+      check(ast::TokenType::LcmdDirective) ||
       check(ast::TokenType::Identifier) || looksLikeTypedDecl()) {
     return true;
   }
@@ -987,6 +991,16 @@ ast::ExprPtr Parser::parsePrimaryExpression() {
     const std::string name_text =
         name.type == ast::TokenType::TyString ? "String" : name.lexeme;
 
+    // `a::b::c(...)` / `a::b::c.m()` — namespaced call or namespace-qualified
+    // member access. Matched before the constructor checks so the `Type name`
+    // lookahead never mistakes a namespace chain for a declaration.
+    if (check(ast::TokenType::ColonColon) && peek(1).type == ast::TokenType::Identifier) {
+      ast::ExprPtr chain = parseNamespaceChain(name, name_text);
+      if (chain) {
+        return parsePostfix(std::move(chain));
+      }
+    }
+
     // sizeof(T) — compile-time size via DataLayout after monomorphization.
     if (name_text == "sizeof" && check(ast::TokenType::LParen)) {
       advance();
@@ -1007,21 +1021,6 @@ ast::ExprPtr Parser::parsePrimaryExpression() {
       type_or_name = parseTypeArgsSuffix(name_text);
     }
 
-    if (check(ast::TokenType::ColonColon)) {
-      // `mod::fn(args)` — module-qualified call. Visibility is enforced later by
-      // the semantic pass against the target module's exported symbols.
-      advance();
-      ast::Token field = consume(ast::TokenType::Identifier,
-                                 "expected function name after '::'");
-      auto call = std::make_unique<ast::ScopedCallExpr>();
-      call->loc = name.loc;
-      call->module = name_text;
-      call->callee = field.lexeme;
-      // parseArgList consumes the '(' itself, same as a plain `fn(...)` call.
-      call->args = parseArgList();
-      return call;
-    }
-
     if (check(ast::TokenType::LParen)) {
       if (class_names_.count(name_text) != 0) {
         auto expr = std::make_unique<ast::NewExpr>();
@@ -1039,6 +1038,48 @@ ast::ExprPtr Parser::parsePrimaryExpression() {
   }
   errorAt(peek(), "expected expression");
   return nullptr;
+}
+
+// `a::b::callee(args)` → ScopedCall; any other chain becomes a single
+// namespace-scoped identifier (`a::b::C`) for `parsePostfix` to attach `.m()` to.
+// Visibility of the target namespace's exports is enforced by the semantic pass.
+ast::ExprPtr Parser::parseNamespaceChain(const ast::Token& first, const std::string& head) {
+  std::vector<std::string> path{head};
+  while (check(ast::TokenType::ColonColon) &&
+         peek(1).type == ast::TokenType::Identifier) {
+    advance();  // ::
+    path.push_back(peek().lexeme);
+    advance();
+  }
+  if (path.size() == 1) {
+    return nullptr;
+  }
+  std::string chain;
+  for (std::size_t i = 0; i < path.size(); ++i) {
+    if (i != 0) {
+      chain += "::";
+    }
+    chain += path[i];
+  }
+  if (check(ast::TokenType::LParen)) {
+    auto call = std::make_unique<ast::ScopedCallExpr>();
+    call->loc = first.loc;
+    call->callee = path.back();
+    path.pop_back();
+    call->path = path;
+    for (std::size_t i = 0; i < path.size(); ++i) {
+      if (i != 0) {
+        call->module += "::";
+      }
+      call->module += path[i];
+    }
+    call->args = parseArgList();
+    return call;
+  }
+  auto id = std::make_unique<ast::IdentifierExpr>();
+  id->loc = first.loc;
+  id->name = chain;
+  return id;
 }
 
 ast::ExprPtr Parser::parseCallArgs(std::string callee, ast::SourceLocation loc) {
@@ -1128,6 +1169,20 @@ ast::StmtPtr Parser::parseExplicitTypeDecl() {
   }
   ast::Token name = consume(ast::TokenType::Identifier, "expected name after type");
   const bool is_mutable = match(ast::TokenType::Bang);
+  // `Type name := init` — explicit-type spelling of the inference declaration,
+  // so the initializer can be any expression (factory call, lambda, ...).
+  if (match(ast::TokenType::ColonAssign)) {
+    ast::ExprPtr init = parseExpression();
+    maybeConsumeStmtSemicolon();
+    auto stmt = std::make_unique<ast::VarDeclStmt>();
+    stmt->loc = loc;
+    stmt->decl_kind = ast::VarDeclKind::Infer;
+    stmt->type_name = std::move(type_name);
+    stmt->name = name.lexeme;
+    stmt->is_mutable = is_mutable;
+    stmt->init = std::move(init);
+    return stmt;
+  }
   consume(ast::TokenType::Equal, "expected '=' after typed name");
   ast::ExprPtr init = parseExpression();
   consume(ast::TokenType::Semicolon, "expected ';' after typed declaration");
@@ -1920,13 +1975,54 @@ ast::StmtPtr Parser::parseImportStmt() {
     stmt->path = peek().lexeme;
     advance();
   } else if (check(ast::TokenType::Identifier)) {
-    // import mod_a;  →  mod_a.l
-    stmt->path = peek().lexeme + ".l";
-    advance();
+    // import mod_a;            →  mod_a.l
+    // import net::http::server →  net/http/server.l (directory namespace)
+    if (check(ast::TokenType::Identifier)) {
+      stmt->path_segments.push_back(peek().lexeme);
+      advance();
+      while (check(ast::TokenType::ColonColon) &&
+             peek(1).type == ast::TokenType::Identifier) {
+        advance();  // ::
+        stmt->path_segments.push_back(peek().lexeme);
+        advance();
+      }
+    }
+    std::string joined;
+    for (std::size_t i = 0; i < stmt->path_segments.size(); ++i) {
+      if (i != 0) {
+        joined += "/";
+      }
+      joined += stmt->path_segments[i];
+    }
+    stmt->path = joined + ".l";
   } else {
     errorAt(peek(), "expected module path string or name after import");
   }
   consume(ast::TokenType::Semicolon, "expected ';' after import");
+  return stmt;
+}
+
+// `use a::b::Symbol;` — optional `as Alias`.
+ast::StmtPtr Parser::parseUseStmt() {
+  ast::Token kw = consume(ast::TokenType::KwUse, "expected 'use'");
+  auto stmt = std::make_unique<ast::UseStmt>();
+  stmt->loc = kw.loc;
+
+  ast::Token first = consume(ast::TokenType::Identifier, "expected name after 'use'");
+  stmt->path.push_back(first.lexeme);
+  while (check(ast::TokenType::ColonColon)) {
+    advance();
+    if (!check(ast::TokenType::Identifier)) {
+      errorAt(peek(), "expected name after '::'");
+      break;
+    }
+    stmt->path.push_back(peek().lexeme);
+    advance();
+  }
+  if (match(ast::TokenType::KwAs)) {
+    stmt->alias = consume(ast::TokenType::Identifier, "expected alias after 'as'").lexeme;
+  }
+  consume(ast::TokenType::Semicolon, "expected ';' after use");
   return stmt;
 }
 
@@ -2218,6 +2314,7 @@ void Parser::synchronize() {
       case ast::TokenType::KwClass:
       case ast::TokenType::KwInterface:
       case ast::TokenType::KwImport:
+      case ast::TokenType::KwUse:
       case ast::TokenType::KwExtern:
       case ast::TokenType::KwPub:
       case ast::TokenType::KwReturn:
@@ -2316,21 +2413,23 @@ bool Parser::looksLikeTypedDecl() const {
   if (isBuiltinTypeToken(peek().type)) {
     return peek(1).type == ast::TokenType::Identifier;
   }
-  if (peek().type == ast::TokenType::Identifier &&
-      (class_names_.count(peek().lexeme) != 0 ||
-       interface_names_.count(peek().lexeme) != 0 ||
-       generic_type_names_.count(peek().lexeme) != 0)) {
-    std::size_t after_type = 1;
-    if (peek(1).type == ast::TokenType::LAngle) {
-      after_type = skipGenericArgs(1);
-    }
-    if (peek(after_type).type != ast::TokenType::Identifier) {
-      return false;
-    }
-    const auto next = peek(after_type + 1).type;
-    return next == ast::TokenType::Equal || next == ast::TokenType::Bang;
+  if (peek().type != ast::TokenType::Identifier) {
+    return false;
   }
-  return false;
+  // Namespaced type (`net::http::Server s`, aliased `Server s`): skip the chain.
+  std::size_t after_type = 1;
+  while (peek(after_type).type == ast::TokenType::ColonColon &&
+         peek(after_type + 1).type == ast::TokenType::Identifier) {
+    after_type += 2;
+  }
+  if (peek(after_type).type == ast::TokenType::LAngle) {
+    after_type = skipGenericArgs(after_type);
+  }
+  if (peek(after_type).type != ast::TokenType::Identifier) {
+    return false;
+  }
+  const auto next = peek(after_type + 1).type;
+  return next == ast::TokenType::Equal || next == ast::TokenType::Bang;
 }
 
 std::string Parser::parseTypeArgsSuffix(std::string base) {
@@ -2398,6 +2497,14 @@ std::string Parser::parseTypeName() {
   if (peek().type == ast::TokenType::Identifier) {
     std::string name = peek().lexeme;
     advance();
+    // Namespaced type (`net::http::Server`); `use` aliases resolve it downstream.
+    while (check(ast::TokenType::ColonColon) &&
+           peek(1).type == ast::TokenType::Identifier) {
+      advance();
+      name += "::";
+      name += peek().lexeme;
+      advance();
+    }
     if (check(ast::TokenType::LAngle)) {
       return parseTypeArgsSuffix(std::move(name));
     }

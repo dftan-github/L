@@ -63,6 +63,7 @@ enum class StmtKind {
   Import,
   ExternModule,
   Directive,
+  Use,  // `use a::b::Symbol;` — compile-time alias, no runtime cost
 };
 
 struct Node {
@@ -154,9 +155,12 @@ struct CallExpr : Expr {
 // `module::fn(args)` — a call whose callee is resolved in another module's
 // exported (`pub`) symbol table. The module prefix is kept for the visibility
 // check; codegen lowers it to the same IR name a plain `fn()` would use.
+// Hierarchical namespaces (`net::http::Server::start`) put the leading path
+// segments in `path` and keep the final callable name in `callee`.
 struct ScopedCallExpr : Expr {
   std::string module;
   std::string callee;
+  std::vector<std::string> path;  // full `a::b::c` chain (empty for legacy `m::f`)
   std::vector<CallArg> args;
   ExprKind kind() const override { return ExprKind::ScopedCall; }
   void dump(std::ostream& out, int indent = 0) const override;
@@ -507,7 +511,19 @@ struct InterfaceDeclStmt : Stmt {
 
 struct ImportStmt : Stmt {
   std::string path;  // e.g. "mod_a.l"
+  // `import net::http::server` — path segments of a hierarchical module.
+  std::vector<std::string> path_segments;
   StmtKind kind() const override { return StmtKind::Import; }
+  void dump(std::ostream& out, int indent = 0) const override;
+};
+
+// `use net::http::Server;` / `use net::http::Server as Http;` — brings a
+// namespaced symbol into scope under its simple name (or the alias). The
+// alias only affects name resolution; it never lowers to runtime code.
+struct UseStmt : Stmt {
+  std::vector<std::string> path;  // a::b::Symbol
+  std::string alias;              // empty → last path segment
+  StmtKind kind() const override { return StmtKind::Use; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
@@ -554,13 +570,25 @@ struct DirectiveStmt : Stmt {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
+// One `use` alias: `use a::b::Symbol as Alias;` → {alias: Alias, scope: a::b::Symbol}.
+// `is_type` marks the alias as a namespaced class (constructed as `Alias(...)`)
+// rather than a module namespace (called as `Alias::fn()`).
+struct UseAlias {
+  std::string alias;
+  std::string scope;
+  bool is_type = false;
+};
+
 struct Module {
   std::vector<StmtPtr> stmts;
   // Module lifecycle hooks (`fun __init` / `fun __deinit`) — not ordinary callables.
   std::vector<std::unique_ptr<FuncDeclStmt>> init_hooks;
   std::vector<std::unique_ptr<FuncDeclStmt>> deinit_hooks;
   // Import stems (`import math_lib` → "math_lib") for package-qualified calls.
+  // Namespaced imports keep their full chain (`net::http::server`).
   std::vector<std::string> imported_modules;
+  // `use` aliases in declaration order (root module first, then imports).
+  std::vector<UseAlias> usages;
   void dump(std::ostream& out, int indent = 0) const;
 };
 

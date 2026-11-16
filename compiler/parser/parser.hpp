@@ -54,6 +54,8 @@ private:
   bool looksLikeTypedDecl() const;
   std::size_t skipGenericArgs(std::size_t from) const;
   std::string parseTypeName();
+  // `a::b::callee(args)` / `a::b::C` — namespaced call or scoped identifier.
+  ast::ExprPtr parseNamespaceChain(const ast::Token& first, const std::string& head);
   std::string parseTypeArgsSuffix(std::string base);
   static std::string typeTokenLexeme(const ast::Token& tok);
   static int infixPrecedence(ast::TokenType type);
@@ -119,6 +121,7 @@ private:
   ast::StmtPtr parseSpawnBlock();
   ast::StmtPtr parseComptimeBlock();
   ast::StmtPtr parseImportStmt();
+  ast::StmtPtr parseUseStmt();
   ast::StmtPtr parseExternModule();
   ast::StmtPtr parsePubDecl();
   ast::StmtPtr parseDirective();
