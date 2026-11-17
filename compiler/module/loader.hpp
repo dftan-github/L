@@ -43,4 +43,12 @@ std::unique_ptr<ast::Module> loadUnits(const std::vector<SourceUnit>& units,
                                        diag::DiagnosticEngine& diags,
                                        const ImportSearchPaths& search_paths = {});
 
+// Same as loadUnits, additionally reporting every file path the loader read
+// (entry files plus every transitively imported module). The driver uses this
+// to key its incremental cache on the real inputs.
+std::unique_ptr<ast::Module> loadUnits(const std::vector<SourceUnit>& units,
+                                       diag::DiagnosticEngine& diags,
+                                       const ImportSearchPaths& search_paths,
+                                       std::vector<std::string>* read_files);
+
 }  // namespace l::module

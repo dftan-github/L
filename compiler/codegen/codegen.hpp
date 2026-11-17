@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <memory>
 #include <string>
@@ -99,8 +99,9 @@ private:
   static int numericRank(const std::string& ty);
   static bool isNumericType(const std::string& ty);
   static std::string promoteNumericTypes(const std::string& a, const std::string& b);
+  // [A007] `loc` is the AST position of the expression being lowered.
   llvm::Value* emitNumericCast(llvm::Value* v, const std::string& from_ty,
-                               const std::string& to_ty);
+                               const std::string& to_ty, const ast::SourceLocation& loc);
   llvm::StructType* fatPtrTy();
   llvm::Type* typeFromName(const std::string& name);
   std::string resolveTypeName(const std::string& name) const;
@@ -121,7 +122,8 @@ private:
   // Pointee type of a local slot (alloca or coroutine frame GEP).
   llvm::Type* localSlotType(llvm::Value* slot);
   // Look up a C ABI symbol previously declared via `extern module` (no auto-create).
-  llvm::Function* requireExtern(const std::string& name);
+  // [A007] `loc` is the AST position of the declaration / call that needs the symbol.
+  llvm::Function* requireExtern(const std::string& name, const ast::SourceLocation& loc);
 
   // [link:109-Performance-First-Architecture] Replace `l_hash_string` / `l_str_eq` calls with inline IR. The C
   // runtime implementations stay as-is (other front ends / FFI users rely on
@@ -178,7 +180,7 @@ private:
                       std::vector<llvm::Value*>& out);
   // Emits the call; returns the value (0 for void) or nullptr on error.
   llvm::Value* finishMethodCall(llvm::Function* target, std::vector<llvm::Value*>& args,
-                                const std::string& what);
+                                const std::string& what, const ast::SourceLocation& loc);
   // `this.field.method(...)` where the receiver is an enclosing-class field.
   llvm::Value* emitMethodCallOnField(const ast::MethodCallExpr& call,
                                      const std::string& field_name);
@@ -193,7 +195,8 @@ private:
   // True when init is `arena.new` / `arena.new_string` (bump-owned, no l_free).
   bool isArenaOwnedClassExpr(const ast::Expr& expr) const;
   // Free Array.data_ (+ interface element heaps) when an Array local leaves scope.
-  bool emitArrayOwnedCleanup(const std::string& name, const ClassInfo& info);
+  bool emitArrayOwnedCleanup(const std::string& name, const ClassInfo& info,
+                             const ast::SourceLocation& loc);
   llvm::Value* emitArenaBuiltin(const ast::CallExpr& call);
   llvm::Value* emitArenaMethod(const std::string& arena_name, const ast::MethodCallExpr& call);
   // Materialize a String object pointer (alloca / class ptr) for concat / print.
@@ -226,7 +229,7 @@ private:
   llvm::Value* emitInitArgsWith(const ClassInfo& info, const ast::NewExpr& neu,
                                 llvm::Function* init_fn, const ast::FuncDeclStmt* init_ast,
                                 llvm::Value* base, const std::vector<ast::CallArg>& args);
-  llvm::Value* classObjectPtr(const std::string& name);
+  llvm::Value* classObjectPtr(const std::string& name, const ast::SourceLocation& loc);
 
   static bool splitGenericType(const std::string& name, std::string& base,
                                std::vector<std::string>& args);
@@ -236,7 +239,8 @@ private:
   // Parse `fun(A,B)` / `fun(A)->R` into param type names + return type.
   static bool parseFunTypeName(const std::string& name, std::vector<std::string>& params,
                                std::string& ret, bool& has_explicit_ret);
-  llvm::FunctionType* llvmFunctionTypeForFunName(const std::string& fun_type_name);
+  llvm::FunctionType* llvmFunctionTypeForFunName(const std::string& fun_type_name,
+                                                 const ast::SourceLocation& loc);
   llvm::Value* emitLambda(const ast::LambdaExpr& expr, const std::string& fun_type_name);
   // [dsl] `app { ... }` / `app(type: App) { ... }` — build root inline.
   llvm::Value* emitConfigBlockCall(const ast::CallExpr& call,
@@ -282,7 +286,8 @@ private:
   llvm::Value* emitAddrOf(const ast::AddrOfExpr& expr);
 
   llvm::Value* toI1(llvm::Value* v);
-  llvm::Value* toI32(llvm::Value* v);
+  // [A007] `loc` is the AST position of the expression being lowered.
+  llvm::Value* toI32(llvm::Value* v, const ast::SourceLocation& loc);
   // Widen/narrow a scalar to the declared storage type (i32 → i64 → f64).
   llvm::Value* coerceScalarTo(llvm::Value* v, llvm::Type* target);
   bool emitStmtList(const std::vector<ast::StmtPtr>& stmts);
@@ -302,7 +307,7 @@ private:
   // escape through `p` also cancels the owning heap local's auto-free.
   std::unordered_map<std::string, std::string> ptr_aliases_;
   void noteExplicitLFreeInDefer(const ast::DeferStmt& stmt);
-  bool emitLFreeOfLocal(const std::string& name);
+  bool emitLFreeOfLocal(const std::string& name, const ast::SourceLocation& loc);
   bool flushCurrentScopeAutoFrees();
   bool flushAllAutoFrees();
   bool finishCleanups();  // defers then auto-frees
@@ -321,12 +326,16 @@ private:
   bool emitClassMethodBodies(const ast::ClassDeclStmt& decl);
   bool emitMethodBody(const std::string& class_name, const ast::FuncDeclStmt& method);
   // Phase-1 auto-clone: bitwise / value copy of the object (primitives + pure data).
-  bool emitAutoCloneBody(const std::string& class_name, llvm::Function* fn);
+  bool emitAutoCloneBody(const std::string& class_name, llvm::Function* fn,
+                         const ast::SourceLocation& loc);
   // Compiler-generated `to_string() -> String` field dump.
-  bool emitAutoToStringBody(const std::string& class_name, llvm::Function* fn);
+  bool emitAutoToStringBody(const std::string& class_name, llvm::Function* fn,
+                            const ast::SourceLocation& loc);
   // Helpers for auto to_string string building (return String*).
-  llvm::Value* makeStringLitObject(const std::string& text, const std::string& name);
-  llvm::Value* concatStringObjects(llvm::Value* lhs, llvm::Value* rhs);
+  llvm::Value* makeStringLitObject(const std::string& text, const std::string& name,
+                                   const ast::SourceLocation& loc);
+  llvm::Value* concatStringObjects(llvm::Value* lhs, llvm::Value* rhs,
+                                   const ast::SourceLocation& loc);
 
   bool emitFuncDecl(const ast::FuncDeclStmt& fn);
   bool emitLifecycleWrappers(const ast::Module& module);
@@ -369,6 +378,10 @@ private:
   // Module-level `const` / `constd` / typed globals → inline Constant or GlobalVariable.
   // Class globals are zero-init GlobalVariables; `Class()` runs in `__l_global_init`.
   bool emitGlobalVarDecl(const ast::VarDeclStmt& decl);
+  void registerModuleConst(const ast::VarDeclStmt& decl);
+  // [link:97-Implicit-Delegation]: synthesise a forwarder so an interface
+  // method satisfied through a `delegate` field lands in the vtable.
+  bool ensureDelegateMethod(const ast::ClassDeclStmt& decl, const std::string& method);
   bool emitPendingGlobalClassInits();
   llvm::Constant* evalConstInit(const ast::Expr& expr, llvm::Type* expected_ty);
   // Resolve local alloca or module GlobalVariable storage.
@@ -469,14 +482,14 @@ private:
                               std::unordered_set<std::string>& locals) const;
 
   llvm::Value* boxToInterface(llvm::Value* class_ptr, const std::string& class_name,
-                              const std::string& iface_name);
+                              const std::string& iface_name, const ast::SourceLocation& loc);
   // Heap-allocate + init a NewExpr so Class→interface fat pointers remain valid when
   // stored in Array<IFace> / other heap containers (entry allocas would dangle).
   llvm::Value* heapAllocNewExpr(const ast::NewExpr& neu);
   // Escaped closure ABI: `{ fn_ptr, ctx_ptr }` (same layout as interface fat ptr).
   llvm::StructType* fatClosureTy();
   // Free heap ctx + capture cells for an escaped fat-closure local.
-  bool emitFatClosureCleanup(const std::string& name);
+  bool emitFatClosureCleanup(const std::string& name, const ast::SourceLocation& loc);
   // Create (or return) the unique TypeID global for a class (vtable slot 0).
   llvm::GlobalVariable* ensureTypeId(ClassInfo& info);
   // VTable layout: [TypeID, method0, method1, ...] — length = 1 + method count.
@@ -492,13 +505,16 @@ private:
   // receiver Optional is empty, mirroring emitSafeMethodCall's skeleton.
   llvm::Value* emitSafeMemberAccess(const ast::MemberAccessExpr& access);
 
-  void error(const std::string& message);
   void error(const ast::SourceLocation& loc, const std::string& message);
   // Set by the first `error(...)`: body emission stops so the half-built
   // module is never lowered (backend crashes mask the real diagnostic).
   bool in_error_ = false;
   void ensureDataLayout();
-  ast::SourceLocation defaultLoc() const;
+  // [A007] Only for call sites that have no AST node of their own: the loc of the
+  // most recently processed top-level declaration (function / class / method /
+  // global). Never synthesised from the module identifier.
+  ast::SourceLocation lastTopLevelLoc() const { return current_top_level_loc_; }
+  ast::SourceLocation current_top_level_loc_;
 
   static std::string mangleName(const std::string& module_name, const std::string& name,
                                 bool is_pub);

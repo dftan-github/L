@@ -260,6 +260,22 @@ int32_t l_str_to_i32(const char* s) {
   return (int32_t)atoi(s);
 }
 
+// Float -> int truncation toward zero. The language has no implicit narrowing
+// and `as i32` currently rejects non-integral f64 values, so rendering code
+// needs this bridge to turn world coordinates into device pixels.
+int32_t l_f64_to_i32(double v) {
+  if (v != v) {
+    return 0;
+  }
+  if (v > 2147483647.0) {
+    return 2147483647;
+  }
+  if (v < -2147483648.0) {
+    return -2147483648;
+  }
+  return (int32_t)v;
+}
+
 int32_t l_ptr_is_null(void* p) {
   return p == NULL ? 1 : 0;
 }

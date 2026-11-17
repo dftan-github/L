@@ -46,6 +46,8 @@ void l_gdi_clear(int32_t r, int32_t g, int32_t b) { (void)r; (void)g; (void)b; }
 void l_gdi_rect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, int32_t g, int32_t b) { (void)x; (void)y; (void)w; (void)h; (void)r; (void)g; (void)b; }
 void l_gdi_hline(int32_t x, int32_t y, int32_t w, int32_t r, int32_t g, int32_t b) { (void)x; (void)y; (void)w; (void)r; (void)g; (void)b; }
 void l_gdi_vline(int32_t x, int32_t y, int32_t h, int32_t r, int32_t g, int32_t b) { (void)x; (void)y; (void)h; (void)r; (void)g; (void)b; }
+void l_gdi_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t r, int32_t g, int32_t b) { (void)x0; (void)y0; (void)x1; (void)y1; (void)r; (void)g; (void)b; }
+void l_gdi_ellipse(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, int32_t g, int32_t b) { (void)x; (void)y; (void)w; (void)h; (void)r; (void)g; (void)b; }
 void l_gdi_push_clip(int32_t x, int32_t y, int32_t w, int32_t h) { (void)x; (void)y; (void)w; (void)h; }
 void l_gdi_pop_clip(void) {}
 int32_t l_gdi_font(const char* face, int32_t size, int32_t bold) { (void)face; (void)size; (void)bold; return 0; }
@@ -559,6 +561,32 @@ void l_gdi_hline(int32_t x, int32_t y, int32_t w, int32_t r, int32_t g, int32_t 
 
 void l_gdi_vline(int32_t x, int32_t y, int32_t h, int32_t r, int32_t g, int32_t b) {
   l_gdi_rect(x, y, 1, h, r, g, b);
+}
+
+// Arbitrary segment. Uses MoveToEx/LineTo on the back DC so diagonals work;
+// the 1px-wide pen mirrors hline/vline, which fill a 1px rect.
+void l_gdi_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t r, int32_t g, int32_t b) {
+  if (g_win == NULL || g_win->back_dc == NULL) return;
+  HPEN pen = CreatePen(PS_SOLID, 1, to_color(r, g, b));
+  if (pen == NULL) return;
+  HGDIOBJ old_pen = SelectObject(g_win->back_dc, pen);
+  MoveToEx(g_win->back_dc, x0, y0, NULL);
+  LineTo(g_win->back_dc, x1, y1);
+  SelectObject(g_win->back_dc, old_pen);
+  DeleteObject(pen);
+}
+
+// Ellipse inscribed in the box; outline only, matching line()'s hairline pen.
+void l_gdi_ellipse(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, int32_t g, int32_t b) {
+  if (g_win == NULL || g_win->back_dc == NULL || w <= 0 || h <= 0) return;
+  HPEN pen = CreatePen(PS_SOLID, 1, to_color(r, g, b));
+  if (pen == NULL) return;
+  HGDIOBJ old_pen = SelectObject(g_win->back_dc, pen);
+  HGDIOBJ old_brush = SelectObject(g_win->back_dc, GetStockObject(NULL_BRUSH));
+  Ellipse(g_win->back_dc, x, y, x + w, y + h);
+  SelectObject(g_win->back_dc, old_brush);
+  SelectObject(g_win->back_dc, old_pen);
+  DeleteObject(pen);
 }
 
 void l_gdi_push_clip(int32_t x, int32_t y, int32_t w, int32_t h) {

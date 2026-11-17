@@ -91,6 +91,8 @@ extern module c_win32 {
     fun l_gdi_rect(i32 x, i32 y, i32 w, i32 h, i32 r, i32 g, i32 b) -> void
     fun l_gdi_hline(i32 x, i32 y, i32 w, i32 r, i32 g, i32 b) -> void
     fun l_gdi_vline(i32 x, i32 y, i32 h, i32 r, i32 g, i32 b) -> void
+    fun l_gdi_line(i32 x0, i32 y0, i32 x1, i32 y1, i32 r, i32 g, i32 b) -> void
+    fun l_gdi_ellipse(i32 x, i32 y, i32 w, i32 h, i32 r, i32 g, i32 b) -> void
     fun l_gdi_push_clip(i32 x, i32 y, i32 w, i32 h) -> void
     fun l_gdi_pop_clip() -> void
     fun l_gdi_font(ptr face, i32 size, i32 bold) -> i32
@@ -236,6 +238,15 @@ pub fun hline(i32 x, i32 y, i32 w, i32 r, i32 g, i32 b) -> void {
 
 pub fun vline(i32 x, i32 y, i32 h, i32 r, i32 g, i32 b) -> void {
     l_gdi_vline(x, y, h, r, g, b)
+}
+
+pub fun line(i32 x0, i32 y0, i32 x1, i32 y1, i32 r, i32 g, i32 b) -> void {
+    l_gdi_line(x0, y0, x1, y1, r, g, b)
+}
+
+// Outline ellipse inscribed in the box (x, y, w, h).
+pub fun ellipse(i32 x, i32 y, i32 w, i32 h, i32 r, i32 g, i32 b) -> void {
+    l_gdi_ellipse(x, y, w, h, r, g, b)
 }
 
 pub fun push_clip(i32 x, i32 y, i32 w, i32 h) -> void {

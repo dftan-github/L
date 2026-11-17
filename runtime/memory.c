@@ -114,6 +114,19 @@ double l_load_f64(void* p) {
   return *(const double*)p;
 }
 
+void l_store_f64_at(void* p, int32_t offset, double v) {
+  if (p != NULL && offset >= 0) {
+    *(double*)((unsigned char*)p + offset) = v;
+  }
+}
+
+double l_load_f64_at(void* p, int32_t offset) {
+  if (p == NULL || offset < 0) {
+    return 0.0;
+  }
+  return *(const double*)((const unsigned char*)p + offset);
+}
+
 void l_store_ptr(void* p, void* v) {
   if (p != NULL) {
     *(void**)p = v;

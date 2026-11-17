@@ -22,3 +22,7 @@ apps/*/*.exe
 
 # Anchor allocator lock (transient; serialises concurrent id allocation)
 .anchors.lock
+
+# Local scratch: ad-hoc build/run wrappers that bypass a broken toolchain env.
+# Never repository content — every script in here is disposable.
+.agent-scratch/

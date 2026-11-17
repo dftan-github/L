@@ -148,6 +148,10 @@ private:
   std::unordered_map<std::string, std::string> active_generic_constraints_;
   // Imported package/module stems (`import math_lib` → math_lib.add(...)).
   std::unordered_set<std::string> imported_modules_;
+  // Module-level `const` names from every loaded module (imports included).
+  // A constant behaves like a `pub` symbol: any module body inlined into this
+  // compilation unit may read it by bare name, e.g. `KIND_CIRCLE`.
+  std::unordered_set<std::string> module_consts_;
   // `use` aliases: alias → namespace scope (`use net::http::Server` → net::http::Server).
   // Lets an alias head a `::` chain (`Server::start()`) or name a class (`Server(...)`).
   std::unordered_map<std::string, std::string> use_aliases_;

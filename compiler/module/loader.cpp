@@ -233,6 +233,11 @@ struct Loader {
   ImportSearchPaths search_paths;
   std::unordered_set<std::string> loading;
   std::unordered_set<std::string> loaded;
+  // Every file this loader actually read, in load order. The driver hashes
+  // these into its incremental cache key: an `import`ed module can change the
+  // object without any entry file changing, so a key built from entry names
+  // alone would replay a stale module.
+  std::vector<std::string>* read_files = nullptr;
   // Modules parsed early by `preloadImportTypes` so their type names are known
   // while the importing file is parsed. The AST is parked here and merged in
   // when the post-parse import walk reaches the same module.
@@ -659,6 +664,9 @@ struct Loader {
     }
 
     std::string source = readFile(key);
+    if (read_files != nullptr) {
+      read_files->push_back(key);
+    }
     if (source.empty() && !fs::exists(abs)) {
       ast::SourceLocation loc;
       loc.filename = path.string();
@@ -725,9 +733,17 @@ std::unique_ptr<ast::Module> loadFromString(const std::string& source,
 std::unique_ptr<ast::Module> loadUnits(const std::vector<SourceUnit>& units,
                                        diag::DiagnosticEngine& diags,
                                        const ImportSearchPaths& search_paths) {
+  return loadUnits(units, diags, search_paths, nullptr);
+}
+
+std::unique_ptr<ast::Module> loadUnits(const std::vector<SourceUnit>& units,
+                                       diag::DiagnosticEngine& diags,
+                                       const ImportSearchPaths& search_paths,
+                                       std::vector<std::string>* read_files) {
   Loader loader;
   loader.diags = &diags;
   loader.search_paths = search_paths;
+  loader.read_files = read_files;
   auto merged = std::make_unique<ast::Module>();
   std::error_code ec;
   const fs::path cwd = fs::current_path(ec);

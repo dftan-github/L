@@ -21,6 +21,7 @@ extern module c_io {
     fun l_str_char_at(ptr s, i32 i) -> i32
     fun l_str_substr(ptr s, i32 start, i32 len) -> ptr
     fun l_str_to_i32(ptr s) -> i32
+    fun l_f64_to_i32(f64 v) -> i32
     fun l_ptr_is_null(ptr p) -> i32
     fun l_file_open(ptr path, ptr mode) -> ptr
     fun l_file_read(ptr file, ptr buffer, i32 size) -> i32

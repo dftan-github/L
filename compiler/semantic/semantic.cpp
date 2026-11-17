@@ -486,6 +486,9 @@ void Analyzer::checkIdentifierRef(const ast::IdentifierExpr& id) {
   if (free_funcs_.count(id.name) != 0 || classes_.count(id.name) != 0) {
     return;
   }
+  if (module_consts_.count(id.name) != 0) {
+    return;
+  }
   error(id.loc, "undeclared identifier '" + id.name + "'");
 }
 
@@ -1714,6 +1717,7 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
   imported_modules_.clear();
   use_aliases_.clear();
   readonly_names_.clear();
+  module_consts_.clear();
   in_sync_ = false;
   in_spawn_ = false;
   property_write_ = false;
@@ -1776,6 +1780,13 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
         if (decl && !decl->is_method) {
           free_funcs_[decl->name] = decl.get();
         }
+      }
+    } else if (stmt->kind() == ast::StmtKind::VarDecl) {
+      // Module-scoped constant: readable by bare name from every module body
+      // inlined into this unit (an import's methods, not just the primary one).
+      const auto& decl = static_cast<const ast::VarDeclStmt&>(*stmt);
+      if (decl.decl_kind == ast::VarDeclKind::Const) {
+        module_consts_.insert(decl.name);
       }
     }
   }

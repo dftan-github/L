@@ -17,6 +17,7 @@ extern module c_memory {
     fun l_null_ptr() -> ptr
     fun l_store_i32_at(ptr p, i32 offset, i32 v) -> void
     fun l_load_i32_at(ptr p, i32 offset) -> i32
-    fun l_store_ptr_at(ptr p, i32 offset, ptr v) -> void
-    fun l_load_ptr_at(ptr p, i32 offset) -> ptr
+    fun l_store_ptr_at(ptr p, i32 offset, ptr v) -> void    fun l_load_ptr_at(ptr p, i32 offset) -> ptr
+fun l_store_f64_at(ptr p, i32 offset, f64 v) -> void
+fun l_load_f64_at(ptr p, i32 offset) -> f64
 }

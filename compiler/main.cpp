@@ -1,9 +1,12 @@
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -73,6 +76,112 @@ std::string hashString(const std::string& s) {
 
 fs::path incrementalCacheDir() {
   return fs::temp_directory_path() / "l-build-cache";
+}
+
+bool readWholeFile(const fs::path& p, std::string& out);
+
+// Resolve an `import` target the same way the loader does, for cache-keying
+// purposes only: a relative path with .l / .li, then each import root.
+fs::path resolveImportForCache(const std::string& target, const fs::path& base,
+                               const std::vector<fs::path>& import_paths) {
+  std::vector<fs::path> candidates;
+  const fs::path t(target);
+  auto add = [&](const fs::path& dir) {
+    candidates.push_back(dir / t);
+    if (t.extension().empty()) {
+      candidates.push_back(dir / (t.string() + ".l"));
+      candidates.push_back(dir / (t.string() + ".li"));
+    }
+  };
+  add(base);
+  for (const fs::path& root : import_paths) {
+    add(root);
+  }
+  std::error_code ec;
+  for (const fs::path& c : candidates) {
+    if (fs::is_regular_file(c, ec)) {
+      return c;
+    }
+  }
+  return {};
+}
+
+// Every file a build depends on: the entry units plus every transitively
+// imported module. Text-scans for `import` so it costs a file read per module
+// and needs no parse. Cycles and missing targets are ignored here — the real
+// loader reports those, and a key that misses a file simply misses the cache.
+void collectDependencies(const std::vector<std::string>& units,
+                         const std::vector<fs::path>& import_paths,
+                         std::vector<std::string>& out) {
+  std::vector<std::string> queue(units.begin(), units.end());
+  std::set<std::string> seen;
+  while (!queue.empty()) {
+    const std::string path = queue.back();
+    queue.pop_back();
+    if (path.empty() || path[0] == '<' || !seen.insert(path).second) {
+      continue;
+    }
+    std::string src;
+    if (!readWholeFile(path, src)) {
+      continue;
+    }
+    out.push_back(path);
+    std::size_t pos = 0;
+    while ((pos = src.find("import", pos)) != std::string::npos) {
+      // Only a leading keyword, not an identifier that happens to contain it.
+      const bool at_start = pos == 0 || !std::isalnum(static_cast<unsigned char>(src[pos - 1]));
+      if (!at_start) {
+        pos += 6;
+        continue;
+      }
+      std::size_t p = pos + 6;
+      while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) {
+        ++p;
+      }
+      std::string target;
+      if (p < src.size() && src[p] == '"') {
+        const std::size_t close = src.find('"', p + 1);
+        if (close == std::string::npos) {
+          break;
+        }
+        target = src.substr(p + 1, close - p - 1);
+      } else {
+        while (p < src.size()) {
+          const char c = src[p];
+          if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == ':' || c == '/' ||
+                c == '.')) {
+            break;
+          }
+          target.push_back(c);
+          ++p;
+        }
+      }
+      pos += 6;
+      if (target.empty()) {
+        continue;
+      }
+      std::string dotted = target;
+      for (char& c : dotted) {
+        if (c == ':') {
+          c = '/';
+        }
+      }
+      // A `::` chain becomes a path; collapse the doubled separators.
+      std::string cleaned;
+      for (char c : dotted) {
+        if (c == '/' && !cleaned.empty() && cleaned.back() == '/') {
+          continue;
+        }
+        cleaned.push_back(c);
+      }
+      const fs::path base = fs::path(path).parent_path();
+      const fs::path resolved =
+          resolveImportForCache(cleaned, base, import_paths);
+      if (!resolved.empty()) {
+        queue.push_back(resolved.lexically_normal().generic_string());
+      }
+    }
+  }
 }
 
 // Empty string when caching is not applicable (in-memory sources).
@@ -828,13 +937,23 @@ int main(int argc, char** argv) {
   }
 
   // Incremental cache: a hit skips parse + semantics + codegen entirely.
+  // The key covers every file the build reads, not just the entry units: an
+  // imported module can change the object while the entries stay identical.
   std::vector<std::string> cache_inputs;
+  bool all_from_disk = !units.empty();
   for (const l::module::SourceUnit& unit : units) {
     if (unit.from_memory) {
-      cache_inputs.clear();
-      break;
+      all_from_disk = false;
     }
-    cache_inputs.push_back(unit.name);
+  }
+  if (all_from_disk) {
+    std::vector<std::string> entry_names;
+    entry_names.reserve(units.size());
+    for (const l::module::SourceUnit& unit : units) {
+      entry_names.push_back(unit.name);
+    }
+    collectDependencies(entry_names, import_paths, cache_inputs);
+    std::sort(cache_inputs.begin(), cache_inputs.end());
   }
   fs::path self_exe;
   {

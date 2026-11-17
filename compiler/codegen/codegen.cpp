@@ -1,4 +1,4 @@
-﻿#include "codegen/codegen.hpp"
+#include "codegen/codegen.hpp"
 
 #include <cstdint>
 #include <iostream>
@@ -211,7 +211,8 @@ std::string Codegen::promoteNumericTypes(const std::string& a, const std::string
 }
 
 llvm::Value* Codegen::emitNumericCast(llvm::Value* v, const std::string& from_ty,
-                                      const std::string& to_ty) {
+                                      const std::string& to_ty,
+                                      const ast::SourceLocation& loc) {
   if (!v || from_ty == to_ty) {
     return v;
   }
@@ -228,7 +229,7 @@ llvm::Value* Codegen::emitNumericCast(llvm::Value* v, const std::string& from_ty
       return builder_.CreateSIToFP(v, f64Ty(), "prom.f64");
     }
   }
-  error("cannot promote '" + from_ty + "' to '" + to_ty + "'");
+  error(loc, "cannot promote '" + from_ty + "' to '" + to_ty + "'");
   return nullptr;
 }
 
@@ -436,12 +437,13 @@ std::string Codegen::resolveFuncIrName(const std::string& callee) const {
   return {};
 }
 
-llvm::FunctionType* Codegen::llvmFunctionTypeForFunName(const std::string& fun_type_name) {
+llvm::FunctionType* Codegen::llvmFunctionTypeForFunName(const std::string& fun_type_name,
+                                                        const ast::SourceLocation& loc) {
   std::vector<std::string> params;
   std::string ret;
   bool has_ret = false;
   if (!parseFunTypeName(resolveTypeName(fun_type_name), params, ret, has_ret)) {
-    error("invalid function type: " + fun_type_name);
+    error(loc, "invalid function type: " + fun_type_name);
     return nullptr;
   }
   llvm::Type* rty = (ret == "void") ? voidTy() : llvmTypeForTypeName(ret);
@@ -599,11 +601,11 @@ llvm::Type* Codegen::localSlotType(llvm::Value* slot) {
   return nullptr;
 }
 
-llvm::Function* Codegen::requireExtern(const std::string& name) {
+llvm::Function* Codegen::requireExtern(const std::string& name, const ast::SourceLocation& loc) {
   if (llvm::Function* existing = module_->getFunction(name)) {
     return existing;
   }
-  error("undeclared external function '" + name +
+  error(loc, "undeclared external function '" + name +
         "' (declare it with `extern module` in stdlib)");
   return nullptr;
 }
@@ -1402,8 +1404,10 @@ bool Codegen::ensureTypeAvailable(const std::string& name) {
   }
   // Reject over-nested declarations before specializing anything.
   if (const unsigned depth = genericNestingDepth(name); depth > kMaxGenericDepth) {
-    error("generic instantiation depth limit exceeded (" + std::to_string(kMaxGenericDepth) +
-          "): '" + name + "' nests " + std::to_string(depth) + " generic types");
+    error(lastTopLevelLoc(), "generic instantiation depth limit exceeded (" +
+    // [A007] no AST loc available
+                                 std::to_string(kMaxGenericDepth) + "): '" + name + "' nests " +
+                                 std::to_string(depth) + " generic types");
     return false;
   }
   if (isFunTypeName(name)) {
@@ -1445,7 +1449,8 @@ bool Codegen::ensureTypeAvailable(const std::string& name) {
   }
   auto it = generic_class_templates_.find(base);
   if (it == generic_class_templates_.end()) {
-    error("unknown generic class template: " + base);
+    error(lastTopLevelLoc(), "unknown generic class template: " + base);
+    // [A007] no AST loc available
     return false;
   }
   return specializeClass(*it->second, args, name);
@@ -1475,12 +1480,14 @@ bool Codegen::drainPendingGenericBodies() {
     pending_generic_bodies_.pop_back();
     ClassInfo* ninfo = findClassMut(name);
     if (!ninfo) {
-      error("lost specialization for " + name);
+      error(lastTopLevelLoc(), "lost specialization for " + name);
+      // [A007] no AST loc available
       return false;
     }
     auto it = generic_class_templates_.find(ninfo->template_name);
     if (it == generic_class_templates_.end()) {
-      error("lost generic template for " + name);
+      error(lastTopLevelLoc(), "lost generic template for " + name);
+      // [A007] no AST loc available
       return false;
     }
     for (auto& pending : pending_struct_bodies_) {
@@ -1523,7 +1530,7 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
   // Over-nesting is rejected up front by ensureTypeAvailable's syntactic depth
   // check; no runtime depth counter is needed here.
   if (tmpl.generics.size() != args.size()) {
-    error("generic arity mismatch specializing " + tmpl.name);
+    error(tmpl.loc, "generic arity mismatch specializing " + tmpl.name);
     return false;
   }
 
@@ -1532,12 +1539,13 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
     subst[tmpl.generics[i].name] = args[i];
     if (!tmpl.generics[i].constraint.empty()) {
       if (!ensureTypeAvailable(args[i]) || !isClassType(args[i])) {
-        error("constrained generic " + tmpl.generics[i].name + " requires a class type");
+        error(tmpl.generics[i].loc,
+              "constrained generic " + tmpl.generics[i].name + " requires a class type");
         return false;
       }
       if (!classImplements(args[i], tmpl.generics[i].constraint)) {
-        error("Type '" + args[i] + "' does not implement interface '" +
-              tmpl.generics[i].constraint + "'");
+        error(tmpl.generics[i].loc, "Type '" + args[i] + "' does not implement interface '" +
+                                        tmpl.generics[i].constraint + "'");
         return false;
       }
     }
@@ -1612,7 +1620,7 @@ bool Codegen::specializeClass(const ast::ClassDeclStmt& tmpl,
       continue;
     }
     if (cinfo->methods.count(method->name) != 0) {
-      error("duplicate method in specialized class " + instance_name);
+      error(method->loc, "duplicate method in specialized class " + instance_name);
       type_subst_ = std::move(saved_subst);
       return false;
     }
@@ -1733,18 +1741,6 @@ void Codegen::ensureDataLayout() {
   }
 }
 
-ast::SourceLocation Codegen::defaultLoc() const {
-  ast::SourceLocation loc;
-  loc.filename = module_ ? module_->getModuleIdentifier() : std::string("<codegen>");
-  loc.line = 1;
-  loc.column = 1;
-  return loc;
-}
-
-void Codegen::error(const std::string& message) {
-  error(defaultLoc(), message);
-}
-
 void Codegen::error(const ast::SourceLocation& loc, const std::string& message) {
   had_error_ = true;
   // Any error leaves the IR in an undefined state; stop emitting so a broken
@@ -1769,7 +1765,7 @@ llvm::Value* Codegen::toI1(llvm::Value* v) {
   return builder_.CreateICmpNE(v, llvm::ConstantInt::get(v->getType(), 0), "tobool");
 }
 
-llvm::Value* Codegen::toI32(llvm::Value* v) {
+llvm::Value* Codegen::toI32(llvm::Value* v, const ast::SourceLocation& loc) {
   if (!v) {
     return nullptr;
   }
@@ -1782,7 +1778,7 @@ llvm::Value* Codegen::toI32(llvm::Value* v) {
   if (!v->getType()->isIntegerTy()) {
     // Never fabricate an integer from a struct/pointer: callers must convert
     // explicitly (a silent `sext ptr` breaks module verification).
-    error("internal: cannot convert a non-integer value to i32");
+    error(loc, "internal: cannot convert a non-integer value to i32");
     return llvm::ConstantInt::get(i32Ty(), 0);
   }
   return builder_.CreateIntCast(v, i32Ty(), /*isSigned=*/true, "casttmp");
@@ -1907,18 +1903,19 @@ void Codegen::noteExplicitLFreeInDefer(const ast::DeferStmt& stmt) {
   }
 }
 
-bool Codegen::emitArrayOwnedCleanup(const std::string& name, const ClassInfo& info) {
+bool Codegen::emitArrayOwnedCleanup(const std::string& name, const ClassInfo& info,
+                                    const ast::SourceLocation& loc) {
   auto data_fit = info.field_index.find("data_");
   auto len_fit = info.field_index.find("length_");
   if (data_fit == info.field_index.end() || len_fit == info.field_index.end()) {
-    error("Array cleanup missing data_/length_ on " + name);
+    error(loc, "Array cleanup missing data_/length_ on " + name);
     return false;
   }
-  llvm::Function* free_fn = requireExtern("l_free");
+  llvm::Function* free_fn = requireExtern("l_free", loc);
   if (!free_fn) {
     return false;
   }
-  llvm::Value* arr = classObjectPtr(name);
+  llvm::Value* arr = classObjectPtr(name, loc);
   if (!arr) {
     return false;
   }
@@ -1994,7 +1991,7 @@ bool Codegen::emitArrayOwnedCleanup(const std::string& name, const ClassInfo& in
   if (heap_locals_.count(name) != 0) {
     auto vit = named_values_.find(name);
     if (vit == named_values_.end()) {
-      error("auto-free unknown Array local: " + name);
+      error(loc, "auto-free unknown Array local: " + name);
       return false;
     }
     llvm::Value* obj = builder_.CreateLoad(ptrTy(), vit->second, name + ".arr.obj");
@@ -2003,13 +2000,13 @@ bool Codegen::emitArrayOwnedCleanup(const std::string& name, const ClassInfo& in
   return true;
 }
 
-bool Codegen::emitFatClosureCleanup(const std::string& name) {
+bool Codegen::emitFatClosureCleanup(const std::string& name, const ast::SourceLocation& loc) {
   auto vit = named_values_.find(name);
   if (vit == named_values_.end()) {
-    error("fat-closure cleanup missing state for '" + name + "'");
+    error(loc, "fat-closure cleanup missing state for '" + name + "'");
     return false;
   }
-  llvm::Function* free_fn = requireExtern("l_free");
+  llvm::Function* free_fn = requireExtern("l_free", loc);
   if (!free_fn) {
     return false;
   }
@@ -2034,26 +2031,26 @@ bool Codegen::emitFatClosureCleanup(const std::string& name) {
   return true;
 }
 
-bool Codegen::emitLFreeOfLocal(const std::string& name) {
+bool Codegen::emitLFreeOfLocal(const std::string& name, const ast::SourceLocation& loc) {
   if (fat_closure_locals_.count(name) != 0) {
-    return emitFatClosureCleanup(name);
+    return emitFatClosureCleanup(name, loc);
   }
   auto lit = local_types_.find(name);
   if (lit != local_types_.end()) {
     const ClassInfo* info = findClass(lit->second);
     if (info && info->template_name == "Array") {
-      return emitArrayOwnedCleanup(name, *info);
+      return emitArrayOwnedCleanup(name, *info, loc);
     }
   }
 
   auto vit = named_values_.find(name);
   if (vit == named_values_.end()) {
-    error("auto-free unknown local: " + name);
+    error(loc, "auto-free unknown local: " + name);
     return false;
   }
   llvm::Value* ptr = builder_.CreateLoad(ptrTy(), vit->second, name + ".autofree");
   if (arena_locals_.count(name) != 0) {
-    llvm::Function* free_fn = requireExtern("l_arena_free");
+    llvm::Function* free_fn = requireExtern("l_arena_free", loc);
     if (!free_fn) {
       return false;
     }
@@ -2092,7 +2089,7 @@ bool Codegen::emitLFreeOfLocal(const std::string& name) {
           llvm::BasicBlock::Create(globalContext(), name + ".data.done", fn);
       builder_.CreateCondBr(nn, free_bb, done_bb);
       builder_.SetInsertPoint(free_bb);
-      llvm::Function* lfree = requireExtern("l_free");
+      llvm::Function* lfree = requireExtern("l_free", loc);
       if (!lfree) {
         return false;
       }
@@ -2101,7 +2098,7 @@ bool Codegen::emitLFreeOfLocal(const std::string& name) {
       builder_.SetInsertPoint(done_bb);
     }
   }
-  llvm::Function* free_fn = requireExtern("l_free");
+  llvm::Function* free_fn = requireExtern("l_free", loc);
   if (!free_fn) {
     return false;
   }
@@ -2115,7 +2112,7 @@ bool Codegen::flushCurrentScopeAutoFrees() {
   }
   auto& names = auto_free_scopes_.back();
   for (auto it = names.rbegin(); it != names.rend(); ++it) {
-    if (!emitLFreeOfLocal(*it)) {
+    if (!emitLFreeOfLocal(*it, lastTopLevelLoc())) {
       return false;
     }
   }
@@ -2126,7 +2123,7 @@ bool Codegen::flushCurrentScopeAutoFrees() {
 bool Codegen::flushAllAutoFrees() {
   for (auto sit = auto_free_scopes_.rbegin(); sit != auto_free_scopes_.rend(); ++sit) {
     for (auto it = sit->rbegin(); it != sit->rend(); ++it) {
-      if (!emitLFreeOfLocal(*it)) {
+      if (!emitLFreeOfLocal(*it, lastTopLevelLoc())) {
         return false;
       }
     }
@@ -2139,7 +2136,7 @@ bool Codegen::flushHeldSyncLocks() {
   if (held_sync_locks_.empty()) {
     return true;
   }
-  llvm::Function* unlock = requireExtern("l_mutex_unlock");
+  llvm::Function* unlock = requireExtern("l_mutex_unlock", lastTopLevelLoc());
   if (!unlock) {
     return false;
   }
@@ -2242,7 +2239,8 @@ bool Codegen::emitStmtListScoped(const std::vector<ast::StmtPtr>& stmts) {
   return ok;
 }
 
-llvm::Value* Codegen::classObjectPtr(const std::string& name) {
+llvm::Value* Codegen::classObjectPtr(const std::string& name,
+                                     const ast::SourceLocation& loc) {
   auto it = named_values_.find(name);
   if (it != named_values_.end()) {
     if (heap_locals_.count(name) != 0) {
@@ -2285,7 +2283,7 @@ llvm::Value* Codegen::classObjectPtr(const std::string& name) {
       return git->second;  // GlobalVariable* decays to i8*/Class* address
     }
   }
-  error("unknown variable: " + name);
+  error(loc, "unknown variable: " + name);
   return nullptr;
 }
 
@@ -2299,19 +2297,25 @@ Codegen::PropResolve Codegen::resolveProperty(const ClassInfo& info, const std::
   }
 
   // Property sugar: prefer get_x / set_x.
+  //
+  // Exception — the accessor's own body. Inside `set_x`, `this.x = v` must
+  // write the physical field `x_`: going through sugar again would re-enter
+  // `set_x`, i.e. infinite recursion (the same for `get_x` reading `x`).
+  const std::string phys_first = physicalFieldName(prop);
+  const bool has_field = info.field_index.count(phys_first) != 0;
   const std::string method =
       (access == PropAccess::Write) ? ("set_" + prop) : ("get_" + prop);
-  if (info.methods.count(method) != 0) {
+  const bool in_own_accessor = (current_fn_name_ == method);
+  if (!in_own_accessor && info.methods.count(method) != 0) {
     out.kind = PropResolveKind::Method;
     out.method_name = method;
     return out;
   }
 
   // Fallback: hidden physical field `prop_` (any visibility).
-  const std::string phys = physicalFieldName(prop);
-  if (info.field_index.count(phys) != 0) {
+  if (has_field) {
     out.kind = PropResolveKind::Field;
-    out.field_name = phys;
+    out.field_name = phys_first;
     return out;
   }
   return out;
@@ -2319,17 +2323,17 @@ Codegen::PropResolve Codegen::resolveProperty(const ClassInfo& info, const std::
 
 llvm::Value* Codegen::classValuePtr(const ast::Expr& expr, const std::string& class_name) {
   if (!ensureTypeAvailable(class_name)) {
-    error("unknown class: " + class_name);
+    error(expr.loc, "unknown class: " + class_name);
     return nullptr;
   }
   const ClassInfo* info = findClass(class_name);
   if (!info) {
-    error("unknown class: " + class_name);
+    error(expr.loc, "unknown class: " + class_name);
     return nullptr;
   }
   if (expr.kind() == ast::ExprKind::Identifier) {
     const auto& id = static_cast<const ast::IdentifierExpr&>(expr);
-    return classObjectPtr(id.name);
+    return classObjectPtr(id.name, id.loc);
   }
   llvm::Value* v = emitExpr(expr);
   if (!v) {
@@ -2344,13 +2348,13 @@ llvm::Value* Codegen::classValuePtr(const ast::Expr& expr, const std::string& cl
     builder_.CreateStore(v, tmp);
     return tmp;
   }
-  error("expected class value of type " + class_name);
+  error(expr.loc, "expected class value of type " + class_name);
   return nullptr;
 }
 
 bool Codegen::registerInterface(const ast::InterfaceDeclStmt& decl) {
   if (interfaces_.count(decl.name) != 0) {
-    error("redefinition of interface: " + decl.name);
+    error(decl.loc, "redefinition of interface: " + decl.name);
     return false;
   }
   InterfaceInfo info;
@@ -2361,7 +2365,7 @@ bool Codegen::registerInterface(const ast::InterfaceDeclStmt& decl) {
       continue;
     }
     if (info.method_index.count(method->name) != 0) {
-      error("duplicate method in interface " + decl.name + ": " + method->name);
+      error(method->loc, "duplicate method in interface " + decl.name + ": " + method->name);
       return false;
     }
     info.method_names.push_back(method->name);
@@ -2396,7 +2400,7 @@ bool Codegen::emitClassStruct(const ast::ClassDeclStmt& decl) {
     return true;  // template — specialized on demand
   }
   if (classes_.count(decl.name) != 0) {
-    error("redefinition of class: " + decl.name);
+    error(decl.loc, "redefinition of class: " + decl.name);
     return false;
   }
 
@@ -2426,7 +2430,7 @@ bool Codegen::emitClassStruct(const ast::ClassDeclStmt& decl) {
     }
     const std::string phys = physicalFieldName(field->name);
     if (self->field_index.count(phys) != 0) {
-      error("duplicate field '" + field->name + "' in class " + decl.name);
+      error(field->loc, "duplicate field '" + field->name + "' in class " + decl.name);
       return register_failed();
     }
     const std::string fty_name = field->type_name;
@@ -2509,7 +2513,7 @@ bool Codegen::declareClassMethods(const ast::ClassDeclStmt& decl) {
       continue;
     }
     if (info->methods.count(method->name) != 0) {
-      error("duplicate method in class " + decl.name + ": " + method->name);
+      error(method->loc, "duplicate method in class " + decl.name + ": " + method->name);
       return false;
     }
     std::vector<llvm::Type*> params;
@@ -2522,7 +2526,7 @@ bool Codegen::declareClassMethods(const ast::ClassDeclStmt& decl) {
     // Specialize nested returns e.g. Optional<i32> before reading the LLVM type.
     if (!method->return_type.empty() && method->return_type != "void") {
       if (!ensureTypeAvailable(method->return_type)) {
-        error("cannot resolve return type '" + method->return_type + "' of " + decl.name + "." +
+        error(method->loc, "cannot resolve return type '" + method->return_type + "' of " + decl.name + "." +
               method->name);
         return false;
       }
@@ -2541,8 +2545,113 @@ bool Codegen::declareClassMethods(const ast::ClassDeclStmt& decl) {
   return true;
 }
 
-bool Codegen::buildVtables(const ast::ClassDeclStmt& decl) {
-  if (!decl.generics.empty()) {
+// [link:97-Implicit-Delegation] vtable side: makes `method` callable on
+// `decl`'s objects by forwarding to the embedded delegate that defines it.
+//
+// A delegate's method takes the *embedded* object as `this`, but an interface
+// slot is called with the outer object, so a thin forwarder is needed:
+//   Outer_method(Outer* this, args...) -> Inner_method(&this->Inner, args...)
+// The forwarder is cached in `info->methods`, exactly like a declared method,
+// so the vtable, dispatch, and property resolution all see one regular entry.
+bool Codegen::ensureDelegateMethod(const ast::ClassDeclStmt& decl,
+                                   const std::string& method) {
+  ClassInfo* info = findClassMut(decl.name);
+  if (!info || !info->type) {
+    return false;
+  }
+  if (info->methods.count(method) != 0) {
+    return true;
+  }
+  // One unambiguous delegate may provide it; two is an ambiguity, not a pick.
+  const ast::FuncDeclStmt* hit_ast = nullptr;
+  const ClassInfo* hit_info = nullptr;
+  unsigned hit_field = 0;
+  for (const auto& field : info->ast->fields) {
+    if (!field || !field->is_delegate) {
+      continue;
+    }
+    if (!ensureTypeAvailable(field->type_name) || !isClassType(field->type_name)) {
+      return false;
+    }
+    const ClassInfo* emb = findClass(field->type_name);
+    if (!emb) {
+      return false;
+    }
+    const ast::FuncDeclStmt* m = nullptr;
+    for (const auto& cand : emb->ast->methods) {
+      if (cand && cand->name == method) {
+        m = cand.get();
+        break;
+      }
+    }
+    if (!m) {
+      continue;
+    }
+    if (hit_ast) {
+      return false;  // ambiguous across delegates: not a promoted implementation
+    }
+    const auto fit = info->field_index.find(physicalFieldName(field->name));
+    if (fit == info->field_index.end()) {
+      return false;
+    }
+    hit_ast = m;
+    hit_info = emb;
+    hit_field = fit->second;
+  }
+  if (!hit_ast || !hit_info) {
+    return false;
+  }
+
+  std::vector<llvm::Type*> params;
+  if (!hit_ast->is_static) {
+    params.push_back(ptrTy());
+  }
+  for (const ast::Param& p : hit_ast->params) {
+    params.push_back(abiTypeForParam(p.type_name));
+  }
+  if (!hit_ast->return_type.empty() && hit_ast->return_type != "void") {
+    if (!ensureTypeAvailable(hit_ast->return_type)) {
+      return false;
+    }
+  }
+  llvm::Type* ret_ty = typeFromName(hit_ast->return_type);
+  auto* fty = llvm::FunctionType::get(ret_ty, params, false);
+  llvm::Function* fn = llvm::Function::Create(
+      fty, llvm::Function::InternalLinkage,
+      mangleMethod(info->ir_name, "delegate_" + hit_info->ir_name + "_" + method),
+      module_.get());
+  fn->setCallingConv(llvm::CallingConv::C);
+  if (!hit_ast->is_static) {
+    fn->arg_begin()->setName("this");
+  }
+
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(globalContext(), "entry", fn);
+  builder_.SetInsertPoint(entry);
+  auto pit = hit_info->methods.find(method);
+  if (pit == hit_info->methods.end() || !pit->second) {
+    fn->eraseFromParent();
+    return false;
+  }
+  std::vector<llvm::Value*> args;
+  if (!hit_ast->is_static) {
+    llvm::Value* self = &*fn->arg_begin();
+    args.push_back(
+        builder_.CreateStructGEP(info->type, self, hit_field, "delegate.this"));
+  }
+  for (unsigned i = hit_ast->is_static ? 0 : 1; i < fn->arg_size(); ++i) {
+    args.push_back(fn->getArg(i));
+  }
+  llvm::CallInst* call = builder_.CreateCall(pit->second, args);
+  if (ret_ty->isVoidTy()) {
+    builder_.CreateRetVoid();
+  } else {
+    builder_.CreateRet(call);
+  }
+  info->methods[method] = fn;
+  return true;
+}
+
+bool Codegen::buildVtables(const ast::ClassDeclStmt& decl) {  if (!decl.generics.empty()) {
     return true;
   }
   ClassInfo* info = findClassMut(decl.name);
@@ -2553,7 +2662,7 @@ bool Codegen::buildVtables(const ast::ClassDeclStmt& decl) {
   for (const std::string& iface_name : decl.interfaces) {
     const InterfaceInfo* iface = findInterface(iface_name);
     if (!iface) {
-      error("class " + decl.name + " implements unknown interface " + iface_name);
+      error(decl.loc, "class " + decl.name + " implements unknown interface " + iface_name);
       return false;
     }
     std::vector<llvm::Constant*> slots;
@@ -2561,9 +2670,21 @@ bool Codegen::buildVtables(const ast::ClassDeclStmt& decl) {
     for (const std::string& method_name : iface->method_names) {
       auto mit = info->methods.find(method_name);
       if (mit == info->methods.end()) {
-        error("class " + decl.name + " missing method '" + method_name +
-              "' for interface " + iface_name);
-        return false;
+        // [link:97-Implicit-Delegation]: a class may satisfy the interface
+        // through an embedded (`delegate`) field. The slot is the delegated
+        // class's function — vtable entry N of the outer vtable is executed as
+        // `this = the delegate field's address` by delegate-aware dispatch.
+        if (!ensureDelegateMethod(decl, method_name)) {
+          error(decl.loc, "class " + decl.name + " missing method '" + method_name +
+                "' for interface " + iface_name);
+          return false;
+        }
+        mit = info->methods.find(method_name);
+        if (mit == info->methods.end()) {
+          error(decl.loc, "class " + decl.name + " missing method '" + method_name +
+                "' for interface " + iface_name);
+          return false;
+        }
       }
       slots.push_back(mit->second);
     }
@@ -2577,10 +2698,11 @@ bool Codegen::buildVtables(const ast::ClassDeclStmt& decl) {
   return true;
 }
 
-bool Codegen::emitAutoCloneBody(const std::string& class_name, llvm::Function* fn) {
+bool Codegen::emitAutoCloneBody(const std::string& class_name, llvm::Function* fn,
+                                const ast::SourceLocation& loc) {
   ClassInfo* info = findClassMut(class_name);
   if (!info || !info->type) {
-    error("auto clone: unknown class " + class_name);
+    error(loc, "auto clone: unknown class " + class_name);
     return false;
   }
   llvm::Value* self = &*fn->arg_begin();
@@ -2588,23 +2710,24 @@ bool Codegen::emitAutoCloneBody(const std::string& class_name, llvm::Function* f
   // Nested class fields embedded by value are copied; raw ptr / iface slots stay shallow.
   llvm::Value* copy = builder_.CreateLoad(info->type, self, "clone.copy");
   if (!fn->getReturnType()->isStructTy()) {
-    error("auto clone return type must be the class value for " + class_name);
+    error(loc, "auto clone return type must be the class value for " + class_name);
     return false;
   }
   builder_.CreateRet(copy);
   return true;
 }
 
-llvm::Value* Codegen::makeStringLitObject(const std::string& text, const std::string& name) {
+llvm::Value* Codegen::makeStringLitObject(const std::string& text, const std::string& name,
+                                          const ast::SourceLocation& loc) {
   ensureTypeAvailable("String");
   const ClassInfo* info = findClass("String");
   if (!info) {
-    error("String type not available for to_string");
+    error(loc, "String type not available for to_string");
     return nullptr;
   }
   auto init_it = info->methods.find("init");
   if (init_it == info->methods.end()) {
-    error("String.init not found for to_string");
+    error(loc, "String.init not found for to_string");
     return nullptr;
   }
   llvm::Function* cur = builder_.GetInsertBlock()->getParent();
@@ -2620,16 +2743,17 @@ llvm::Value* Codegen::makeStringLitObject(const std::string& text, const std::st
   return tmp;
 }
 
-llvm::Value* Codegen::concatStringObjects(llvm::Value* lhs, llvm::Value* rhs) {
+llvm::Value* Codegen::concatStringObjects(llvm::Value* lhs, llvm::Value* rhs,
+                                          const ast::SourceLocation& loc) {
   ensureTypeAvailable("String");
   const ClassInfo* info = findClass("String");
   if (!info) {
-    error("String type not available for to_string concat");
+    error(loc, "String type not available for to_string concat");
     return nullptr;
   }
   auto mit = info->methods.find("concat");
   if (mit == info->methods.end()) {
-    error("String.concat not found for to_string");
+    error(loc, "String.concat not found for to_string");
     return nullptr;
   }
   llvm::Value* by_val = builder_.CreateCall(mit->second, {lhs, rhs}, "ts.concat");
@@ -2639,23 +2763,24 @@ llvm::Value* Codegen::concatStringObjects(llvm::Value* lhs, llvm::Value* rhs) {
   return tmp;
 }
 
-bool Codegen::emitAutoToStringBody(const std::string& class_name, llvm::Function* fn) {
+bool Codegen::emitAutoToStringBody(const std::string& class_name, llvm::Function* fn,
+                                   const ast::SourceLocation& loc) {
   ClassInfo* info = findClassMut(class_name);
   if (!info || !info->type) {
-    error("auto to_string: unknown class " + class_name);
+    error(loc, "auto to_string: unknown class " + class_name);
     return false;
   }
   if (!ensureTypeAvailable("String")) {
-    error("auto to_string requires String");
+    error(loc, "auto to_string requires String");
     return false;
   }
   const ClassInfo* str_info = findClass("String");
   if (!str_info) {
-    error("String type not available for auto to_string");
+    error(loc, "String type not available for auto to_string");
     return false;
   }
   if (!fn->getReturnType()->isStructTy() || fn->getReturnType() != str_info->type) {
-    error("auto to_string must return String by value");
+    error(loc, "auto to_string must return String by value");
     return false;
   }
 
@@ -2664,7 +2789,7 @@ bool Codegen::emitAutoToStringBody(const std::string& class_name, llvm::Function
       !info->template_name.empty() ? info->template_name
                                    : (info->ast ? info->ast->name : class_name);
 
-  llvm::Value* acc = makeStringLitObject(display + " { ", "ts.head");
+  llvm::Value* acc = makeStringLitObject(display + " { ", "ts.head", loc);
   if (!acc) {
     return false;
   }
@@ -2684,22 +2809,22 @@ bool Codegen::emitAutoToStringBody(const std::string& class_name, llvm::Function
     const std::string& fty = info->field_types[idx];
 
     if (fi > 0) {
-      llvm::Value* sep = makeStringLitObject(", ", "ts.sep");
+      llvm::Value* sep = makeStringLitObject(", ", "ts.sep", loc);
       if (!sep) {
         return false;
       }
-      acc = concatStringObjects(acc, sep);
+      acc = concatStringObjects(acc, sep, loc);
       if (!acc) {
         return false;
       }
     }
 
     const std::string logical = displayFieldName(fname);
-    llvm::Value* label = makeStringLitObject(logical + ": ", "ts.lab");
+    llvm::Value* label = makeStringLitObject(logical + ": ", "ts.lab", loc);
     if (!label) {
       return false;
     }
-    acc = concatStringObjects(acc, label);
+    acc = concatStringObjects(acc, label, loc);
     if (!acc) {
       return false;
     }
@@ -2718,8 +2843,8 @@ bool Codegen::emitAutoToStringBody(const std::string& class_name, llvm::Function
     } else if (fty == "bool") {
       llvm::Value* v = builder_.CreateLoad(i1Ty(), gep, fname + ".v");
       // Select "true" / "false" as String objects.
-      llvm::Value* t_obj = makeStringLitObject("true", "ts.true");
-      llvm::Value* f_obj = makeStringLitObject("false", "ts.false");
+      llvm::Value* t_obj = makeStringLitObject("true", "ts.true", loc);
+      llvm::Value* f_obj = makeStringLitObject("false", "ts.false", loc);
       if (!t_obj || !f_obj) {
         return false;
       }
@@ -2729,27 +2854,27 @@ bool Codegen::emitAutoToStringBody(const std::string& class_name, llvm::Function
       // Embedded String by value — address is a String*.
       piece = gep;
     } else if (fty == "f64") {
-      piece = makeStringLitObject("<f64>", "ts.f64");
+      piece = makeStringLitObject("<f64>", "ts.f64", loc);
     } else if (fty == "ptr") {
-      piece = makeStringLitObject("<ptr>", "ts.ptr");
+      piece = makeStringLitObject("<ptr>", "ts.ptr", loc);
     } else {
       // Nested class / interface / unknown — placeholder.
-      piece = makeStringLitObject("<Object>", "ts.obj");
+      piece = makeStringLitObject("<Object>", "ts.obj", loc);
     }
     if (!piece) {
       return false;
     }
-    acc = concatStringObjects(acc, piece);
+    acc = concatStringObjects(acc, piece, loc);
     if (!acc) {
       return false;
     }
   }
 
-  llvm::Value* tail = makeStringLitObject(" }", "ts.tail");
+  llvm::Value* tail = makeStringLitObject(" }", "ts.tail", loc);
   if (!tail) {
     return false;
   }
-  acc = concatStringObjects(acc, tail);
+  acc = concatStringObjects(acc, tail, loc);
   if (!acc) {
     return false;
   }
@@ -2766,7 +2891,7 @@ bool Codegen::emitMethodBody(const std::string& class_name, const ast::FuncDeclS
   }
   llvm::Function* fn = info->methods[method.name];
   if (!fn || !fn->empty()) {
-    error("bad method function for " + class_name + "." + method.name);
+    error(method.loc, "bad method function for " + class_name + "." + method.name);
     return false;
   }
 
@@ -2789,7 +2914,7 @@ bool Codegen::emitMethodBody(const std::string& class_name, const ast::FuncDeclS
   current_this_ = method.is_static ? nullptr : &*fn->arg_begin();
 
   if (method.is_compiler_generated && method.name == "clone") {
-    const bool ok = emitAutoCloneBody(class_name, fn);
+    const bool ok = emitAutoCloneBody(class_name, fn, method.loc);
     defer_scopes_.clear();
     auto_free_scopes_.clear();
     current_class_.clear();
@@ -2801,7 +2926,7 @@ bool Codegen::emitMethodBody(const std::string& class_name, const ast::FuncDeclS
       return false;
     }
     if (llvm::verifyFunction(*fn, &llvm::errs())) {
-      error("method verification failed: " + class_name + "." + method.name);
+      error(method.loc, "method verification failed: " + class_name + "." + method.name);
       fn->eraseFromParent();
       return false;
     }
@@ -2809,7 +2934,7 @@ bool Codegen::emitMethodBody(const std::string& class_name, const ast::FuncDeclS
   }
 
   if (method.is_compiler_generated && method.name == "to_string") {
-    const bool ok = emitAutoToStringBody(class_name, fn);
+    const bool ok = emitAutoToStringBody(class_name, fn, method.loc);
     defer_scopes_.clear();
     auto_free_scopes_.clear();
     current_class_.clear();
@@ -2820,7 +2945,7 @@ bool Codegen::emitMethodBody(const std::string& class_name, const ast::FuncDeclS
       return false;
     }
     if (llvm::verifyFunction(*fn, &llvm::errs())) {
-      error("method verification failed: " + class_name + "." + method.name);
+      error(method.loc, "method verification failed: " + class_name + "." + method.name);
       fn->eraseFromParent();
       return false;
     }
@@ -2856,7 +2981,7 @@ bool Codegen::emitMethodBody(const std::string& class_name, const ast::FuncDeclS
     } else if (fn->getReturnType()->isIntegerTy(32)) {
       builder_.CreateRet(llvm::ConstantInt::get(i32Ty(), 0));
     } else {
-      error("missing return in method " + class_name + "." + method.name);
+      error(method.loc, "missing return in method " + class_name + "." + method.name);
       current_class_.clear();
       current_this_ = nullptr;
       current_method_is_static_ = false;
@@ -2873,7 +2998,7 @@ bool Codegen::emitMethodBody(const std::string& class_name, const ast::FuncDeclS
   current_fn_return_type_.clear();
 
   if (llvm::verifyFunction(*fn, &llvm::errs())) {
-    error("method verification failed: " + class_name + "." + method.name);
+    error(method.loc, "method verification failed: " + class_name + "." + method.name);
     fn->eraseFromParent();
     return false;
   }
@@ -2970,7 +3095,13 @@ bool Codegen::emit(const ast::Module& module) {
   }
 
   for (const ast::StmtPtr& stmt : module.stmts) {
-    if (!stmt || stmt->kind() != ast::StmtKind::InterfaceDecl) {
+    if (!stmt) {
+      continue;
+    }
+    // [A007] position context for helpers that only see erased AST nodes
+    // (pattern-matching compiler-generated `clone` / `to_string` bodies).
+    current_top_level_loc_ = stmt->loc;
+    if (stmt->kind() != ast::StmtKind::InterfaceDecl) {
       continue;
     }
     if (!registerInterface(static_cast<const ast::InterfaceDeclStmt&>(*stmt))) {
@@ -2981,7 +3112,11 @@ bool Codegen::emit(const ast::Module& module) {
   // extern module FIRST: class structs may embed generic instantiations
   // (`Map<Variant>` field), and their specialized bodies call l_alloc / l_realloc.
   for (const ast::StmtPtr& stmt : module.stmts) {
-    if (!stmt || stmt->kind() != ast::StmtKind::ExternModule) {
+    if (!stmt) {
+      continue;
+    }
+    current_top_level_loc_ = stmt->loc;
+    if (stmt->kind() != ast::StmtKind::ExternModule) {
       continue;
     }
     const auto& ext = static_cast<const ast::ExternModuleStmt&>(*stmt);
@@ -2997,7 +3132,11 @@ bool Codegen::emit(const ast::Module& module) {
 
   // Register generic templates before anything specializes them.
   for (const ast::StmtPtr& stmt : module.stmts) {
-    if (!stmt || stmt->kind() != ast::StmtKind::ClassDecl) {
+    if (!stmt) {
+      continue;
+    }
+    current_top_level_loc_ = stmt->loc;
+    if (stmt->kind() != ast::StmtKind::ClassDecl) {
       continue;
     }
     const auto& cls = static_cast<const ast::ClassDeclStmt&>(*stmt);
@@ -3005,7 +3144,7 @@ bool Codegen::emit(const ast::Module& module) {
       continue;
     }
     if (generic_class_templates_.count(cls.name) != 0) {
-      error("redefinition of generic class: " + cls.name);
+      error(cls.loc, "redefinition of generic class: " + cls.name);
       return false;
     }
     generic_class_templates_[cls.name] = &cls;
@@ -3055,7 +3194,8 @@ bool Codegen::emit(const ast::Module& module) {
   // of opaque dependencies can never settle, so bound the retries.
   for (std::size_t guard = 0; !deferred_bodies_.empty(); ++guard) {
     if (guard >= deferred_bodies_.size()) {
-      error("cyclic class layout involving '" + deferred_bodies_.front()->name + "'");
+      error(lastTopLevelLoc(), "cyclic class layout involving '" + deferred_bodies_.front()->name + "'");
+      // [A007] no AST loc available
       return false;
     }
     const ast::ClassDeclStmt* decl = deferred_bodies_.front();
@@ -3125,7 +3265,7 @@ bool Codegen::emit(const ast::Module& module) {
       const std::string tmpl_key =
           fn.is_pub ? fn.name : (fn.module_name + "::" + fn.name);
       if (generic_templates_.count(tmpl_key) != 0) {
-        error("redefinition of generic function: " + fn.name);
+        error(fn.loc, "redefinition of generic function: " + fn.name);
         return false;
       }
       generic_templates_[tmpl_key] = &fn;
@@ -3184,16 +3324,35 @@ bool Codegen::emit(const ast::Module& module) {
   // laid out (e.g. a field of an unresolvable type). A module that never loads
   // stdlib/string.l simply has no String type; its literals are lowered as `ptr`.
   if (classes_.count("String") != 0 && !ensureTypeAvailable("String")) {
-    error("String type is not available");
+    error(lastTopLevelLoc(), "String type is not available");
+    // [A007] no AST loc available
     return false;
   }
 
   // Module-level variables before any function body (GlobalVariable / const inline).
+  //
+  // `emitGlobalVarDecl` is only reached for the primary module's statements, so
+  // an imported module's `const` (e.g. `KIND_POS` in apps/cad/entity.l) would
+  // never be inlined and used to fail as an "undeclared identifier" from the
+  // importing module's method bodies. Register every `const` up front.
   for (const ast::StmtPtr& stmt : module.stmts) {
     if (!stmt || stmt->kind() != ast::StmtKind::VarDecl) {
       continue;
     }
-    if (!emitGlobalVarDecl(static_cast<const ast::VarDeclStmt&>(*stmt))) {
+    const auto& decl = static_cast<const ast::VarDeclStmt&>(*stmt);
+    if (decl.decl_kind == ast::VarDeclKind::Const) {
+      registerModuleConst(decl);
+    }
+  }
+  for (const ast::StmtPtr& stmt : module.stmts) {
+    if (!stmt || stmt->kind() != ast::StmtKind::VarDecl) {
+      continue;
+    }
+    const auto& decl = static_cast<const ast::VarDeclStmt&>(*stmt);
+    if (decl.decl_kind == ast::VarDeclKind::Const) {
+      continue;  // inlined above, no global emitted
+    }
+    if (!emitGlobalVarDecl(decl)) {
       return false;
     }
   }
@@ -3215,7 +3374,7 @@ bool Codegen::emit(const ast::Module& module) {
   if (isClassType("String")) {
     for (const ast::FuncDeclStmt* fn : deferred_return_types_) {
       if (!ensureTypeAvailable(fn->return_type)) {
-        error("cannot resolve return type '" + fn->return_type + "' of " + fn->name);
+        error(fn->loc, "cannot resolve return type '" + fn->return_type + "' of " + fn->name);
         return false;
       }
     }
@@ -3256,7 +3415,8 @@ bool Codegen::emit(const ast::Module& module) {
   }
 
   if (llvm::verifyModule(*module_, &llvm::errs())) {
-    error("module verification failed");
+    error(lastTopLevelLoc(), "module verification failed");
+    // [A007] no AST loc available
     return false;
   }
   return !had_error_;
@@ -3301,7 +3461,8 @@ bool Codegen::emitObjectFile(const std::string& object_path) {
   std::string err;
   const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, err);
   if (!target) {
-    error("lookupTarget failed: " + err);
+    error(lastTopLevelLoc(), "lookupTarget failed: " + err);
+    // [A007] no AST loc available
     return false;
   }
 
@@ -3315,7 +3476,8 @@ bool Codegen::emitObjectFile(const std::string& object_path) {
   std::unique_ptr<llvm::TargetMachine> tm(
       target->createTargetMachine(triple, cpu_name, "", opt, reloc));
   if (!tm) {
-    error("failed to create TargetMachine");
+    error(lastTopLevelLoc(), "failed to create TargetMachine");
+    // [A007] no AST loc available
     return false;
   }
 
@@ -3328,13 +3490,15 @@ bool Codegen::emitObjectFile(const std::string& object_path) {
   std::error_code ec;
   llvm::raw_fd_ostream dest(object_path, ec, llvm::sys::fs::OF_None);
   if (ec) {
-    error("could not open object file '" + object_path + "': " + ec.message());
+    error(lastTopLevelLoc(), "could not open object file '" + object_path + "': " + ec.message());
+    // [A007] no AST loc available
     return false;
   }
 
   llvm::legacy::PassManager pass;
   if (tm->addPassesToEmitFile(pass, dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
-    error("TargetMachine cannot emit object file");
+    error(lastTopLevelLoc(), "TargetMachine cannot emit object file");
+    // [A007] no AST loc available
     return false;
   }
   pass.run(*module_);
@@ -3353,7 +3517,7 @@ bool Codegen::emitStmt(const ast::Stmt& stmt) {
     case ast::StmtKind::ClassDecl:
       return true;
     case ast::StmtKind::FieldDecl:
-      error("field declaration outside class");
+      error(stmt.loc, "field declaration outside class");
       return false;
     case ast::StmtKind::FuncDecl:
       return emitFuncDecl(static_cast<const ast::FuncDeclStmt&>(stmt));
@@ -3373,7 +3537,7 @@ bool Codegen::emitStmt(const ast::Stmt& stmt) {
       if (!blk.section_field.empty() && current_this_ && !current_class_.empty()) {
         const ClassInfo* owner = findClass(current_class_);
         if (!owner) {
-          error(blk.loc, "unknown config class '" + current_class_ + "'");
+          error(stmt.loc, "unknown config class '" + current_class_ + "'");
           return false;
         }
         llvm::Value* section = nullptr;
@@ -3385,7 +3549,7 @@ bool Codegen::emitStmt(const ast::Stmt& stmt) {
           const std::string phys = physicalFieldName(blk.section_field);
           auto fit = owner->field_index.find(phys);
           if (fit == owner->field_index.end()) {
-            error(blk.loc, "unknown section '" + blk.section_field + "' on '" +
+            error(stmt.loc, "unknown section '" + blk.section_field + "' on '" +
                                current_class_ + "'");
             return false;
           }
@@ -3438,7 +3602,8 @@ bool Codegen::emitStmt(const ast::Stmt& stmt) {
       error(stmt.loc, "unexpanded comptime block (frontend expand missing?)");
       return false;
   }
-  error("unsupported statement in codegen");
+  // [A007] no AST loc available — `emitStmt` only sees the erased `ast::Stmt` base.
+  error(stmt.loc, "unsupported statement in codegen");
   return false;
 }
 
@@ -3504,14 +3669,14 @@ bool Codegen::emitSpecializedFunc(const ast::FuncDeclStmt& tmpl, const std::stri
       } else if (fn->getReturnType()->isIntegerTy(32)) {
         builder_.CreateRet(llvm::ConstantInt::get(i32Ty(), 0));
       } else {
-        error("missing return in specialized function: " + mangled);
+        error(tmpl.loc, "missing return in specialized function: " + mangled);
         ok = false;
       }
     }
   }
 
   if (ok && llvm::verifyFunction(*fn, &llvm::errs())) {
-    error("specialized function verification failed: " + mangled);
+    error(tmpl.loc, "specialized function verification failed: " + mangled);
     ok = false;
   }
 
@@ -3600,6 +3765,7 @@ bool Codegen::emitHookBodies(llvm::Function* fn,
     if (!hook) {
       continue;
     }
+    current_top_level_loc_ = hook->loc;
     current_module_ = hook->module_name;
     if (!emitStmtList(hook->body)) {
       current_fn_return_type_.clear();
@@ -3623,7 +3789,8 @@ bool Codegen::emitHookBodies(llvm::Function* fn,
   current_fn_return_type_.clear();
 
   if (llvm::verifyFunction(*fn, &llvm::errs())) {
-    error("lifecycle hook verification failed: " + fn->getName().str());
+    error(lastTopLevelLoc(), "lifecycle hook verification failed: " + fn->getName().str());
+    // [A007] no AST loc available
     fn->eraseFromParent();
     return false;
   }
@@ -3633,17 +3800,18 @@ bool Codegen::emitHookBodies(llvm::Function* fn,
 bool Codegen::emitPendingGlobalClassInits() {
   for (const PendingGlobalClassInit& p : pending_global_class_inits_) {
     if (!p.neu) {
-      error("global class '" + p.name + "' missing NewExpr initializer");
+      // [A007] no AST loc available — PendingGlobalClassInit carries no location.
+      error(lastTopLevelLoc(), "global class '" + p.name + "' missing NewExpr initializer");
       return false;
     }
     if (!ensureTypeAvailable(p.class_name)) {
-      error("unknown class for global '" + p.name + "': " + p.class_name);
+      error(p.neu->loc, "unknown class for global '" + p.name + "': " + p.class_name);
       return false;
     }
     const ClassInfo* info = findClass(p.class_name);
     auto git = global_vars_.find(p.name);
     if (!info || git == global_vars_.end()) {
-      error("global class '" + p.name + "' not registered");
+      error(p.neu->loc, "global class '" + p.name + "' not registered");
       return false;
     }
     if (!initClassAtPtr(git->second, *info, *p.neu)) {
@@ -3667,6 +3835,10 @@ bool Codegen::emitLifecycleWrappers(const ast::Module& module) {
 
   const bool need_global_init = !module.init_hooks.empty() ||
                                 !pending_global_class_inits_.empty() || has_toplevel_exec;
+  // [A007] `emitPendingGlobalClassInits` has no AST node of its own.
+  current_top_level_loc_ = module.stmts.empty() || !module.stmts.front()
+                               ? ast::SourceLocation{}
+                               : module.stmts.front()->loc;
   if (need_global_init) {
     auto* fty = llvm::FunctionType::get(voidTy(), {}, false);
     global_init_fn_ = llvm::Function::Create(fty, llvm::Function::InternalLinkage,
@@ -3695,7 +3867,11 @@ bool Codegen::emitLifecycleWrappers(const ast::Module& module) {
       return false;
     }
     for (const ast::StmtPtr& stmt : module.stmts) {
-      if (!stmt || !isModuleTopLevelExecStmt(*stmt)) {
+      if (!stmt) {
+        continue;
+      }
+      current_top_level_loc_ = stmt->loc;
+      if (!isModuleTopLevelExecStmt(*stmt)) {
         continue;
       }
       if (!emitStmt(*stmt)) {
@@ -3732,7 +3908,8 @@ bool Codegen::emitLifecycleWrappers(const ast::Module& module) {
     current_fn_return_type_.clear();
 
     if (llvm::verifyFunction(*global_init_fn_, &llvm::errs())) {
-      error("lifecycle hook verification failed: __l_global_init");
+      error(lastTopLevelLoc(), "lifecycle hook verification failed: __l_global_init");
+      // [A007] no AST loc available
       global_init_fn_->eraseFromParent();
       global_init_fn_ = nullptr;
       return false;
@@ -3915,11 +4092,11 @@ bool Codegen::emitCoroutineBody(const ast::FuncDeclStmt& fn_ast) {
   const std::string ir_name = mangleName(fn_ast.module_name, fn_ast.name, fn_ast.is_pub);
   llvm::Function* fn = module_->getFunction(ir_name);
   if (!fn) {
-    error("missing function declaration: " + ir_name);
+    error(fn_ast.loc, "missing function declaration: " + ir_name);
     return false;
   }
   if (!fn->empty()) {
-    error("redefinition of function: " + ir_name);
+    error(fn_ast.loc, "redefinition of function: " + ir_name);
     return false;
   }
 
@@ -4149,11 +4326,11 @@ bool Codegen::emitCoroutineBody(const ast::FuncDeclStmt& fn_ast) {
   coro_resume_bb_ = nullptr;
 
   if (!fn->empty() && llvm::verifyFunction(*step_fn, &llvm::errs())) {
-    error("async state machine verification failed: " + fn_ast.name);
+    error(fn_ast.loc, "async state machine verification failed: " + fn_ast.name);
     return false;
   }
   if (llvm::verifyFunction(*fn, &llvm::errs())) {
-    error("async entry wrapper verification failed: " + fn_ast.name);
+    error(fn_ast.loc, "async entry wrapper verification failed: " + fn_ast.name);
     return false;
   }
   return true;
@@ -4288,11 +4465,11 @@ bool Codegen::emitFuncDecl(const ast::FuncDeclStmt& fn_ast) {
   const std::string ir_name = mangleName(fn_ast.module_name, fn_ast.name, fn_ast.is_pub);
   llvm::Function* fn = module_->getFunction(ir_name);
   if (!fn) {
-    error("missing function declaration: " + ir_name);
+    error(fn_ast.loc, "missing function declaration: " + ir_name);
     return false;
   }
   if (!fn->empty()) {
-    error("redefinition of function: " + ir_name);
+    error(fn_ast.loc, "redefinition of function: " + ir_name);
     return false;
   }
 
@@ -4326,7 +4503,7 @@ bool Codegen::emitFuncDecl(const ast::FuncDeclStmt& fn_ast) {
   if (is_main) {
     // LLVM main is always (i32 argc, ptr argv); stash when extern l_init_args is present.
     if (fn->arg_size() != 2) {
-      error("internal: main must be declared as (i32, ptr) at the LLVM layer");
+      error(fn_ast.loc, "internal: main must be declared as (i32, ptr) at the LLVM layer");
       return false;
     }
     llvm::Argument& argc_arg = *fn->arg_begin();
@@ -4342,14 +4519,14 @@ bool Codegen::emitFuncDecl(const ast::FuncDeclStmt& fn_ast) {
       bindParam(fn, &argc_arg, fn_ast.params[0], fn_ast.params[0].type_name);
       bindParam(fn, &argv_arg, fn_ast.params[1], fn_ast.params[1].type_name);
     } else if (!fn_ast.params.empty()) {
-      error("main must have zero parameters or (i32 argc, ptr argv)");
+      error(fn_ast.loc, "main must have zero parameters or (i32 argc, ptr argv)");
       return false;
     }
   } else {
     unsigned idx = 0;
     for (auto& arg : fn->args()) {
       if (idx >= fn_ast.params.size()) {
-        error("internal: argument count mismatch for " + fn_ast.name);
+        error(fn_ast.loc, "internal: argument count mismatch for " + fn_ast.name);
         return false;
       }
       const ast::Param& param = fn_ast.params[idx];
@@ -4383,7 +4560,7 @@ bool Codegen::emitFuncDecl(const ast::FuncDeclStmt& fn_ast) {
     } else if (fn->getReturnType()->isIntegerTy(32)) {
       builder_.CreateRet(llvm::ConstantInt::get(i32Ty(), 0));
     } else {
-      error("missing return in non-i32 function: " + fn_ast.name);
+      error(fn_ast.loc, "missing return in non-i32 function: " + fn_ast.name);
       current_fn_return_type_.clear();
       inject_deinit_on_return_ = false;
       return false;
@@ -4396,7 +4573,7 @@ bool Codegen::emitFuncDecl(const ast::FuncDeclStmt& fn_ast) {
   inject_deinit_on_return_ = false;
 
   if (llvm::verifyFunction(*fn, &llvm::errs())) {
-    error("function verification failed: " + fn_ast.name);
+    error(fn_ast.loc, "function verification failed: " + fn_ast.name);
     fn->eraseFromParent();
     return false;
   }
@@ -4438,7 +4615,7 @@ bool Codegen::initClassAtPtr(llvm::Value* base, const ClassInfo& info,
       llvm::Value* emb = slot;
       if (slot_ty && slot_ty->isPointerTy()) {
         ensureDataLayout();
-        llvm::Function* alloc_fn = requireExtern("l_alloc");
+        llvm::Function* alloc_fn = requireExtern("l_alloc", info.ast->loc);
         if (!alloc_fn) {
           continue;
         }
@@ -4474,7 +4651,7 @@ bool Codegen::initClassAtPtr(llvm::Value* base, const ClassInfo& info,
 
   // Legacy fallback: map NewExpr args onto fields in declaration order.
   if (neu.args.size() > info.field_types.size()) {
-    error("too many constructor arguments for " + neu.class_name);
+    error(neu.loc, "too many constructor arguments for " + neu.class_name);
     return false;
   }
   for (size_t i = 0; i < neu.args.size(); ++i) {
@@ -4482,7 +4659,7 @@ bool Codegen::initClassAtPtr(llvm::Value* base, const ClassInfo& info,
       continue;
     }
     if (!neu.args[i].name.empty()) {
-      error("keyword arguments not supported in field-order constructors");
+      error(neu.args[i].value->loc, "keyword arguments not supported in field-order constructors");
       return false;
     }
     llvm::Type* fty = llvmTypeForTypeName(info.field_types[i]);
@@ -4503,7 +4680,7 @@ bool Codegen::initClassAtPtr(llvm::Value* base, const ClassInfo& info,
       if (fty->isIntegerTy(1)) {
         v = toI1(v);
       } else if (fty->isIntegerTy(32) && !v->getType()->isPointerTy()) {
-        v = toI32(v);
+        v = toI32(v, neu.loc);
       } else if (isInterfaceType(info.field_types[i])) {
         // Interface field (e.g. Optional<IPlugin>.value): box Class → fat pointer.
         v = emitValueForParam(*neu.args[i].value, fty, info.field_types[i]);
@@ -4532,7 +4709,7 @@ llvm::Value* Codegen::emitClassInitCall(const ClassInfo& info, const ast::NewExp
                                         const std::vector<ast::CallArg>& args) {
   auto init_it = info.methods.find("init");
   if (init_it == info.methods.end() || !init_it->second) {
-    error("class '" + info.ir_name + "' has no init to call");
+    error(neu.loc, "class '" + info.ir_name + "' has no init to call");
     return nullptr;
   }
   // Call args are borrowed (`ast::CallArg` has a unique_ptr and no copy), so the
@@ -4546,7 +4723,7 @@ llvm::Value* Codegen::emitInitArgsWith(const ClassInfo& info, const ast::NewExpr
                                        const ast::FuncDeclStmt* init_ast, llvm::Value* base,
                                        const std::vector<ast::CallArg>& args) {
   if (init_fn->arg_size() != args.size() + 1) {
-    error("argument count mismatch calling " + neu.class_name + ".init");
+    error(neu.loc, "argument count mismatch calling " + neu.class_name + ".init");
     return nullptr;
   }
   std::vector<llvm::Value*> call_args;
@@ -4554,11 +4731,11 @@ llvm::Value* Codegen::emitInitArgsWith(const ClassInfo& info, const ast::NewExpr
   for (size_t i = 0; i < args.size(); ++i) {
     const ast::CallArg& arg = args[i];
     if (!arg.value) {
-      error("null argument to " + neu.class_name + ".init");
+      error(neu.loc, "null argument to " + neu.class_name + ".init");
       return nullptr;
     }
     if (!arg.name.empty()) {
-      error("keyword arguments not supported in constructors yet");
+      error(neu.loc, "keyword arguments not supported in constructors yet");
       return nullptr;
     }
     llvm::Type* expected = init_fn->getFunctionType()->getParamType(static_cast<unsigned>(i + 1));
@@ -4604,7 +4781,7 @@ bool Codegen::initStackClassFromPtr(llvm::Value* alloca, const ClassInfo& info,
 llvm::Value* Codegen::emitHeapClassAllocAndInit(const ClassInfo& info, const ast::NewExpr& neu,
                                                 const std::string& name) {
   ensureDataLayout();
-  llvm::Function* alloc_fn = requireExtern("l_alloc");
+  llvm::Function* alloc_fn = requireExtern("l_alloc", neu.loc);
   if (!alloc_fn) {
     return nullptr;
   }
@@ -4635,7 +4812,7 @@ bool Codegen::emitStackClassInit(llvm::AllocaInst* slot, const ClassInfo& info,
   if (is_string_class && init.kind() == ast::ExprKind::StringLiteral) {
     auto init_it = info.methods.find("init");
     if (init_it == info.methods.end()) {
-      error("String.init not found");
+      error(decl.loc, "String.init not found");
       return false;
     }
     for (size_t i = 0; i < info.field_types.size(); ++i) {
@@ -4657,7 +4834,7 @@ bool Codegen::emitStackClassInit(llvm::AllocaInst* slot, const ClassInfo& info,
       return false;
     }
     if (v->getType() != info.type) {
-      error("namespaced call for '" + decl.name + "' must yield a String value");
+      error(decl.loc, "namespaced call for '" + decl.name + "' must yield a String value");
       return false;
     }
     builder_.CreateStore(v, slot);
@@ -4677,7 +4854,7 @@ bool Codegen::emitStackClassInit(llvm::AllocaInst* slot, const ClassInfo& info,
     return true;
   }
   if (!v->getType()->isPointerTy()) {
-    error("cannot initialize class '" + decl.name + "' from non-class expression");
+    error(decl.loc, "cannot initialize class '" + decl.name + "' from non-class expression");
     return false;
   }
   // Any class-typed pointer (a local slot, or an Optional payload slot) points at
@@ -4708,9 +4885,9 @@ bool Codegen::emitDefer(const ast::DeferStmt& stmt) {
 
 bool Codegen::emitSync(const ast::SyncBlockStmt& stmt) {
   // sync { } → lock process-wide mutex, run body, unlock (also via finishCleanups on return).
-  llvm::Function* global_fn = requireExtern("l_mutex_global");
-  llvm::Function* lock_fn = requireExtern("l_mutex_lock");
-  llvm::Function* unlock_fn = requireExtern("l_mutex_unlock");
+  llvm::Function* global_fn = requireExtern("l_mutex_global", stmt.loc);
+  llvm::Function* lock_fn = requireExtern("l_mutex_lock", stmt.loc);
+  llvm::Function* unlock_fn = requireExtern("l_mutex_unlock", stmt.loc);
   if (!global_fn || !lock_fn || !unlock_fn) {
     return false;
   }
@@ -5048,7 +5225,7 @@ llvm::Value* Codegen::emitSpawnBody(const std::vector<ast::StmtPtr>& body,
                                     const ast::SourceLocation& loc) {
   // Real OS thread: pack captured local addresses → __spawn_N(ctx) → l_spawn.
   // Does NOT join — returns an opaque handle for explicit `l_thread_join`.
-  llvm::Function* spawn_rt = requireExtern("l_spawn");
+  llvm::Function* spawn_rt = requireExtern("l_spawn", loc);
   if (!spawn_rt) {
     return nullptr;
   }
@@ -5151,7 +5328,7 @@ llvm::Value* Codegen::emitSpawnBody(const std::vector<ast::StmtPtr>& body,
       // Capture ctx is heap-allocated so the parent can continue without joining;
       // free it after the worker body (and its deferred cleanups) finish.
       if (!caps.empty()) {
-        llvm::Function* free_fn = requireExtern("l_free");
+        llvm::Function* free_fn = requireExtern("l_free", loc);
         if (!free_fn) {
           ok = false;
         } else {
@@ -5196,7 +5373,7 @@ llvm::Value* Codegen::emitSpawnBody(const std::vector<ast::StmtPtr>& body,
   // Parent: heap-allocate ctx (survives past spawn return), then l_spawn — no auto-join.
   llvm::Value* ctx_ptr = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy()));
   if (!caps.empty()) {
-    llvm::Function* alloc_fn = requireExtern("l_alloc");
+    llvm::Function* alloc_fn = requireExtern("l_alloc", loc);
     if (!alloc_fn) {
       return nullptr;
     }
@@ -5225,15 +5402,16 @@ llvm::Value* Codegen::emitSpawnBody(const std::vector<ast::StmtPtr>& body,
 }
 
 llvm::Value* Codegen::boxToInterface(llvm::Value* class_ptr, const std::string& class_name,
-                                     const std::string& iface_name) {
+                                     const std::string& iface_name,
+                                     const ast::SourceLocation& loc) {
   const ClassInfo* info = findClass(class_name);
   if (!info) {
-    error("box: unknown class " + class_name);
+    error(loc, "box: unknown class " + class_name);
     return nullptr;
   }
   auto vit = info->vtables.find(iface_name);
   if (vit == info->vtables.end()) {
-    error("class " + class_name + " has no vtable for " + iface_name);
+    error(loc, "class " + class_name + " has no vtable for " + iface_name);
     return nullptr;
   }
 
@@ -5257,7 +5435,7 @@ llvm::Value* Codegen::heapAllocNewExpr(const ast::NewExpr& neu) {
     return nullptr;
   }
   ensureDataLayout();
-  llvm::Function* alloc = requireExtern("l_alloc");
+  llvm::Function* alloc = requireExtern("l_alloc", neu.loc);
   if (!alloc) {
     return nullptr;
   }
@@ -5539,7 +5717,7 @@ llvm::Value* Codegen::emitCast(const ast::CastExpr& expr) {
     if (!obj) {
       return nullptr;
     }
-    return boxToInterface(obj, from_ty, to_ty);
+    return boxToInterface(obj, from_ty, to_ty, expr.loc);
   }
 
   // Opaque FFI: Class* → ptr (zero-cost bitcast of the object address).
@@ -5594,7 +5772,7 @@ llvm::Value* Codegen::emitCast(const ast::CastExpr& expr) {
     return toI1(v);
   }
   if (to_ty == "i32") {
-    return toI32(v);
+    return toI32(v, expr.loc);
   }
   error(expr.loc, "unsupported cast from '" + from_ty + "' to '" + to_ty + "'");
   return nullptr;
@@ -5808,6 +5986,39 @@ llvm::Value* Codegen::lookupStorage(const std::string& name) {
   return nullptr;
 }
 
+// Module-level `const NAME = <literal>`: inlined at every use site, no storage.
+//
+// Constants are module-scoped. `emit()` is driven by the primary module's
+// statements only, and imported modules' bodies are inlined into this module's
+// AST, so an imported `const` (e.g. `KIND_POS` in apps/cad/entity.l) would
+// otherwise be invisible to the very method bodies that reference it.
+void Codegen::registerModuleConst(const ast::VarDeclStmt& decl) {
+  if (const_values_.count(decl.name) != 0) {
+    return;  // already registered (primary module pass reached it first)
+  }
+  if (!decl.init) {
+    error(decl.loc, "const '" + decl.name + "' requires an initializer");
+    return;
+  }
+  std::string type_name = decl.type_name;
+  if (type_name.empty()) {
+    if (decl.init->kind() == ast::ExprKind::BoolLiteral) {
+      type_name = "bool";
+    } else {
+      type_name = inferTypeFromExpr(*decl.init);
+      if (type_name.empty()) {
+        type_name = "i32";
+      }
+    }
+  }
+  llvm::Constant* init = evalConstInit(*decl.init, llvmTypeForTypeName(type_name));
+  if (!init) {
+    return;
+  }
+  const_values_[decl.name] = init;
+  const_types_[decl.name] = type_name;
+}
+
 bool Codegen::emitGlobalVarDecl(const ast::VarDeclStmt& decl) {
   if (const_values_.count(decl.name) != 0 || global_vars_.count(decl.name) != 0 ||
       named_values_.count(decl.name) != 0) {
@@ -5951,7 +6162,7 @@ bool Codegen::emitDestructureDecl(const ast::DestructureDeclStmt& decl) {
     if (isClassType(fty_name)) {
       const ClassInfo* finfo = findClass(fty_name);
       if (!finfo) {
-        error(b.loc, "unknown field class type '" + fty_name + "'");
+        error(decl.loc, "unknown field class type '" + fty_name + "'");
         return false;
       }
       llvm::AllocaInst* slot = createEntryAlloca(fn, finfo->type, b.name);
@@ -6046,7 +6257,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   if (type_name == "Arena") {
     llvm::Value* slot = createLocalStorage(fn, ptrTy(), decl.name);
     if (!decl.init) {
-      error("Arena '" + decl.name + "' requires an initializer");
+      error(decl.loc, "Arena '" + decl.name + "' requires an initializer");
       return false;
     }
     llvm::Value* arena_ptr = emitExpr(*decl.init);
@@ -6064,7 +6275,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   if (isClassType(type_name)) {
     const ClassInfo* info = findClass(type_name);
     if (!info) {
-      error("unknown class in declaration: " + type_name);
+      error(decl.loc, "unknown class in declaration: " + type_name);
       return false;
     }
     local_types_[decl.name] = type_name;
@@ -6075,7 +6286,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
       named_values_[decl.name] = dst;
       llvm::Value* src = emitExpr(*decl.init);
       if (!src || !src->getType()->isPointerTy()) {
-        error("namespaced constructor for '" + decl.name + "' must yield a class value");
+        error(decl.loc, "namespaced constructor for '" + decl.name + "' must yield a class value");
         return false;
       }
       if (!initStackClassFromPtr(dst, *info, src, decl.name + ".copy")) {
@@ -6089,7 +6300,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
     if (needs_drop && decl.init && decl.init->kind() == ast::ExprKind::New) {
       const auto& neu = static_cast<const ast::NewExpr&>(*decl.init);
       if (neu.class_name != type_name) {
-        error("class type mismatch in initialization of " + decl.name);
+        error(decl.loc, "class type mismatch in initialization of " + decl.name);
         return false;
       }
       llvm::Value* raw = emitHeapClassAllocAndInit(*info, neu, decl.name);
@@ -6107,12 +6318,12 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
     if (decl.init && decl.init->kind() == ast::ExprKind::Heap) {
       const auto& heap = static_cast<const ast::HeapExpr&>(*decl.init);
       if (!heap.inner || heap.inner->kind() != ast::ExprKind::New) {
-        error("heap init requires ClassName(...)");
+        error(decl.loc, "heap init requires ClassName(...)");
         return false;
       }
       const auto& neu = static_cast<const ast::NewExpr&>(*heap.inner);
       if (neu.class_name != type_name) {
-        error("class type mismatch in heap initialization of " + decl.name);
+        error(decl.loc, "class type mismatch in heap initialization of " + decl.name);
         return false;
       }
       llvm::Value* heap_slot = createLocalStorage(fn, ptrTy(), decl.name);
@@ -6135,7 +6346,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
         return false;
       }
       if (!ptr->getType()->isPointerTy()) {
-        error("arena-owned init for '" + decl.name + "' expected a pointer");
+        error(decl.loc, "arena-owned init for '" + decl.name + "' expected a pointer");
         return false;
       }
       builder_.CreateStore(ptr, arena_obj_slot);
@@ -6152,7 +6363,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
         return false;
       }
       if (!heap_ptr->getType()->isPointerTy()) {
-        error("owned heap init for '" + decl.name + "' expected a pointer");
+        error(decl.loc, "owned heap init for '" + decl.name + "' expected a pointer");
         return false;
       }
       builder_.CreateStore(heap_ptr, owned_slot);
@@ -6180,7 +6391,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
             return false;
           }
           if (!obj->getType()->isPointerTy()) {
-            error("ptr → class cast for '" + decl.name + "' expected a pointer");
+            error(decl.loc, "ptr → class cast for '" + decl.name + "' expected a pointer");
             return false;
           }
           builder_.CreateStore(obj, slot);
@@ -6216,7 +6427,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
     local_types_[decl.name] = type_name;
 
     if (!decl.init) {
-      error("interface variable requires initializer");
+      error(decl.loc, "interface variable requires initializer");
       return false;
     }
 
@@ -6250,7 +6461,8 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
     // pointer directly, so it can be stored without any boxing.
     if (decl.init->kind() == ast::ExprKind::Call ||
         decl.init->kind() == ast::ExprKind::MethodCall ||
-        decl.init->kind() == ast::ExprKind::Index) {
+        decl.init->kind() == ast::ExprKind::Index ||
+        decl.init->kind() == ast::ExprKind::MemberAccess) {
       llvm::Value* fat = emitExpr(*decl.init);
       if (!fat) {
         return false;
@@ -6270,11 +6482,11 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
       const auto& id = static_cast<const ast::IdentifierExpr&>(*decl.init);
       auto lit = local_types_.find(id.name);
       if (lit == local_types_.end() || !isClassType(lit->second)) {
-        error("interface init expects a class instance");
+        error(decl.loc, "interface init expects a class instance");
         return false;
       }
       class_ty = lit->second;
-      obj = classObjectPtr(id.name);
+      obj = classObjectPtr(id.name, decl.loc);
     } else if (decl.init->kind() == ast::ExprKind::New) {
       const auto& neu = static_cast<const ast::NewExpr&>(*decl.init);
       class_ty = neu.class_name;
@@ -6282,7 +6494,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
     } else {
       class_ty = inferTypeFromExpr(*decl.init);
       if (!isClassType(class_ty)) {
-        error("interface init expects a class instance");
+        error(decl.loc, "interface init expects a class instance");
         return false;
       }
       obj = classValuePtr(*decl.init, class_ty);
@@ -6290,7 +6502,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
     if (!obj) {
       return false;
     }
-    llvm::Value* fat = boxToInterface(obj, class_ty, type_name);
+    llvm::Value* fat = boxToInterface(obj, class_ty, type_name, decl.loc);
     if (!fat) {
       return false;
     }
@@ -6302,7 +6514,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   // Escaped returns: `cb := get_closure()` stores fat `{fn,ctx}` ([link:75-Escape-Analysis-Auto-Heap-Promotion]).
   if (isFunTypeName(type_name)) {
     if (!decl.init) {
-      error("function variable '" + decl.name + "' requires an initializer");
+      error(decl.loc, "function variable '" + decl.name + "' requires an initializer");
       return false;
     }
 
@@ -6400,14 +6612,14 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
       return false;
     }
     if (lty->isIntegerTy(32) && !init->getType()->isPointerTy()) {
-      init = toI32(init);
+      init = toI32(init, decl.loc);
     } else if (lty->isIntegerTy(64) && init->getType()->isIntegerTy()) {
       init = builder_.CreateIntCast(init, i64Ty(), /*isSigned=*/true, "init.i64");
     } else if (lty->isDoubleTy()) {
       if (init->getType()->isIntegerTy()) {
         init = builder_.CreateSIToFP(init, f64Ty(), "init.f64");
       } else if (!init->getType()->isDoubleTy()) {
-        error("cannot initialize f64 '" + decl.name + "' from non-numeric expression");
+        error(decl.loc, "cannot initialize f64 '" + decl.name + "' from non-numeric expression");
         return false;
       }
     }
@@ -6438,11 +6650,11 @@ llvm::Value* Codegen::emitPrintVariant(const ast::Expr& arg_expr, llvm::Value* v
   }
   llvm::Value* tag = builder_.CreateExtractValue(var_val, 0, "pv.tag");
   llvm::Value* data = builder_.CreateExtractValue(var_val, 1, "pv.data");
-  llvm::Function* print_str = requireExtern("l_print_str");
-  llvm::Function* int_str = requireExtern("l_int_to_str");
-  llvm::Function* f64_str = requireExtern("l_f64_to_str");
-  llvm::Function* load_i32 = requireExtern("l_load_i32");
-  llvm::Function* load_f64 = requireExtern("l_load_f64");
+  llvm::Function* print_str = requireExtern("l_print_str", loc);
+  llvm::Function* int_str = requireExtern("l_int_to_str", loc);
+  llvm::Function* f64_str = requireExtern("l_f64_to_str", loc);
+  llvm::Function* load_i32 = requireExtern("l_load_i32", loc);
+  llvm::Function* load_f64 = requireExtern("l_load_f64", loc);
   if (!print_str || !int_str || !f64_str || !load_i32 || !load_f64) {
     error(loc, "print(Variant) requires runtime helpers");
     return nullptr;
@@ -6562,7 +6774,7 @@ llvm::Value* Codegen::emitPrintOptionalVariant(const ast::Expr& arg_expr, llvm::
   llvm::Value* has = builder_.CreateExtractValue(opt_val, 0, "pov.has");
   llvm::Value* payload = builder_.CreateExtractValue(opt_val, 1, "pov.payload");
 
-  llvm::Function* print_str = requireExtern("l_print_str");
+  llvm::Function* print_str = requireExtern("l_print_str", loc);
   if (!print_str) {
     return nullptr;
   }
@@ -6673,7 +6885,7 @@ std::string Codegen::instantiateMemberType(const std::string& type_name,
 
 llvm::Value* Codegen::emitIndexLValue(const ast::IndexExpr& expr) {
   if (!expr.object || !expr.index) {
-    error("incomplete index expression");
+    error(expr.loc, "incomplete index expression");
     return nullptr;
   }
 
@@ -6684,22 +6896,22 @@ llvm::Value* Codegen::emitIndexLValue(const ast::IndexExpr& expr) {
     if (lit != local_types_.end() && isClassType(lit->second)) {
       const ClassInfo* info = findClass(lit->second);
       if (!info || info->type_args.empty()) {
-        error("index on non-generic class " + lit->second);
+        error(expr.loc, "index on non-generic class " + lit->second);
         return nullptr;
       }
       auto fit = info->field_index.find("data_");
       if (fit == info->field_index.end()) {
-        error("indexed class missing data_ field");
+        error(expr.loc, "indexed class missing data_ field");
         return nullptr;
       }
-      llvm::Value* obj = classObjectPtr(id.name);
+      llvm::Value* obj = classObjectPtr(id.name, expr.loc);
       if (!obj) {
         return nullptr;
       }
       llvm::Value* data_gep =
           builder_.CreateStructGEP(info->type, obj, fit->second, "arr.data");
       llvm::Value* data = builder_.CreateLoad(ptrTy(), data_gep, "arr.data.ptr");
-      llvm::Value* idx = toI32(emitExpr(*expr.index));
+      llvm::Value* idx = toI32(emitExpr(*expr.index), expr.loc);
       if (!idx) {
         return nullptr;
       }
@@ -6714,15 +6926,15 @@ llvm::Value* Codegen::emitIndexLValue(const ast::IndexExpr& expr) {
     return nullptr;
   }
   if (!base->getType()->isPointerTy()) {
-    error("index base must be a pointer or Array");
+    error(expr.loc, "index base must be a pointer or Array");
     return nullptr;
   }
   llvm::Type* elem_ty = elementTypeForIndexedBase(*expr.object);
   if (!elem_ty) {
-    error("cannot determine element type for pointer index (need generic class context)");
+    error(expr.loc, "cannot determine element type for pointer index (need generic class context)");
     return nullptr;
   }
-  llvm::Value* idx = toI32(emitExpr(*expr.index));
+  llvm::Value* idx = toI32(emitExpr(*expr.index), expr.loc);
   if (!idx) {
     return nullptr;
   }
@@ -6784,7 +6996,7 @@ llvm::Value* Codegen::emitLValue(const ast::Expr& expr) {
       const auto& id = static_cast<const ast::IdentifierExpr&>(expr);
 
       if (const_values_.count(id.name) != 0) {
-        error("cannot assign to const '" + id.name + "'");
+        error(expr.loc, "cannot assign to const '" + id.name + "'");
         return nullptr;
       }
 
@@ -6799,7 +7011,7 @@ llvm::Value* Codegen::emitLValue(const ast::Expr& expr) {
       }
 
       if (id.name == "this" && current_method_is_static_) {
-        error("cannot use 'this' inside a static method");
+        error(expr.loc, "cannot use 'this' inside a static method");
         return nullptr;
       }
       // Method body: bare field name resolves against this (logical → physical).
@@ -6811,18 +7023,18 @@ llvm::Value* Codegen::emitLValue(const ast::Expr& expr) {
 
       if (llvm::Value* storage = lookupStorage(id.name)) {
         if (global_readonly_.count(id.name) != 0) {
-          error("cannot assign to constd '" + id.name + "'");
+          error(expr.loc, "cannot assign to constd '" + id.name + "'");
           return nullptr;
         }
         return storage;
       }
-      error("unknown variable: " + id.name);
+      error(expr.loc, "unknown variable: " + id.name);
       return nullptr;
     }
     case ast::ExprKind::MemberAccess: {
       const auto& access = static_cast<const ast::MemberAccessExpr&>(expr);
       if (!access.object) {
-        error("member access missing object");
+        error(expr.loc, "member access missing object");
         return nullptr;
       }
       std::string obj_ty = exprTypeOf(*access.object);
@@ -6830,22 +7042,22 @@ llvm::Value* Codegen::emitLValue(const ast::Expr& expr) {
         obj_ty = inferTypeFromExpr(*access.object);
       }
       if (!isClassType(obj_ty)) {
-        error("member access on non-class value");
+        error(expr.loc, "member access on non-class value");
         return nullptr;
       }
       ensureTypeAvailable(obj_ty);
       const ClassInfo* info = findClass(obj_ty);
       if (!info) {
-        error("bad class object in member access");
+        error(expr.loc, "bad class object in member access");
         return nullptr;
       }
       const PropResolve pr = resolveProperty(*info, access.member, PropAccess::Write);
       if (pr.kind == PropResolveKind::Method) {
-        error(access.loc, "property '" + access.member + "' uses setter; not an lvalue");
+        error(expr.loc, "property '" + access.member + "' uses setter; not an lvalue");
         return nullptr;
       }
       if (pr.kind != PropResolveKind::Field) {
-        error(access.loc, "unknown property '" + access.member +
+        error(expr.loc, "unknown property '" + access.member +
                               "' (no set_" + access.member + " / pub " + access.member +
                               "_)");
         return nullptr;
@@ -6860,7 +7072,7 @@ llvm::Value* Codegen::emitLValue(const ast::Expr& expr) {
     case ast::ExprKind::Index:
       return emitIndexLValue(static_cast<const ast::IndexExpr&>(expr));
     default:
-      error("expression is not an assignable lvalue");
+      error(expr.loc, "expression is not an assignable lvalue");
       return nullptr;
   }
 }
@@ -6879,7 +7091,7 @@ std::string Codegen::firstParamTypeName(const ast::ClassDeclStmt& cls,
 
 bool Codegen::emitAssign(const ast::AssignStmt& assign) {
   if (!assign.target || !assign.value) {
-    error("incomplete assignment");
+    error(assign.loc, "incomplete assignment");
     return false;
   }
 
@@ -6899,7 +7111,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
         error(assign.loc, "CPropertys is missing set()");
         return false;
       }
-      llvm::Value* key = makeStringLitObject(access.member, "prop.key");
+      llvm::Value* key = makeStringLitObject(access.member, "prop.key", assign.loc);
       llvm::Value* val = emitValueForParam(
           *assign.value, sit->second->getFunctionType()->getParamType(2), "Variant");
       if (!val) {
@@ -6918,7 +7130,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
     if (pr.kind == PropResolveKind::Method) {
       auto mit = info->methods.find(pr.method_name);
       if (mit == info->methods.end()) {
-        error(access.loc, "missing setter " + pr.method_name);
+        error(assign.loc, "missing setter " + pr.method_name);
         return false;
       }
       std::string expected_name;
@@ -6941,7 +7153,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
     // Field: `this.<physical> = value`.
     auto fit = info->field_index.find(pr.field_name);
     if (fit == info->field_index.end()) {
-      error(access.loc, "missing field " + pr.field_name);
+      error(assign.loc, "missing field " + pr.field_name);
       return false;
     }
     llvm::Value* slot =
@@ -6976,24 +7188,24 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
     if (lit != local_types_.end() && isInterfaceType(lit->second)) {
       auto vit = named_values_.find(id.name);
       if (vit == named_values_.end()) {
-        error("unknown interface variable: " + id.name);
+        error(assign.loc, "unknown interface variable: " + id.name);
         return false;
       }
       if (assign.value->kind() != ast::ExprKind::Identifier) {
-        error("interface assign expects class instance");
+        error(assign.loc, "interface assign expects class instance");
         return false;
       }
       const auto& src = static_cast<const ast::IdentifierExpr&>(*assign.value);
       auto slit = local_types_.find(src.name);
       if (slit == local_types_.end() || !isClassType(slit->second)) {
-        error("interface assign source must be a class local");
+        error(assign.loc, "interface assign source must be a class local");
         return false;
       }
-      llvm::Value* obj = classObjectPtr(src.name);
+      llvm::Value* obj = classObjectPtr(src.name, assign.loc);
       if (!obj) {
         return false;
       }
-      llvm::Value* fat = boxToInterface(obj, slit->second, lit->second);
+      llvm::Value* fat = boxToInterface(obj, slit->second, lit->second, assign.loc);
       if (!fat) {
         return false;
       }
@@ -7014,14 +7226,14 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
         ensureTypeAvailable(obj_ty);
         const ClassInfo* info = findClass(obj_ty);
         if (!info) {
-          error("bad class in property assign");
+          error(assign.loc, "bad class in property assign");
           return false;
         }
         const PropResolve pr = resolveProperty(*info, access.member, PropAccess::Write);
         if (pr.kind == PropResolveKind::Method) {
           auto mit = info->methods.find(pr.method_name);
           if (mit == info->methods.end()) {
-            error("missing setter " + pr.method_name);
+            error(assign.loc, "missing setter " + pr.method_name);
             return false;
           }
           llvm::Value* self = classValuePtr(*access.object, obj_ty);
@@ -7063,7 +7275,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
           }
           return true;
         }
-        error(access.loc, "unknown property '" + access.member + "' (no set_" +
+        error(assign.loc, "unknown property '" + access.member + "' (no set_" +
                               access.member + " / pub " + access.member + "_)");
         return false;
       }
@@ -7109,12 +7321,12 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
     if (elem_ty && elem_ty->isIntegerTy(1)) {
       v = toI1(v);
     } else if (elem_ty && elem_ty->isIntegerTy(32) && !v->getType()->isPointerTy()) {
-      v = toI32(v);
+      v = toI32(v, assign.loc);
     } else if (elem_ty && elem_ty->isStructTy() && v->getType()->isPointerTy()) {
       // Class/struct elements (e.g. Array<String>): ABI value is Class*; store by value.
       v = builder_.CreateLoad(elem_ty, v, "idx.store.copy");
     } else if (elem_ty && elem_ty->isPointerTy() && !v->getType()->isPointerTy()) {
-      error("pointer index store expects a pointer value");
+      error(assign.loc, "pointer index store expects a pointer value");
       return false;
     }
   } else {
@@ -7150,7 +7362,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
       // whole struct into the pointer slot overflows the alloca and corrupts
       // neighbouring locals. Box the value on the heap and keep the pointer.
       llvm::Value* boxed = builder_.CreateCall(
-          requireExtern("l_alloc"),
+          requireExtern("l_alloc", assign.loc),
           {llvm::ConstantInt::get(i64Ty(), module_->getDataLayout().getTypeAllocSize(
                                                v->getType()))},
           "assign.box");
@@ -7169,7 +7381,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
     } else if (dest_ty && dest_ty->isIntegerTy(1)) {
       v = toI1(v);
     } else if (dest_ty && dest_ty->isIntegerTy(32) && v->getType()->isIntegerTy()) {
-      v = toI32(v);
+      v = toI32(v, assign.loc);
     }
   }
   builder_.CreateStore(v, ptr);
@@ -7256,11 +7468,11 @@ llvm::Value* Codegen::emitContextualVariantUnbox(const ast::Expr& expr,
 
   auto emit_panic = [&](llvm::BasicBlock* label) -> bool {
     builder_.SetInsertPoint(label);
-    llvm::Function* panic_fn = requireExtern("l_panic");
+    llvm::Function* panic_fn = requireExtern("l_panic", expr.loc);
     if (!panic_fn) {
       return false;
     }
-    llvm::Function* str_fn = requireExtern("l_str_concat");
+    llvm::Function* str_fn = requireExtern("l_str_concat", expr.loc);
     llvm::Value* msg =
         llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy()));
     if (str_fn) {
@@ -7287,7 +7499,7 @@ llvm::Value* Codegen::emitContextualVariantUnbox(const ast::Expr& expr,
   builder_.SetInsertPoint(ok_bb);
   // Primitives may need widening; String stays a pointer to the String object.
   if (rty && rty->isIntegerTy(32) && !payload->getType()->isPointerTy()) {
-    payload = toI32(payload);
+    payload = toI32(payload, expr.loc);
   }
   return payload;
 }
@@ -7312,7 +7524,7 @@ bool Codegen::emitReturn(const ast::ReturnStmt& ret) {
       } else if (biz_ty->isIntegerTy(1)) {
         res = toI1(rv);
       } else if (biz_ty->isIntegerTy(32) && !rv->getType()->isPointerTy()) {
-        res = toI32(rv);
+        res = toI32(rv, ret.loc);
       } else {
         res = rv;
       }
@@ -7372,7 +7584,7 @@ bool Codegen::emitReturn(const ast::ReturnStmt& ret) {
     } else if (rty->isIntegerTy(1)) {
       v = toI1(v);
     } else if (rty->isIntegerTy(32) && !v->getType()->isPointerTy()) {
-      v = toI32(v);
+      v = toI32(v, ret.loc);
     } else if (rty->isPointerTy() && v->getType()->isPointerTy()) {
       // already ptr
     } else if (rty != v->getType() && rty->isIntegerTy() && v->getType()->isIntegerTy()) {
@@ -7596,7 +7808,7 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
     scrut_val = toI1(scrut_val);
   } else if (!scrut_val->getType()->isPointerTy()) {
     slot_ty = i32Ty();
-    scrut_val = toI32(scrut_val);
+    scrut_val = toI32(scrut_val, stmt.loc);
   }
   llvm::AllocaInst* slot = createEntryAlloca(fn, slot_ty, "match.scrut");
   builder_.CreateStore(scrut_val, slot);
@@ -7607,7 +7819,7 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
   for (size_t i = 0; i < stmt.branches.size(); ++i) {
     const ast::MatchBranch& br = stmt.branches[i];
     if (saw_wildcard) {
-      error(br.loc, "unreachable match arm after '_'");
+      error(stmt.loc, "unreachable match arm after '_'");
       return false;
     }
 
@@ -7625,7 +7837,7 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
     if (br.pattern_kind == ast::MatchPatternKind::ClassDestructure ||
         br.pattern_kind == ast::MatchPatternKind::ArrayDestructure) {
       if (!br.destruct) {
-        error(br.loc, "match arm missing destructuring pattern");
+        error(stmt.loc, "match arm missing destructuring pattern");
         return false;
       }
       scrut_type_name_ = scrut_ty;
@@ -7639,18 +7851,18 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
         std::string abase;
         std::vector<std::string> aargs;
         if (!splitGenericType(scrut_ty, abase, aargs) || abase != "Array") {
-          error(br.loc, "array pattern requires an Array scrutinee, got '" + scrut_ty + "'");
+          error(stmt.loc, "array pattern requires an Array scrutinee, got '" + scrut_ty + "'");
           return false;
         }
         ensureTypeAvailable(scrut_ty);
         const ClassInfo* arr_info = findClass(scrut_ty);
         if (!arr_info) {
-          error(br.loc, "unknown Array type in match: " + scrut_ty);
+          error(stmt.loc, "unknown Array type in match: " + scrut_ty);
           return false;
         }
         auto lit = arr_info->field_index.find(physicalFieldName("length"));
         if (lit == arr_info->field_index.end()) {
-          error(br.loc, "Array layout missing 'length'");
+          error(stmt.loc, "Array layout missing 'length'");
           return false;
         }
         llvm::Value* arr = builder_.CreateLoad(ptrTy(), slot, "match.arr.obj");
@@ -7694,12 +7906,12 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
       }
       const std::string want = resolveTypeName(br.destruct->class_name);
       if (!ensureTypeAvailable(want) || !isClassType(want)) {
-        error(br.loc, "destructuring pattern requires a class type, got '" +
+        error(stmt.loc, "destructuring pattern requires a class type, got '" +
                           br.destruct->class_name + "'");
         return false;
       }
       if (resolveTypeName(scrut_ty) != want) {
-        error(br.loc, "match arm pattern '" + br.destruct->class_name +
+        error(stmt.loc, "match arm pattern '" + br.destruct->class_name +
                           "' cannot match scrutinee of type '" + scrut_ty + "'");
         return false;
       }
@@ -7744,14 +7956,14 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
 
     if (!br.pattern && br.pattern_kind != ast::MatchPatternKind::Some &&
         br.pattern_kind != ast::MatchPatternKind::None) {
-      error(br.loc, "match arm missing pattern");
+      error(stmt.loc, "match arm missing pattern");
       return false;
     }
 
     // `none => { ... }` terminates the chain: no Optional value can reach here.
     if (br.pattern_kind == ast::MatchPatternKind::None) {
       if (scrut_ty.rfind("Optional<", 0) != 0) {
-        error(br.loc, "'none' pattern requires an Optional scrutinee, got '" + scrut_ty + "'");
+        error(stmt.loc, "'none' pattern requires an Optional scrutinee, got '" + scrut_ty + "'");
         return false;
       }
       saw_wildcard = true;
@@ -7765,19 +7977,19 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
     // `some(x) => { ... }` in statement form: test has_value, bind the payload.
     if (br.pattern_kind == ast::MatchPatternKind::Some) {
       if (scrut_ty.rfind("Optional<", 0) != 0) {
-        error(br.loc, "'some(...)' pattern requires an Optional scrutinee, got '" + scrut_ty + "'");
+        error(stmt.loc, "'some(...)' pattern requires an Optional scrutinee, got '" + scrut_ty + "'");
         return false;
       }
       ensureTypeAvailable(scrut_ty);
       const ClassInfo* opt_info = findClass(scrut_ty);
       if (!opt_info || !opt_info->type) {
-        error(br.loc, "unknown Optional type in match: " + scrut_ty);
+        error(stmt.loc, "unknown Optional type in match: " + scrut_ty);
         return false;
       }
       auto hv = opt_info->field_index.find(physicalFieldName("has_value"));
       auto vi = opt_info->field_index.find(physicalFieldName("value"));
       if (hv == opt_info->field_index.end() || vi == opt_info->field_index.end()) {
-        error(br.loc, "Optional layout missing 'has_value'/'value'");
+        error(stmt.loc, "Optional layout missing 'has_value'/'value'");
         return false;
       }
       llvm::BasicBlock* some_bb =
@@ -7849,11 +8061,11 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
     llvm::Value* loaded = builder_.CreateLoad(slot_ty, slot, "match.v");
     llvm::Value* cond = nullptr;
     if (br.pattern->kind() == ast::ExprKind::IntLiteral) {
-      llvm::Value* pat = toI32(emitExpr(*br.pattern));
+      llvm::Value* pat = toI32(emitExpr(*br.pattern), br.loc);
       if (!pat) {
         return false;
       }
-      cond = builder_.CreateICmpEQ(toI32(loaded), pat, "match.eq");
+      cond = builder_.CreateICmpEQ(toI32(loaded, br.loc), pat, "match.eq");
     } else if (br.pattern->kind() == ast::ExprKind::BoolLiteral) {
       llvm::Value* pat = toI1(emitExpr(*br.pattern));
       if (!pat) {
@@ -7861,7 +8073,7 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
       }
       cond = builder_.CreateICmpEQ(toI1(loaded), pat, "match.eq");
     } else if (br.pattern->kind() == ast::ExprKind::StringLiteral) {
-      llvm::Function* str_eq = requireExtern("l_str_eq");
+      llvm::Function* str_eq = requireExtern("l_str_eq", br.loc);
       if (!str_eq) {
         return false;
       }
@@ -7870,12 +8082,12 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
         ensureTypeAvailable("String");
         const ClassInfo* info = findClass("String");
         if (!info) {
-          error(br.loc, "String type not available for match");
+          error(stmt.loc, "String type not available for match");
           return false;
         }
         auto fit = info->field_index.find("data_");
         if (fit == info->field_index.end()) {
-          error(br.loc, "String.data_ not found");
+          error(stmt.loc, "String.data_ not found");
           return false;
         }
         llvm::Value* gep =
@@ -7889,7 +8101,7 @@ bool Codegen::emitMatch(const ast::MatchStmt& stmt) {
       llvm::Value* eq_i32 = builder_.CreateCall(str_eq, {lhs, rhs}, "match.streq");
       cond = builder_.CreateICmpNE(eq_i32, llvm::ConstantInt::get(i32Ty(), 0), "match.eq");
     } else {
-      error(br.loc, "match patterns must be literals or '_'");
+      error(stmt.loc, "match patterns must be literals or '_'");
       return false;
     }
 
@@ -7919,6 +8131,7 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
     error(expr.loc, "match requires at least one arm");
     return nullptr;
   }
+  const ast::SourceLocation scratch_expr_loc = expr.loc;
 
   llvm::Function* fn = builder_.GetInsertBlock()->getParent();
   const std::string scrut_ty = exprTypeOf(*expr.scrutinee);
@@ -7949,7 +8162,7 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
     scrut_val = toI1(scrut_val);
   } else if (!scrut_val->getType()->isPointerTy()) {
     slot_ty = i32Ty();
-    scrut_val = toI32(scrut_val);
+    scrut_val = toI32(scrut_val, expr.loc);
   }
   llvm::AllocaInst* slot = createEntryAlloca(fn, slot_ty, "match.scrut");
   builder_.CreateStore(scrut_val, slot);
@@ -8001,11 +8214,11 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
         return nullptr;
       }
       if (br.pattern_kind == ast::MatchPatternKind::None && !is_opt) {
-        error(br.loc, "'none' pattern requires an Optional scrutinee, got '" + scrut_ty + "'");
+        error(expr.loc, "'none' pattern requires an Optional scrutinee, got '" + scrut_ty + "'");
         return nullptr;
       }
       if (!br.value) {
-        error(br.loc, "match arm must yield an expression");
+        error(expr.loc, "match arm must yield an expression");
         return nullptr;
       }
       llvm::Value* v = emitExpr(*br.value);
@@ -8026,14 +8239,14 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
     llvm::Value* cond = nullptr;
     if (br.pattern_kind == ast::MatchPatternKind::Some) {
       if (!is_opt) {
-        error(br.loc, "'some(...)' pattern requires an Optional scrutinee, got '" + scrut_ty +
+        error(expr.loc, "'some(...)' pattern requires an Optional scrutinee, got '" + scrut_ty +
                           "'");
         return nullptr;
       }
       const ClassInfo* opt_info = findClass(scrut_ty);
       auto hv = opt_info->field_index.find(physicalFieldName("has_value"));
       if (hv == opt_info->field_index.end()) {
-        error(br.loc, "Optional layout missing 'has_value'");
+        error(expr.loc, "Optional layout missing 'has_value'");
         return nullptr;
       }
       llvm::Value* loaded = builder_.CreateLoad(opt_info->type, slot, "match.opt.v");
@@ -8045,11 +8258,11 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
       builder_.SetInsertPoint(then_bb);
       auto vi = opt_info->field_index.find(physicalFieldName("value"));
       if (vi == opt_info->field_index.end()) {
-        error(br.loc, "Optional layout missing 'value'");
+        error(expr.loc, "Optional layout missing 'value'");
         return nullptr;
       }
       if (br.binding.empty()) {
-        error(br.loc, "'some' pattern requires a binding name");
+        error(expr.loc, "'some' pattern requires a binding name");
         return nullptr;
       }
       llvm::Value* payload_gep =
@@ -8097,7 +8310,7 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
 
     if (!br.pattern && br.pattern_kind != ast::MatchPatternKind::ClassDestructure &&
         br.pattern_kind != ast::MatchPatternKind::ArrayDestructure) {
-      error(br.loc, "match arm missing pattern");
+      error(expr.loc, "match arm missing pattern");
       return nullptr;
     }
 
@@ -8105,7 +8318,7 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
     if (br.pattern_kind == ast::MatchPatternKind::ClassDestructure ||
         br.pattern_kind == ast::MatchPatternKind::ArrayDestructure) {
       if (!br.destruct) {
-        error(br.loc, "match arm missing destructuring pattern");
+        error(expr.loc, "match arm missing destructuring pattern");
         return nullptr;
       }
       scrut_type_name_ = scrut_ty;
@@ -8114,18 +8327,18 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
         std::string abase;
         std::vector<std::string> aargs;
         if (!splitGenericType(scrut_ty, abase, aargs) || abase != "Array") {
-          error(br.loc, "array pattern requires an Array scrutinee, got '" + scrut_ty + "'");
+          error(expr.loc, "array pattern requires an Array scrutinee, got '" + scrut_ty + "'");
           return nullptr;
         }
         ensureTypeAvailable(scrut_ty);
         const ClassInfo* arr_info = findClass(scrut_ty);
         if (!arr_info) {
-          error(br.loc, "unknown Array type in match: " + scrut_ty);
+          error(expr.loc, "unknown Array type in match: " + scrut_ty);
           return nullptr;
         }
         auto lit = arr_info->field_index.find(physicalFieldName("length"));
         if (lit == arr_info->field_index.end()) {
-          error(br.loc, "Array layout missing 'length'");
+          error(expr.loc, "Array layout missing 'length'");
           return nullptr;
         }
         llvm::Value* arr = builder_.CreateLoad(ptrTy(), slot, "matchx.arr.obj");
@@ -8160,7 +8373,7 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
           return nullptr;
         }
         if (!br.value) {
-          error(br.loc, "match arm must yield an expression");
+          error(expr.loc, "match arm must yield an expression");
           return nullptr;
         }
         llvm::Value* v = emitExpr(*br.value);
@@ -8176,12 +8389,12 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
       }
       const std::string want = resolveTypeName(br.destruct->class_name);
       if (!ensureTypeAvailable(want) || !isClassType(want)) {
-        error(br.loc, "destructuring pattern requires a class type, got '" +
+        error(expr.loc, "destructuring pattern requires a class type, got '" +
                           br.destruct->class_name + "'");
         return nullptr;
       }
       if (resolveTypeName(scrut_ty) != want) {
-        error(br.loc, "match arm pattern '" + br.destruct->class_name +
+        error(expr.loc, "match arm pattern '" + br.destruct->class_name +
                           "' cannot match scrutinee of type '" + scrut_ty + "'");
         return nullptr;
       }
@@ -8216,7 +8429,7 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
         return nullptr;
       }
       if (!br.value) {
-        error(br.loc, "match arm must yield an expression");
+        error(expr.loc, "match arm must yield an expression");
         return nullptr;
       }
       llvm::Value* v = emitExpr(*br.value);
@@ -8233,11 +8446,11 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
 
     llvm::Value* loaded = builder_.CreateLoad(slot_ty, slot, "match.v");
     if (br.pattern->kind() == ast::ExprKind::IntLiteral) {
-      llvm::Value* pat = toI32(emitExpr(*br.pattern));
+      llvm::Value* pat = toI32(emitExpr(*br.pattern), br.loc);
       if (!pat) {
         return nullptr;
       }
-      cond = builder_.CreateICmpEQ(toI32(loaded), pat, "match.eq");
+      cond = builder_.CreateICmpEQ(toI32(loaded, br.loc), pat, "match.eq");
     } else if (br.pattern->kind() == ast::ExprKind::BoolLiteral) {
       llvm::Value* pat = toI1(emitExpr(*br.pattern));
       if (!pat) {
@@ -8245,7 +8458,7 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
       }
       cond = builder_.CreateICmpEQ(toI1(loaded), pat, "match.eq");
     } else if (br.pattern->kind() == ast::ExprKind::StringLiteral) {
-      llvm::Function* str_eq = requireExtern("l_str_eq");
+      llvm::Function* str_eq = requireExtern("l_str_eq", br.loc);
       if (!str_eq) {
         return nullptr;
       }
@@ -8255,7 +8468,7 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
         const ClassInfo* info = findClass("String");
         auto fit = info->field_index.find("data_");
         if (fit == info->field_index.end()) {
-          error(br.loc, "String.data_ not found");
+          error(expr.loc, "String.data_ not found");
           return nullptr;
         }
         llvm::Value* gep =
@@ -8269,14 +8482,14 @@ llvm::Value* Codegen::emitMatchExpr(const ast::MatchExpr& expr) {
       llvm::Value* eq_i32 = builder_.CreateCall(str_eq, {lhs, rhs}, "match.streq");
       cond = builder_.CreateICmpNE(eq_i32, llvm::ConstantInt::get(i32Ty(), 0), "match.eq");
     } else {
-      error(br.loc, "match patterns must be literals, '_', 'some(...)' or 'none'");
+      error(expr.loc, "match patterns must be literals, '_', 'some(...)' or 'none'");
       return nullptr;
     }
 
     builder_.CreateCondBr(cond, then_bb, else_bb);
     builder_.SetInsertPoint(then_bb);
     if (!br.value) {
-      error(br.loc, "match arm must yield an expression");
+      error(expr.loc, "match arm must yield an expression");
       return nullptr;
     }
     llvm::Value* v = emitExpr(*br.value);
@@ -8341,7 +8554,7 @@ bool Codegen::emitWhile(const ast::WhileStmt& stmt) {
 bool Codegen::emitBreak(const ast::BreakStmt& stmt) {
   (void)stmt;
   if (loop_stack_.empty()) {
-    error("'break' outside a loop");
+    error(stmt.loc, "'break' outside a loop");
     return false;
   }
   flushLoopJumpScopes();
@@ -8352,7 +8565,7 @@ bool Codegen::emitBreak(const ast::BreakStmt& stmt) {
 bool Codegen::emitContinue(const ast::ContinueStmt& stmt) {
   (void)stmt;
   if (loop_stack_.empty()) {
-    error("'continue' outside a loop");
+    error(stmt.loc, "'continue' outside a loop");
     return false;
   }
   flushLoopJumpScopes();
@@ -8401,19 +8614,19 @@ bool Codegen::emitForInRange(const ast::ForInStmt& stmt, const ast::BinaryExpr& 
   //   → i32 i = lo
   //     while i < hi { body; i = i + 1 }
   if (!range.left || !range.right) {
-    error("range for-in missing bounds");
+    error(stmt.loc, "range for-in missing bounds");
     return false;
   }
   if (named_values_.count(stmt.item_name) != 0) {
-    error("for-in loop variable shadows existing name: " + stmt.item_name);
+    error(stmt.loc, "for-in loop variable shadows existing name: " + stmt.item_name);
     return false;
   }
 
   llvm::Function* fn = builder_.GetInsertBlock()->getParent();
   llvm::AllocaInst* item_slot = createEntryAlloca(fn, i32Ty(), stmt.item_name);
   llvm::AllocaInst* end_slot = createEntryAlloca(fn, i32Ty(), stmt.item_name + ".end");
-  llvm::Value* start = toI32(emitExpr(*range.left));
-  llvm::Value* end = toI32(emitExpr(*range.right));
+  llvm::Value* start = toI32(emitExpr(*range.left), range.loc);
+  llvm::Value* end = toI32(emitExpr(*range.right), range.loc);
   if (!start || !end) {
     return false;
   }
@@ -8488,7 +8701,7 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
   //       __for_i = __for_i + 1
   //     }
   if (!stmt.iterable) {
-    error("for-in missing iterable");
+    error(stmt.loc, "for-in missing iterable");
     return false;
   }
   if (stmt.iterable->kind() == ast::ExprKind::Binary) {
@@ -8503,7 +8716,7 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
     const auto& arr_id = static_cast<const ast::IdentifierExpr&>(*stmt.iterable);
     auto lit = local_types_.find(arr_id.name);
     if (lit == local_types_.end()) {
-      error("unknown iterable in for-in: " + arr_id.name);
+      error(stmt.loc, "unknown iterable in for-in: " + arr_id.name);
       return false;
     }
     arr_ty = lit->second;
@@ -8513,27 +8726,27 @@ bool Codegen::emitForIn(const ast::ForInStmt& stmt) {
       arr_ty = inferTypeFromExpr(*stmt.iterable);
     }
     if (arr_ty.empty()) {
-      error("cannot infer type of for-in iterable");
+      error(stmt.loc, "cannot infer type of for-in iterable");
       return false;
     }
   } else {
-    error("for-in iterable must be a local Array, a field, or a lo..hi range");
+    error(stmt.loc, "for-in iterable must be a local Array, a field, or a lo..hi range");
     return false;
   }
   ensureTypeAvailable(arr_ty);
   const ClassInfo* info = findClass(arr_ty);
   if (!info || info->type_args.empty() || info->template_name != "Array") {
-    error("for-in requires Array<T>, got " + arr_ty);
+    error(stmt.loc, "for-in requires Array<T>, got " + arr_ty);
     return false;
   }
   auto len_fit = info->field_index.find("length_");
   auto get_it = info->methods.find("get");
   if (len_fit == info->field_index.end() || get_it == info->methods.end()) {
-    error("Array missing length_ / get for for-in lowering");
+    error(stmt.loc, "Array missing length_ / get for for-in lowering");
     return false;
   }
   if (named_values_.count(stmt.item_name) != 0) {
-    error("for-in loop variable shadows existing name: " + stmt.item_name);
+    error(stmt.loc, "for-in loop variable shadows existing name: " + stmt.item_name);
     return false;
   }
 
@@ -8626,13 +8839,13 @@ llvm::Value* Codegen::emitStringObjectPtr(const ast::Expr& expr) {
   ensureTypeAvailable("String");
   const ClassInfo* info = findClass("String");
   if (!info) {
-    error("String type not available");
+    error(expr.loc, "String type not available");
     return nullptr;
   }
   if (expr.kind() == ast::ExprKind::StringLiteral) {
     auto init_it = info->methods.find("init");
     if (init_it == info->methods.end()) {
-      error("String.init not found");
+      error(expr.loc, "String.init not found");
       return nullptr;
     }
     llvm::Function* cur = builder_.GetInsertBlock()->getParent();
@@ -8661,7 +8874,7 @@ llvm::Value* Codegen::emitStringObjectPtr(const ast::Expr& expr) {
     builder_.CreateStore(v, tmp);
     return tmp;
   }
-  error("expected String object");
+  error(expr.loc, "expected String object");
   return nullptr;
 }
 
@@ -8669,7 +8882,7 @@ llvm::Value* Codegen::emitStringByValue(const ast::Expr& expr) {
   ensureTypeAvailable("String");
   const ClassInfo* info = findClass("String");
   if (!info) {
-    error("String type not available");
+    error(expr.loc, "String type not available");
     return nullptr;
   }
   llvm::Value* ptr = emitStringObjectPtr(expr);
@@ -8683,13 +8896,15 @@ llvm::Value* Codegen::emitIntToStringObject(llvm::Value* i32_val) {
   ensureTypeAvailable("String");
   const ClassInfo* info = findClass("String");
   if (!info) {
-    error("String type not available for i32→String");
+    error(lastTopLevelLoc(), "String type not available for i32→String");
+    // [A007] no AST loc available
     return nullptr;
   }
-  llvm::Function* to_str = requireExtern("l_int_to_str");
+  llvm::Function* to_str = requireExtern("l_int_to_str", lastTopLevelLoc());
   auto init_it = info->methods.find("init");
   if (!to_str || init_it == info->methods.end()) {
-    error("l_int_to_str / String.init required for interpolation");
+    error(lastTopLevelLoc(), "l_int_to_str / String.init required for interpolation");
+    // [A007] no AST loc available
     return nullptr;
   }
   llvm::Value* cstr = builder_.CreateCall(to_str, {i32_val}, "int.str");
@@ -8719,7 +8934,7 @@ llvm::Value* Codegen::emitAsStringObjectPtr(const ast::Expr& expr) {
     ty = "i32";
   }
   if (ty == "i32" || expr.kind() == ast::ExprKind::IntLiteral) {
-    llvm::Value* v = toI32(emitExpr(expr));
+    llvm::Value* v = toI32(emitExpr(expr), expr.loc);
     if (!v) {
       return nullptr;
     }
@@ -8731,16 +8946,16 @@ llvm::Value* Codegen::emitAsStringObjectPtr(const ast::Expr& expr) {
       return nullptr;
     }
     const char* extern_name = ty == "i64" ? "l_i64_to_str" : (ty == "f64" ? "l_f64_to_str" : "l_bool_to_str");
-    llvm::Function* to_str = requireExtern(extern_name);
+    llvm::Function* to_str = requireExtern(extern_name, expr.loc);
     ensureTypeAvailable("String");
     const ClassInfo* info = findClass("String");
     if (!to_str || !info) {
-      error(std::string(extern_name) + " / String required for concatenation");
+      error(expr.loc, std::string(extern_name) + " / String required for concatenation");
       return nullptr;
     }
     auto init_it = info->methods.find("init");
     if (init_it == info->methods.end()) {
-      error("String.init required for concatenation");
+      error(expr.loc, "String.init required for concatenation");
       return nullptr;
     }
     if (ty == "bool") {
@@ -8758,23 +8973,22 @@ llvm::Value* Codegen::emitAsStringObjectPtr(const ast::Expr& expr) {
     builder_.CreateCall(init_it->second, {tmp, cstr});
     return tmp;
   }
-  error("cannot convert expression to String for concatenation");
+  error(expr.loc, "cannot convert expression to String for concatenation");
   return nullptr;
 }
 
 llvm::Value* Codegen::emitStringAdd(const ast::BinaryExpr& bin) {
   // a + b  ⇒  a.concat(b)  for String / string-literal / i32 (auto from) operands.
   // concat(String other) is pass-by-ref → pass String* for both this and other.
-  // Result is heap-allocated so `t := a + b` can auto-free the owned String*.
-  ensureTypeAvailable("String");
+  // Result is heap-allocated so `t := a + b` can auto-free the owned String*.  ensureTypeAvailable("String");
   const ClassInfo* info = findClass("String");
   if (!info) {
-    error("String type not available for operator +");
+    error(bin.loc, "String type not available for operator +");
     return nullptr;
   }
   auto mit = info->methods.find("concat");
   if (mit == info->methods.end()) {
-    error("String.concat not found for operator + lowering");
+    error(bin.loc, "String.concat not found for operator + lowering");
     return nullptr;
   }
   llvm::Value* lhs = emitAsStringObjectPtr(*bin.left);
@@ -8784,7 +8998,7 @@ llvm::Value* Codegen::emitStringAdd(const ast::BinaryExpr& bin) {
   }
   llvm::Value* by_val = builder_.CreateCall(mit->second, {lhs, rhs}, "str.add");
   ensureDataLayout();
-  llvm::Function* alloc = requireExtern("l_alloc");
+  llvm::Function* alloc = requireExtern("l_alloc", bin.loc);
   if (!alloc) {
     return nullptr;
   }
@@ -8801,11 +9015,11 @@ llvm::Value* Codegen::emitArrayEachInline(const std::string& arr_name, const Cla
   auto len_fit = info.field_index.find("length_");
   auto get_it = info.methods.find("get");
   if (len_fit == info.field_index.end() || get_it == info.methods.end()) {
-    error("Array missing length_ / get for each inlining");
+    error(lambda.loc, "Array missing length_ / get for each inlining");
     return nullptr;
   }
   if (info.type_args.empty()) {
-    error("Array.each inline requires a specialized Array<T>");
+    error(lambda.loc, "Array.each inline requires a specialized Array<T>");
     return nullptr;
   }
   const std::string elem_ty = info.type_args[0];
@@ -8819,7 +9033,7 @@ llvm::Value* Codegen::emitArrayEachInline(const std::string& arr_name, const Cla
   }
   llvm::Function* lam_fn = llvm::dyn_cast<llvm::Function>(fn_val);
   if (!lam_fn) {
-    error("each inline: lambda did not lower to a function");
+    error(lambda.loc, "each inline: lambda did not lower to a function");
     return nullptr;
   }
   llvm::Value* ctx = pending_closure_ctx_;
@@ -8838,7 +9052,7 @@ llvm::Value* Codegen::emitArrayEachInline(const std::string& arr_name, const Cla
 
   branchTo(cond_bb);
   builder_.SetInsertPoint(cond_bb);
-  llvm::Value* arr_ptr = classObjectPtr(arr_name);
+  llvm::Value* arr_ptr = classObjectPtr(arr_name, lambda.loc);
   if (!arr_ptr) {
     return nullptr;
   }
@@ -8850,7 +9064,7 @@ llvm::Value* Codegen::emitArrayEachInline(const std::string& arr_name, const Cla
   builder_.CreateCondBr(cmp, body_bb, end_bb);
 
   builder_.SetInsertPoint(body_bb);
-  arr_ptr = classObjectPtr(arr_name);
+  arr_ptr = classObjectPtr(arr_name, lambda.loc);
   idx = builder_.CreateLoad(i32Ty(), idx_slot, "each.i.body");
   llvm::Value* elem = builder_.CreateCall(get_it->second, {arr_ptr, idx}, "each.elem");
 
@@ -8860,8 +9074,7 @@ llvm::Value* Codegen::emitArrayEachInline(const std::string& arr_name, const Cla
   }
   call_args.push_back(elem);
   if (lam_fn->arg_size() != call_args.size()) {
-    error("each inline: lambda arity mismatch");
-    return nullptr;
+    error(lambda.loc, "each inline: lambda arity mismatch");    return nullptr;
   }
   builder_.CreateCall(lam_fn, call_args);
 
@@ -8885,7 +9098,7 @@ llvm::Value* Codegen::emitDelayInline(const ast::Expr& ms_expr, const ast::Lambd
   if (!ms_v) {
     return nullptr;
   }
-  ms_v = toI32(ms_v);
+  ms_v = toI32(ms_v, loc);
   if (!ms_v) {
     return nullptr;
   }
@@ -8933,7 +9146,7 @@ llvm::Value* Codegen::emitArenaBuiltin(const ast::CallExpr& call) {
     error(call.loc, "arena(size) expects one size argument");
     return nullptr;
   }
-  llvm::Function* fn = requireExtern("l_arena_new");
+  llvm::Function* fn = requireExtern("l_arena_new", call.loc);
   if (!fn) {
     return nullptr;
   }
@@ -8951,7 +9164,7 @@ llvm::Value* Codegen::emitArenaMethod(const std::string& arena_name,
                                       const ast::MethodCallExpr& call) {
   auto vit = named_values_.find(arena_name);
   if (vit == named_values_.end()) {
-    error("unknown arena: " + arena_name);
+    error(call.loc, "unknown arena: " + arena_name);
     return nullptr;
   }
   llvm::Value* arena_ptr = builder_.CreateLoad(ptrTy(), vit->second, arena_name + ".ptr");
@@ -8961,7 +9174,7 @@ llvm::Value* Codegen::emitArenaMethod(const std::string& arena_name,
       error(call.loc, "arena.alloc(size) expects one size argument");
       return nullptr;
     }
-    llvm::Function* alloc_fn = requireExtern("l_arena_alloc");
+    llvm::Function* alloc_fn = requireExtern("l_arena_alloc", call.loc);
     if (!alloc_fn) {
       return nullptr;
     }
@@ -8983,10 +9196,10 @@ llvm::Value* Codegen::emitArenaMethod(const std::string& arena_name,
     ensureTypeAvailable("String");
     const ClassInfo* info = findClass("String");
     if (!info) {
-      error("String type not available for arena.new_string");
+      error(call.loc, "String type not available for arena.new_string");
       return nullptr;
     }
-    llvm::Function* alloc_fn = requireExtern("l_arena_alloc");
+    llvm::Function* alloc_fn = requireExtern("l_arena_alloc", call.loc);
     if (!alloc_fn) {
       return nullptr;
     }
@@ -9011,7 +9224,7 @@ llvm::Value* Codegen::emitArenaMethod(const std::string& arena_name,
 
     auto init_it = info->methods.find("init");
     if (init_it == info->methods.end()) {
-      error("String.init not found");
+      error(call.loc, "String.init not found");
       return nullptr;
     }
     for (size_t i = 0; i < info->field_types.size(); ++i) {
@@ -9032,15 +9245,15 @@ llvm::Value* Codegen::emitArenaMethod(const std::string& arena_name,
     }
     const auto& neu = static_cast<const ast::NewExpr&>(*call.args[0].value);
     if (!ensureTypeAvailable(neu.class_name)) {
-      error("unknown class in arena.new: " + neu.class_name);
+      error(neu.loc, "unknown class in arena.new: " + neu.class_name);
       return nullptr;
     }
     const ClassInfo* info = findClass(neu.class_name);
     if (!info) {
-      error("unknown class in arena.new: " + neu.class_name);
+      error(neu.loc, "unknown class in arena.new: " + neu.class_name);
       return nullptr;
     }
-    llvm::Function* alloc_fn = requireExtern("l_arena_alloc");
+    llvm::Function* alloc_fn = requireExtern("l_arena_alloc", call.loc);
     if (!alloc_fn) {
       return nullptr;
     }
@@ -9459,11 +9672,11 @@ llvm::Value* Codegen::emitClassMethodCall(const ast::MethodCallExpr& call,
   } else {
     for (const ast::CallArg& a : call.args) {
       if (!a.name.empty()) {
-        error("keyword arguments require a known method signature");
+        error(call.loc, "keyword arguments require a known method signature");
         return nullptr;
       }
       if (!a.value) {
-        error("null argument in method call");
+        error(call.loc, "null argument in method call");
         return nullptr;
       }
       ordered.push_back(a.value.get());
@@ -9493,7 +9706,7 @@ llvm::Value* Codegen::emitClassMethodCall(const ast::MethodCallExpr& call,
     call_args.push_back(v);
   }
   if (callee_fn->arg_size() != call_args.size()) {
-    error("argument count mismatch calling " + class_name + "." + call.method);
+    error(call.loc, "argument count mismatch calling " + class_name + "." + call.method);
     return nullptr;
   }
   if (callee_fn->getReturnType()->isVoidTy()) {
@@ -9633,7 +9846,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
     return emitSafeMethodCall(call);
   }
   if (!object) {
-    error("method call missing object");
+    error(call.loc, "method call missing object");
     return nullptr;
   }
 
@@ -9717,12 +9930,12 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
       return builder_.CreateCall(fty, fn_ptr, call_args, "chained.call");
     }
     if (!isClassType(recv_ty)) {
-      error("method call object must be a class or interface value");
+      error(call.loc, "method call object must be a class or interface value");
       return nullptr;
     }
     const ClassInfo* info = findClass(recv_ty);
     if (!info) {
-      error("unknown class in method call: " + recv_ty);
+      error(call.loc, "unknown class in method call: " + recv_ty);
       return nullptr;
     }
     llvm::Function* callee_fn = nullptr;
@@ -9802,7 +10015,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
         unsigned ai = 1;
         for (const ast::Expr* arg : ordered) {
           if (ai >= callee_fn->arg_size()) {
-            error("argument count mismatch calling " + recv_ty + "." + call.method);
+            error(call.loc, "argument count mismatch calling " + recv_ty + "." + call.method);
             return nullptr;
           }
           llvm::Type* expected = callee_fn->getFunctionType()->getParamType(ai);
@@ -9827,7 +10040,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
           call_args.push_back(v);
         }
         if (callee_fn->arg_size() != call_args.size()) {
-          error("argument count mismatch calling " + recv_ty + "." + call.method);
+          error(call.loc, "argument count mismatch calling " + recv_ty + "." + call.method);
           return nullptr;
         }
         if (callee_fn->getReturnType()->isVoidTy()) {
@@ -9838,7 +10051,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
       }
     }
     if (!callee_fn) {
-      error("unknown method " + recv_ty + "." + call.method);
+      error(call.loc, "unknown method " + recv_ty + "." + call.method);
       return nullptr;
     }
     std::vector<const ast::Expr*> ordered;
@@ -9890,7 +10103,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
       call_args.push_back(v);
     }
     if (callee_fn->arg_size() != call_args.size()) {
-      error("argument count mismatch calling " + recv_ty + "." + call.method);
+      error(call.loc, "argument count mismatch calling " + recv_ty + "." + call.method);
       return nullptr;
     }
     if (callee_fn->getReturnType()->isVoidTy()) {
@@ -9989,7 +10202,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
       if (static_ast) {
         auto mit = cinfo->methods.find(call.method);
         if (mit == cinfo->methods.end() || !mit->second) {
-          error("missing static method IR: " + id.name + "." + call.method);
+          error(call.loc, "missing static method IR: " + id.name + "." + call.method);
           return nullptr;
         }
         llvm::Function* callee = mit->second;
@@ -9998,7 +10211,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
           return nullptr;
         }
         if (callee->arg_size() != ordered.size()) {
-          error("argument count mismatch calling " + id.name + "." + call.method);
+          error(call.loc, "argument count mismatch calling " + id.name + "." + call.method);
           return nullptr;
         }
         std::vector<llvm::Value*> call_args;
@@ -10026,13 +10239,13 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
     auto fit = concrete_funcs_.find(call.method);
     if (!is_class) {
       if (fit == concrete_funcs_.end() || !fit->second) {
-        error("unknown object in method call: " + id.name);
+        error(call.loc, "unknown object in method call: " + id.name);
         return nullptr;
       }
       // Fall through as a free-function call under package/module syntax.
     } else {
       if (fit == concrete_funcs_.end() || !fit->second) {
-        error("unknown associated function " + id.name + "." + call.method);
+        error(call.loc, "unknown associated function " + id.name + "." + call.method);
         return nullptr;
       }
     }
@@ -10041,12 +10254,12 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
     // from the class (factories vs static helpers).
     const std::string ir_name = resolveFuncIrName(fn_ast->name);
     if (ir_name.empty()) {
-      error("unknown associated function " + id.name + "." + call.method);
+      error(call.loc, "unknown associated function " + id.name + "." + call.method);
       return nullptr;
     }
     llvm::Function* callee = module_->getFunction(ir_name);
     if (!callee) {
-      error("missing associated function IR: " + ir_name);
+      error(call.loc, "missing associated function IR: " + ir_name);
       return nullptr;
     }
     std::vector<const ast::Expr*> ordered;
@@ -10054,7 +10267,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
       return nullptr;
     }
     if (callee->arg_size() != ordered.size()) {
-      error("argument count mismatch calling " + id.name + "." + call.method);
+      error(call.loc, "argument count mismatch calling " + id.name + "." + call.method);
       return nullptr;
     }
     std::vector<llvm::Value*> call_args;
@@ -10087,7 +10300,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
   if (isClassType(lit->second)) {
     const ClassInfo* info = findClass(lit->second);
     if (!info) {
-      error("unknown class in method call: " + lit->second);
+      error(call.loc, "unknown class in method call: " + lit->second);
       return nullptr;
     }
 
@@ -10143,7 +10356,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
         return nullptr;
       }
       if (hits.size() == 1) {
-        llvm::Value* outer = classObjectPtr(id.name);
+        llvm::Value* outer = classObjectPtr(id.name, id.loc);
         if (!outer) {
           return nullptr;
         }
@@ -10155,7 +10368,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
       }
     }
     if (!callee_fn) {
-      error("unknown method " + lit->second + "." + call.method);
+      error(call.loc, "unknown method " + lit->second + "." + call.method);
       return nullptr;
     }
     // Prefer signature reorder when the method AST is available.
@@ -10176,11 +10389,11 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
     } else {
       for (const ast::CallArg& a : call.args) {
         if (!a.name.empty()) {
-          error("keyword arguments require a known method signature");
+          error(call.loc, "keyword arguments require a known method signature");
           return nullptr;
         }
         if (!a.value) {
-          error("null argument in method call");
+          error(call.loc, "null argument in method call");
           return nullptr;
         }
         ordered.push_back(a.value.get());
@@ -10192,7 +10405,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
     unsigned ai = 0;
     if (!is_static) {
       if (!this_ptr) {
-        this_ptr = classObjectPtr(id.name);
+        this_ptr = classObjectPtr(id.name, id.loc);
       }
       if (!this_ptr) {
         return nullptr;
@@ -10216,7 +10429,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
       call_args.push_back(v);
     }
     if (callee_fn->arg_size() != call_args.size()) {
-      error("argument count mismatch calling " + lit->second + "." + call.method);
+      error(call.loc, "argument count mismatch calling " + lit->second + "." + call.method);
       return nullptr;
     }
     if (callee_fn->getReturnType()->isVoidTy()) {
@@ -10226,28 +10439,12 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
     return builder_.CreateCall(callee_fn, call_args, is_static ? "static.call" : "mcall");
   }
 
-  std::vector<llvm::Value*> args;
-  for (const ast::CallArg& arg : call.args) {
-    if (!arg.value) {
-      return nullptr;
-    }
-    if (!arg.name.empty()) {
-      error("keyword arguments not supported on interface dispatch yet");
-      return nullptr;
-    }
-    llvm::Value* v = toI32(emitExpr(*arg.value));
-    if (!v) {
-      return nullptr;
-    }
-    args.push_back(v);
-  }
-
   // Interface: fat-pointer vtable dispatch.
   if (isInterfaceType(lit->second)) {
     const InterfaceInfo* iface = findInterface(lit->second);
     auto mit = iface->method_index.find(call.method);
     if (mit == iface->method_index.end()) {
-      error("unknown interface method " + lit->second + "." + call.method);
+      error(call.loc, "unknown interface method " + lit->second + "." + call.method);
       return nullptr;
     }
     const unsigned slot = mit->second;
@@ -10275,7 +10472,27 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
 
     std::vector<llvm::Value*> call_args;
     call_args.push_back(data);
-    call_args.insert(call_args.end(), args.begin(), args.end());
+    for (size_t i = 0; i < call.args.size(); ++i) {
+      if (!call.args[i].value) {
+        return nullptr;
+      }
+      if (!call.args[i].name.empty()) {
+        error(call.loc, "keyword arguments not supported on interface dispatch yet");
+        return nullptr;
+      }
+      // Lower each argument against the interface signature. `toI32` here would
+      // corrupt every non-integer formal (interface = fat pointer, f64, ...).
+      llvm::Type* expected = i + 1 < param_tys.size() ? param_tys[i + 1] : nullptr;
+      std::string expected_name;
+      if (i < sig->params.size()) {
+        expected_name = resolveTypeName(sig->params[i].type_name);
+      }
+      llvm::Value* v = emitValueForParam(*call.args[i].value, expected, expected_name);
+      if (!v) {
+        return nullptr;
+      }
+      call_args.push_back(v);
+    }
 
     if (ret_ty->isVoidTy()) {
       builder_.CreateCall(fty, fn_ptr, call_args);
@@ -10284,7 +10501,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
     return builder_.CreateCall(fty, fn_ptr, call_args, "iface.call");
   }
 
-  error("method call on non-object type");
+  error(call.loc, "method call on non-object type");
   return nullptr;
 }
 
@@ -10674,7 +10891,7 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
     if (expr.escapes) {
       // [link:75-Escape-Analysis-Auto-Heap-Promotion]: escaping closure — heap-allocate
       // ctx and copy capture values into it.
-      llvm::Function* alloc_fn = requireExtern("l_alloc");
+      llvm::Function* alloc_fn = requireExtern("l_alloc", expr.loc);
       if (!alloc_fn) {
         return nullptr;
       }
@@ -10721,7 +10938,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       try {
         n = std::stoll(lit.value);
       } catch (...) {
-        error("invalid integer literal: " + lit.value);
+        error(expr.loc, "invalid integer literal: " + lit.value);
         return nullptr;
       }
       // Preserve full width when the literal does not fit in signed i32 (e.g. i64 max).
@@ -10736,7 +10953,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       try {
         d = std::stod(lit.value);
       } catch (...) {
-        error("invalid float literal: " + lit.value);
+        error(expr.loc, "invalid float literal: " + lit.value);
         return nullptr;
       }
       return llvm::ConstantFP::get(f64Ty(), d);
@@ -10764,12 +10981,12 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       if (id.name == "__FILE__") {
         const std::string& file =
             id.loc.filename.empty() ? std::string("<unknown>") : id.loc.filename;
-        return makeStringLitObject(file, "ctx.file");
+        return makeStringLitObject(file, "ctx.file", id.loc);
       }
       if (id.name == "__FUNC__") {
         const std::string& fn =
             current_fn_name_.empty() ? std::string("<unknown>") : current_fn_name_;
-        return makeStringLitObject(fn, "ctx.func");
+        return makeStringLitObject(fn, "ctx.func", id.loc);
       }
       if (id.name == "__LINE__") {
         return llvm::ConstantInt::get(i32Ty(), static_cast<uint64_t>(id.loc.line));
@@ -10799,7 +11016,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       }
 
       if (id.name == "this" && current_method_is_static_) {
-        error("cannot use 'this' inside a static method");
+        error(expr.loc, "cannot use 'this' inside a static method");
         return nullptr;
       }
       // Method body: field load via this (logical → physical).
@@ -10815,7 +11032,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         llvm::Type* ty = localSlotType(alloca);
         auto lit = local_types_.find(id.name);
         if (lit != local_types_.end() && isClassType(lit->second)) {
-          return classObjectPtr(id.name);
+          return classObjectPtr(id.name, id.loc);
         }
         if (ty->isStructTy()) {
           if (lit != local_types_.end() && isInterfaceType(lit->second)) {
@@ -10840,7 +11057,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         return builder_.CreateLoad(gv->getValueType(), gv, id.name);
       }
 
-      error("unknown variable: " + id.name);
+      error(expr.loc, "unknown variable: " + id.name);
       return nullptr;
     }
     case ast::ExprKind::Heap:
@@ -10856,7 +11073,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         return emitSafeMemberAccess(access);
       }
       if (!access.object) {
-        error("member access missing object");
+        error(expr.loc, "member access missing object");
         return nullptr;
       }
       std::string obj_ty = exprTypeOf(*access.object);
@@ -10867,14 +11084,14 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         ensureTypeAvailable(obj_ty);
         const ClassInfo* info = findClass(obj_ty);
         if (!info) {
-          error("unknown class in member access: " + obj_ty);
+          error(expr.loc, "unknown class in member access: " + obj_ty);
           return nullptr;
         }
         const PropResolve pr = resolveProperty(*info, access.member, PropAccess::Read);
         if (pr.kind == PropResolveKind::Method) {
           auto mit = info->methods.find(pr.method_name);
           if (mit == info->methods.end()) {
-            error("missing getter " + pr.method_name);
+            error(expr.loc, "missing getter " + pr.method_name);
             return nullptr;
           }
           llvm::Value* self = classValuePtr(*access.object, obj_ty);
@@ -10888,7 +11105,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
           return builder_.CreateCall(mit->second, {self}, "prop.get");
         }
         if (pr.kind != PropResolveKind::Field) {
-          error(access.loc, "unknown property '" + access.member + "' (no get_" +
+          error(expr.loc, "unknown property '" + access.member + "' (no get_" +
                                 access.member + " / pub " + access.member + "_)");
           return nullptr;
         }
@@ -10956,7 +11173,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         }
       }
       if (!elem_ty) {
-        error("cannot load index expression: unknown element type");
+        error(expr.loc, "cannot load index expression: unknown element type");
         return nullptr;
       }
       return builder_.CreateLoad(elem_ty, ptr, "idx.load");
@@ -10973,12 +11190,12 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
     case ast::ExprKind::New: {
       const auto& neu = static_cast<const ast::NewExpr&>(expr);
       if (!ensureTypeAvailable(neu.class_name)) {
-        error("unknown class in NewExpr: " + neu.class_name);
+        error(expr.loc, "unknown class in NewExpr: " + neu.class_name);
         return nullptr;
       }
       const ClassInfo* info = findClass(neu.class_name);
       if (!info) {
-        error("unknown class in NewExpr: " + neu.class_name);
+        error(expr.loc, "unknown class in NewExpr: " + neu.class_name);
         return nullptr;
       }
       llvm::Function* fn = builder_.GetInsertBlock()->getParent();
@@ -10994,13 +11211,13 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       // registered as a local so method dispatch can take its address.
       const auto& co = static_cast<const ast::CoalesceExpr&>(expr);
       if (!co.left || !co.right) {
-        error("?? requires both operands");
+        error(expr.loc, "?? requires both operands");
         return nullptr;
       }
 
       const std::string left_ty = exprTypeOf(*co.left);
       if (left_ty.rfind("Optional<", 0) != 0) {
-        error("left operand of '??' must be Optional<T>, got '" + left_ty + "'");
+        error(expr.loc, "left operand of '??' must be Optional<T>, got '" + left_ty + "'");
         return nullptr;
       }
       if (!ensureTypeAvailable(left_ty)) {
@@ -11008,7 +11225,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       }
       const ClassInfo* opt_info = findClass(left_ty);
       if (!opt_info || !opt_info->type) {
-        error("unknown Optional type in '??': " + left_ty);
+        error(expr.loc, "unknown Optional type in '??': " + left_ty);
         return nullptr;
       }
 
@@ -11021,7 +11238,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         opt = builder_.CreateLoad(opt_info->type, opt, "coal.opt");
       }
       if (opt->getType() != opt_info->type) {
-        error("'??' left operand has unexpected representation in " + left_ty);
+        error(expr.loc, "'??' left operand has unexpected representation in " + left_ty);
         return nullptr;
       }
       // Materialize the Optional once; the temp name identifies the alloca.
@@ -11160,7 +11377,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         llvm::raw_string_ostream no(none_desc);
         some_val->getType()->print(so);
         none_val->getType()->print(no);
-        error("'??' arms have mismatched types: some=" + so.str() + " none=" + no.str());
+        error(expr.loc, "'??' arms have mismatched types: some=" + so.str() + " none=" + no.str());
         named_values_.erase(tmp_name);
         local_types_.erase(tmp_name);
         return nullptr;
@@ -11242,12 +11459,12 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         }
         std::string promoted = promoteNumericTypes(left_ty, right_ty);
         if (promoted.empty()) {
-          error(bin.loc, "incompatible types for '" + bin.op + "': '" + lt + "' and '" + rt +
+          error(expr.loc, "incompatible types for '" + bin.op + "': '" + lt + "' and '" + rt +
                              "'");
           return nullptr;
         }
-        lhs = emitNumericCast(lhs, left_ty, promoted);
-        rhs = emitNumericCast(rhs, right_ty, promoted);
+        lhs = emitNumericCast(lhs, left_ty, promoted, bin.loc);
+        rhs = emitNumericCast(rhs, right_ty, promoted, bin.loc);
         if (!lhs || !rhs) {
           return nullptr;
         }
@@ -11276,7 +11493,7 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         if (!a || !b) {
           return nullptr;
         }
-        llvm::Function* str_eq = requireExtern("l_str_eq");
+        llvm::Function* str_eq = requireExtern("l_str_eq", bin.loc);
         if (!str_eq) {
           return nullptr;
         }
@@ -11387,8 +11604,8 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
       // Comparisons: promote numeric operands to a common type.
       if (isNumericType(lt) && isNumericType(rt)) {
         const std::string promoted = promoteNumericTypes(lt, rt);
-        lhs = emitNumericCast(lhs, lt, promoted);
-        rhs = emitNumericCast(rhs, rt, promoted);
+        lhs = emitNumericCast(lhs, lt, promoted, bin.loc);
+        rhs = emitNumericCast(rhs, rt, promoted, bin.loc);
         if (!lhs || !rhs) {
           return nullptr;
         }
@@ -11408,8 +11625,8 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
           if (bin.op == ">=") return builder_.CreateICmpSGE(lhs, rhs, "getmp");
         }
       } else {
-        lhs = toI32(lhs);
-        rhs = toI32(rhs);
+        lhs = toI32(lhs, bin.loc);
+        rhs = toI32(rhs, bin.loc);
         if (bin.op == "==") return builder_.CreateICmpEQ(lhs, rhs, "eqtmp");
         if (bin.op == "!=") return builder_.CreateICmpNE(lhs, rhs, "netmp");
         if (bin.op == "<") return builder_.CreateICmpSLT(lhs, rhs, "lttmp");
@@ -11418,29 +11635,30 @@ llvm::Value* Codegen::emitExpr(const ast::Expr& expr) {
         if (bin.op == ">=") return builder_.CreateICmpSGE(lhs, rhs, "getmp");
       }
 
-      error("unsupported binary operator: " + bin.op);
+      error(expr.loc, "unsupported binary operator: " + bin.op);
       return nullptr;
     }
     case ast::ExprKind::Call:
       return emitGenericOrPlainCall(static_cast<const ast::CallExpr&>(expr));
   }
-  error("unsupported expression in codegen");
+  // [A007] no AST loc available — `emitExpr` only sees the erased `ast::Expr` base.
+  error(expr.loc, "unsupported expression in codegen");
   return nullptr;
 }
 
 llvm::Value* Codegen::emitHeapExpr(const ast::HeapExpr& expr) {
   if (!expr.inner || expr.inner->kind() != ast::ExprKind::New) {
-    error("heap requires ClassName(...) construction");
+    error(expr.loc, "heap requires ClassName(...) construction");
     return nullptr;
   }
   const auto& neu = static_cast<const ast::NewExpr&>(*expr.inner);
   const ClassInfo* info = findClass(neu.class_name);
   if (!info) {
-    error("unknown class in heap expression: " + neu.class_name);
+    error(expr.loc, "unknown class in heap expression: " + neu.class_name);
     return nullptr;
   }
   ensureDataLayout();
-  llvm::Function* alloc = requireExtern("l_alloc");
+  llvm::Function* alloc = requireExtern("l_alloc", neu.loc);
   if (!alloc) {
     return nullptr;
   }
@@ -11461,16 +11679,16 @@ bool Codegen::resolveCallArgs(const ast::FuncDeclStmt& fn, const std::vector<ast
   size_t next_pos = 0;
   for (const ast::CallArg& a : raw) {
     if (!a.value) {
-      error("null argument calling " + fn.name);
+      error(fn.loc, "null argument calling " + fn.name);
       return false;
     }
     if (a.name.empty()) {
       if (next_pos >= fn.params.size()) {
-        error("too many arguments calling " + fn.name);
+        error(fn.loc, "too many arguments calling " + fn.name);
         return false;
       }
       if (ordered[next_pos] != nullptr) {
-        error("duplicate argument for parameter '" + fn.params[next_pos].name + "'");
+        error(fn.loc, "duplicate argument for parameter '" + fn.params[next_pos].name + "'");
         return false;
       }
       ordered[next_pos] = a.value.get();
@@ -11485,18 +11703,18 @@ bool Codegen::resolveCallArgs(const ast::FuncDeclStmt& fn, const std::vector<ast
       }
     }
     if (idx == static_cast<size_t>(-1)) {
-      error("unknown keyword argument '" + a.name + "' for " + fn.name);
+      error(fn.loc, "unknown keyword argument '" + a.name + "' for " + fn.name);
       return false;
     }
     if (ordered[idx] != nullptr) {
-      error("duplicate argument for parameter '" + a.name + "'");
+      error(fn.loc, "duplicate argument for parameter '" + a.name + "'");
       return false;
     }
     ordered[idx] = a.value.get();
   }
   for (size_t i = 0; i < ordered.size(); ++i) {
     if (ordered[i] == nullptr) {
-      error("missing argument '" + fn.params[i].name + "' calling " + fn.name);
+      error(fn.loc, "missing argument '" + fn.params[i].name + "' calling " + fn.name);
       return false;
     }
   }
@@ -11589,7 +11807,7 @@ llvm::Value* Codegen::emitImplicitVariantBox(const ast::Expr& expr, llvm::Type* 
   }
   llvm::Type* want = fn->getFunctionType()->getParamType(0);
   if (want->isIntegerTy(32) && !arg->getType()->isPointerTy()) {
-    arg = toI32(arg);
+    arg = toI32(arg, expr.loc);
   }
   if (arg->getType() != want) {
     return nullptr;  // Representation mismatch: fall back to the explicit path.
@@ -11705,7 +11923,7 @@ llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expec
     ensureTypeAvailable(expected_type_name);
     const ClassInfo* info = findClass(expected_type_name);
     if (!info || v->getType() != info->type) {
-      error("class argument type mismatch for " + expected_type_name);
+      error(expr.loc, "class argument type mismatch for " + expected_type_name);
       return nullptr;
     }
     llvm::Function* cur = builder_.GetInsertBlock()->getParent();
@@ -11720,11 +11938,11 @@ llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expec
       const auto& id = static_cast<const ast::IdentifierExpr&>(expr);
       auto lit = local_types_.find(id.name);
       if (lit != local_types_.end() && isClassType(lit->second)) {
-        llvm::Value* obj = classObjectPtr(id.name);
+        llvm::Value* obj = classObjectPtr(id.name, expr.loc);
         if (!obj) {
           return nullptr;
         }
-        return boxToInterface(obj, lit->second, expected_type_name);
+        return boxToInterface(obj, lit->second, expected_type_name, expr.loc);
       }
       if (lit != local_types_.end() && isInterfaceType(lit->second)) {
         return emitExpr(expr);  // already a fat pointer value
@@ -11737,7 +11955,7 @@ llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expec
       if (!obj) {
         return nullptr;
       }
-      return boxToInterface(obj, neu.class_name, expected_type_name);
+      return boxToInterface(obj, neu.class_name, expected_type_name, neu.loc);
     }
     llvm::Value* v = emitExpr(expr);
     if (!v) {
@@ -11768,7 +11986,7 @@ llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expec
   } else if (expected->isIntegerTy(64) && v->getType()->isIntegerTy()) {
     v = builder_.CreateIntCast(v, i64Ty(), /*isSigned=*/true, "arg.i64");
   } else if (expected->isIntegerTy(32) && !v->getType()->isPointerTy()) {
-    v = toI32(v);
+    v = toI32(v, expr.loc);
   }
   return v;
 }
@@ -11776,16 +11994,16 @@ llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expec
 llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
   auto requirePositional = [&](size_t n, const char* name) -> bool {
     if (call.args.size() != n) {
-      error(std::string(name) + " expects exactly " + std::to_string(n) + " argument(s)");
+      error(call.loc, std::string(name) + " expects exactly " + std::to_string(n) + " argument(s)");
       return false;
     }
     for (const ast::CallArg& a : call.args) {
       if (!a.name.empty()) {
-        error(std::string(name) + " does not accept keyword arguments");
+        error(call.loc, std::string(name) + " does not accept keyword arguments");
         return false;
       }
       if (!a.value) {
-        error("null argument to " + std::string(name));
+        error(call.loc, "null argument to " + std::string(name));
         return false;
       }
     }
@@ -11836,7 +12054,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
       llvm::Function* cfn = cit->second.fn;
       llvm::FunctionType* fty = cfn->getFunctionType();
       if (fty->getNumParams() != call.args.size() + 1) {
-        error("argument count mismatch calling closure '" + call.callee + "'");
+        error(call.loc, "argument count mismatch calling closure '" + call.callee + "'");
         return nullptr;
       }
       auto lit = local_types_.find(call.callee);
@@ -11850,11 +12068,11 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
       args.push_back(cit->second.ctx);
       for (size_t i = 0; i < call.args.size(); ++i) {
         if (!call.args[i].value) {
-          error("null argument to closure '" + call.callee + "'");
+          error(call.loc, "null argument to closure '" + call.callee + "'");
           return nullptr;
         }
         if (!call.args[i].name.empty()) {
-          error("keyword arguments not supported on closures");
+          error(call.loc, "keyword arguments not supported on closures");
           return nullptr;
         }
         llvm::Type* expected = fty->getParamType(static_cast<unsigned>(i + 1));
@@ -11878,18 +12096,18 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     auto lit = local_types_.find(call.callee);
     auto vit = named_values_.find(call.callee);
     if (lit == local_types_.end() || vit == named_values_.end()) {
-      error("fat closure '" + call.callee + "' missing local state");
+      error(call.loc, "fat closure '" + call.callee + "' missing local state");
       return nullptr;
     }
     std::vector<std::string> param_tys;
     std::string ret;
     bool has_ret = false;
     if (!parseFunTypeName(resolveTypeName(lit->second), param_tys, ret, has_ret)) {
-      error("invalid fat-closure payload type for '" + call.callee + "'");
+      error(call.loc, "invalid fat-closure payload type for '" + call.callee + "'");
       return nullptr;
     }
     if (param_tys.size() != call.args.size()) {
-      error("argument count mismatch calling fat closure '" + call.callee + "'");
+      error(call.loc, "argument count mismatch calling fat closure '" + call.callee + "'");
       return nullptr;
     }
     llvm::Type* rty = (!has_ret || ret == "void") ? voidTy() : llvmTypeForTypeName(ret);
@@ -11907,11 +12125,11 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     args.push_back(ctx);
     for (size_t i = 0; i < call.args.size(); ++i) {
       if (!call.args[i].value) {
-        error("null argument to fat closure '" + call.callee + "'");
+        error(call.loc, "null argument to fat closure '" + call.callee + "'");
         return nullptr;
       }
       if (!call.args[i].name.empty()) {
-        error("keyword arguments not supported on fat closures");
+        error(call.loc, "keyword arguments not supported on fat closures");
         return nullptr;
       }
       llvm::Type* expected = fty->getParamType(static_cast<unsigned>(i + 1));
@@ -11934,12 +12152,12 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     auto ty_it = capture_types_.find(call.callee);
     if (cap != capture_slots_.end() && current_lambda_ctx_ && current_lambda_ctx_ty_ &&
         ty_it != capture_types_.end() && isFunTypeName(ty_it->second)) {
-      llvm::FunctionType* fty = llvmFunctionTypeForFunName(ty_it->second);
+      llvm::FunctionType* fty = llvmFunctionTypeForFunName(ty_it->second, call.loc);
       if (!fty) {
         return nullptr;
       }
       if (fty->getNumParams() != call.args.size()) {
-        error("argument count mismatch calling captured function '" + call.callee + "'");
+        error(call.loc, "argument count mismatch calling captured function '" + call.callee + "'");
         return nullptr;
       }
       llvm::Value* slot = builder_.CreateStructGEP(current_lambda_ctx_ty_, current_lambda_ctx_,
@@ -11959,11 +12177,11 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
       std::vector<llvm::Value*> args;
       for (size_t i = 0; i < call.args.size(); ++i) {
         if (!call.args[i].value) {
-          error("null argument to captured function '" + call.callee + "'");
+          error(call.loc, "null argument to captured function '" + call.callee + "'");
           return nullptr;
         }
         if (!call.args[i].name.empty()) {
-          error("keyword arguments not supported on captured functions");
+          error(call.loc, "keyword arguments not supported on captured functions");
           return nullptr;
         }
         llvm::Type* expected = fty->getParamType(static_cast<unsigned>(i));
@@ -11987,12 +12205,12 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     auto lit = local_types_.find(call.callee);
     auto vit = named_values_.find(call.callee);
     if (lit != local_types_.end() && vit != named_values_.end() && isFunTypeName(lit->second)) {
-      llvm::FunctionType* fty = llvmFunctionTypeForFunName(lit->second);
+      llvm::FunctionType* fty = llvmFunctionTypeForFunName(lit->second, call.loc);
       if (!fty) {
         return nullptr;
       }
       if (fty->getNumParams() != call.args.size()) {
-        error("argument count mismatch calling function value '" + call.callee + "'");
+        error(call.loc, "argument count mismatch calling function value '" + call.callee + "'");
         return nullptr;
       }
       llvm::Value* fn_ptr = builder_.CreateLoad(ptrTy(), vit->second, call.callee);
@@ -12003,11 +12221,11 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
       std::vector<llvm::Value*> args;
       for (size_t i = 0; i < call.args.size(); ++i) {
         if (!call.args[i].value) {
-          error("null argument to function value '" + call.callee + "'");
+          error(call.loc, "null argument to function value '" + call.callee + "'");
           return nullptr;
         }
         if (!call.args[i].name.empty()) {
-          error("keyword arguments not supported on function values");
+          error(call.loc, "keyword arguments not supported on function values");
           return nullptr;
         }
         llvm::Type* expected = fty->getParamType(static_cast<unsigned>(i));
@@ -12049,11 +12267,11 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
         } else {
           for (const ast::CallArg& a : call.args) {
             if (!a.name.empty()) {
-              error("keyword arguments require a known method signature");
+              error(call.loc, "keyword arguments require a known method signature");
               return nullptr;
             }
             if (!a.value) {
-              error("null argument in sibling method call");
+              error(call.loc, "null argument in sibling method call");
               return nullptr;
             }
             ordered.push_back(a.value.get());
@@ -12076,7 +12294,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
           call_args.push_back(v);
         }
         if (mit->second->arg_size() != call_args.size()) {
-          error("argument count mismatch calling " + current_class_ + "." + call.callee);
+          error(call.loc, "argument count mismatch calling " + current_class_ + "." + call.callee);
           return nullptr;
         }
         if (mit->second->getReturnType()->isVoidTy()) {
@@ -12099,7 +12317,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     }
     const ast::Expr& arg_expr = *call.args[0].value;
     if (isStringOperand(arg_expr)) {
-      llvm::Function* print_str = requireExtern("l_print_str");
+      llvm::Function* print_str = requireExtern("l_print_str", call.loc);
       if (!print_str) {
         return nullptr;
       }
@@ -12117,12 +12335,12 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
         ensureTypeAvailable("String");
         const ClassInfo* info = findClass("String");
         if (!info) {
-          error("String type not available for print");
+          error(call.loc, "String type not available for print");
           return nullptr;
         }
         auto fit = info->field_index.find("data_");
         if (fit == info->field_index.end()) {
-          error("String.data_ not found");
+          error(call.loc, "String.data_ not found");
           return nullptr;
         }
         llvm::Value* gep =
@@ -12154,7 +12372,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     }
     // Dispatch by L type / LLVM type → matching l_print_* C ABI helper.
     if (arg_ty == "bool" || arg->getType()->isIntegerTy(1)) {
-      llvm::Function* print_b = requireExtern("l_print_bool");
+      llvm::Function* print_b = requireExtern("l_print_bool", call.loc);
       if (!print_b) {
         return nullptr;
       }
@@ -12163,12 +12381,12 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
       return llvm::ConstantInt::get(i32Ty(), 0);
     }
     if (arg_ty == "f64" || arg->getType()->isDoubleTy()) {
-      llvm::Function* print_f = requireExtern("l_print_f64");
+      llvm::Function* print_f = requireExtern("l_print_f64", call.loc);
       if (!print_f) {
         return nullptr;
       }
       if (!arg->getType()->isDoubleTy()) {
-        arg = emitNumericCast(arg, arg_ty.empty() ? "i32" : arg_ty, "f64");
+        arg = emitNumericCast(arg, arg_ty.empty() ? "i32" : arg_ty, "f64", call.loc);
         if (!arg) {
           return nullptr;
         }
@@ -12177,12 +12395,12 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
       return llvm::ConstantInt::get(i32Ty(), 0);
     }
     if (arg_ty == "i64" || arg->getType()->isIntegerTy(64)) {
-      llvm::Function* print_i64 = requireExtern("l_print_i64");
+      llvm::Function* print_i64 = requireExtern("l_print_i64", call.loc);
       if (!print_i64) {
         return nullptr;
       }
       if (!arg->getType()->isIntegerTy(64)) {
-        arg = emitNumericCast(arg, arg_ty.empty() ? "i32" : arg_ty, "i64");
+        arg = emitNumericCast(arg, arg_ty.empty() ? "i32" : arg_ty, "i64", call.loc);
         if (!arg) {
           return nullptr;
         }
@@ -12190,11 +12408,11 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
       builder_.CreateCall(print_i64, {arg});
       return llvm::ConstantInt::get(i32Ty(), 0);
     }
-    llvm::Function* print_int = requireExtern("l_print_int");
+    llvm::Function* print_int = requireExtern("l_print_int", call.loc);
     if (!print_int) {
       return nullptr;
     }
-    arg = toI32(arg);
+    arg = toI32(arg, call.loc);
     if (!arg) {
       return nullptr;
     }
@@ -12239,7 +12457,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
         llvm::Value* obj = nullptr;
         if (arg->kind() == ast::ExprKind::Identifier) {
           const auto& id = static_cast<const ast::IdentifierExpr&>(*arg);
-          obj = classObjectPtr(id.name);
+          obj = classObjectPtr(id.name, id.loc);
         } else {
           // Temporaries like `Good()` — NewExpr yields a Class* alloca.
           obj = emitExpr(*arg);
@@ -12253,7 +12471,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
         if (!v) {
           return nullptr;
         }
-        call_args.push_back(toI32(v));
+        call_args.push_back(toI32(v, arg->loc));
       }
     }
 
@@ -12280,12 +12498,12 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
 
   const std::string ir_name = resolveFuncIrName(call.callee);
   if (ir_name.empty()) {
-    error("unknown function: " + call.callee);
+    error(call.loc, "unknown function: " + call.callee);
     return nullptr;
   }
   llvm::Function* callee = module_->getFunction(ir_name);
   if (!callee) {
-    error("unknown function: " + call.callee);
+    error(call.loc, "unknown function: " + call.callee);
     return nullptr;
   }
 
@@ -12296,16 +12514,16 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     }
   } else {
     if (callee->arg_size() != call.args.size()) {
-      error("argument count mismatch calling " + call.callee);
+      error(call.loc, "argument count mismatch calling " + call.callee);
       return nullptr;
     }
     for (const ast::CallArg& a : call.args) {
       if (!a.name.empty()) {
-        error("keyword arguments require a known function signature for " + call.callee);
+        error(call.loc, "keyword arguments require a known function signature for " + call.callee);
         return nullptr;
       }
       if (!a.value) {
-        error("null argument calling " + call.callee);
+        error(call.loc, "null argument calling " + call.callee);
         return nullptr;
       }
       ordered.push_back(a.value.get());
@@ -12313,7 +12531,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
   }
 
   if (callee->arg_size() != ordered.size()) {
-    error("argument count mismatch calling " + call.callee);
+    error(call.loc, "argument count mismatch calling " + call.callee);
     return nullptr;
   }
   std::vector<llvm::Value*> args;
@@ -12406,7 +12624,8 @@ llvm::Value* Codegen::loadFieldOnThis(const std::string& field_name) {
     return nullptr;
   }
   if (current_method_is_static_ || !current_this_) {
-    error("cannot access instance field '" + field_name + "' from a static method");
+    error(lastTopLevelLoc(), "cannot access instance field '" + field_name + "' from a static method");
+    // [A007] no AST loc available
     return nullptr;
   }
   llvm::Type* fty = info->type->getElementType(static_cast<unsigned>(fit->second));
@@ -12471,9 +12690,10 @@ bool Codegen::emitMethodArgs(const ast::MethodCallExpr& call,
 // Emits the call and returns its value (0 for void), or nullptr on error.
 llvm::Value* Codegen::finishMethodCall(llvm::Function* target,
                                        std::vector<llvm::Value*>& args,
-                                       const std::string& what) {
+                                       const std::string& what,
+                                       const ast::SourceLocation& loc) {
   if (target->arg_size() != args.size()) {
-    error("argument count mismatch calling " + what);
+    error(loc, "argument count mismatch calling " + what);
     return nullptr;
   }
   if (target->getReturnType()->isVoidTy()) {
@@ -12528,7 +12748,7 @@ llvm::Value* Codegen::emitMethodCallOnField(const ast::MethodCallExpr& call,
   if (!emitMethodArgs(call, method_ast, *callee_info, target, consumed, call_args)) {
     return nullptr;
   }
-  return finishMethodCall(target, call_args, field_ty + "." + call.method);
+  return finishMethodCall(target, call_args, field_ty + "." + call.method, call.loc);
 }
 
 // `a::b::fn(...)` — resolves the callee declaration from `scope`'s exports and
@@ -12626,7 +12846,7 @@ llvm::Value* Codegen::emitScopedCall(const ast::ScopedCallExpr& call) {
   if (!class_name.empty() && isClassType(class_name)) {
     const ClassInfo* info = findClass(class_name);
     if (!info) {
-      error("unknown class: " + class_name);
+      error(call.loc, "unknown class: " + class_name);
       return nullptr;
     }
     ast::NewExpr neu;
