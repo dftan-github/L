@@ -1,4 +1,4 @@
-# L · Loong (龙语言)
+﻿# L · Loong (龙语言)
 
 **A modern, ultra-minimal, high-performance system programming language built on LLVM.**
 
@@ -19,7 +19,7 @@
 | 2 | [Implicit Delegation (`delegate`)](#2-implicit-delegation--delegate) | [`examples/plugin_framework.l`](examples/plugin_framework.l) · [`tests/cases/delegate_test.l`](tests/cases/delegate_test.l) |
 | 3 | [Implicit Trailing Underscore](#3-implicit-trailing-underscore) | [`tests/cases/field_syntax_test.l`](tests/cases/field_syntax_test.l) |
 | 4 | [Code-as-Config (`CPropertys` / Typed Config)](#4-code-as-config--cpropertys--typed-config) | [`examples/typed_config.l`](examples/typed_config.l) · [`tests/cases/typed_cfg.l`](tests/cases/typed_cfg.l) |
-| 5 | [Metaprogramming (`LCMD` / `comptime`)](#5-metaprogramming--lcmd-and-comptime) | [`tests/cases/lcmd_path.l`](tests/cases/lcmd_path.l) · [`tests/cases/lcmd_l_callback.l`](tests/cases/lcmd_l_callback.l) |
+| 5 | [Metaprogramming (`LCMD` / `comptime`)](#5-metaprogramming--lcmd-and-comptime) | [`examples/metaprogramming.l`](examples/metaprogramming.l) · [`tests/cases/lcmd_path.l`](tests/cases/lcmd_path.l) · [`tests/cases/lcmd_l_callback.l`](tests/cases/lcmd_l_callback.l) |
 | 6 | [Enterprise-Grade Engineering](#6-enterprise-grade-engineering) | [`tests/run_tests.rb`](tests/run_tests.rb) · [`compiler/`](compiler) |
 | 7 | [Performance vs `clang++ -O3`](#7-performance--measured-against-clang-o3) | [`benchmarks/`](benchmarks) · [`benchmarks/run_bench.rb`](benchmarks/run_bench.rb) |
 
@@ -182,10 +182,12 @@ entirely in L ([`stdlib/json.l`](stdlib/json.l)).
 No second macro language. Directives are L functions returning L source, injected into
 the AST at the exact node they annotate.
 
+A directive written **directly in a class body** injects class members, and the handler
+receives the bare class name as its path:
+
 ```l
-// The handler receives the hierarchical path, the command name and its args.
 pub fun __compile_time_handler(String path, String cmd, String args) -> String {
-    if path == "User.generate" && cmd == "make_hello" {
+    if path == "User" && cmd == "make_hello" {
         return "pub fun say_hello() -> i32 { return 42; }"
     }
     return ""
@@ -193,9 +195,7 @@ pub fun __compile_time_handler(String path, String cmd, String args) -> String {
 
 class User {
     i32 id
-    fun generate() {
-        //LCMD_make_hello()       // injects say_hello() into User
-    }
+    //LCMD_make_hello()       // injects say_hello() into User
 }
 
 fun main() -> i32 {
@@ -205,12 +205,47 @@ fun main() -> i32 {
 }
 ```
 
+The same directive inside a **method** injects statements into that method body, and its
+path carries the method name (`User.generate`). Only a class-body directive yields new
+members — a `fun` injected into a method body would be a nested function, which L does
+not have.
+
+```l
+class User {
+    fun generate() {
+        //LCMD_make_hello()     // path is "User.generate"
+    }
+}
+```
+
 `comptime { ... }` runs in the frontend and is stripped before codegen — zero runtime
 cost (`compile_error` / `comptime_assert` veto the build outright). `uid_counter()`
 hands a monotonic `i64` to generated code so injected symbols never collide.
 
-**Real source:** [`tests/cases/lcmd_path.l`](tests/cases/lcmd_path.l) ·
+**Real source:** [`tests/cases/lcmd_in_class.l`](tests/cases/lcmd_in_class.l) ·
+[`tests/cases/lcmd_path.l`](tests/cases/lcmd_path.l) ·
 [`tests/cases/lcmd_l_callback.l`](tests/cases/lcmd_l_callback.l)
+
+### Every compile-time facility, in one table
+
+[`examples/metaprogramming.l`](examples/metaprogramming.l) is a single runnable file that
+exercises the whole surface — **PART A** (LCMD directives, A1–A7) and **PART B**
+(`comptime`, B1–B6) — asserted end-to-end by `test_metaprogramming_example_e2e!`.
+
+| Facility | Form | Guarantee |
+| --- | --- | --- |
+| Directive | `//LCMD_<cmd>(<args>)` | Calls `__compile_time_handler`; returned source is parsed and injected at that node |
+| Handler (3-arg) | `__compile_time_handler(path, cmd, args)` | `path` is the hierarchical context (`User`, `User.method`, `""`) |
+| Handler (5-arg) | `__compile_time_handler(path, cmd, args, line, column)` | Adds exact source position of the directive |
+| Class-body injection | directive inside `class { ... }` | Injects fields, methods, `delegate`; path is the bare class name |
+| Statement injection | directive inside a function/block | Injects executable statements; path is `Class.method` |
+| Class hook | `//LCMD_enable_class_hook()` + `__on_class_parsed(className)` | Opt-in only; injects at module level; other classes stay on the fast path |
+| Compile-time block | `comptime { ... }` | Runs in frontend, stripped before codegen — zero runtime cost |
+| Build veto | `compile_error(msg)` / `comptime_assert(cond, msg)` | Stops the build with `[ERROR] file:line:col - Compile-time error: ...` |
+| Unique ids | `uid_counter()` | Monotonic `i64`, inlined as a constant; rejected outside comptime |
+| Context constants | `__FILE__` / `__FUNC__` / `__LINE__` | Folded to literals at codegen; also resolvable inside comptime |
+| Source position | `source_line()` / `source_column()` | Current directive/comptime position |
+
 
 ---
 
@@ -323,4 +358,31 @@ fun main() -> i32 {
 }
 ```
 
-A wider tour lives in [`examples/all_samples.l`](examples/all_samples.l).
+A wider tour lives in [`examples/all_samples.l`](examples/all_samples.l) — every
+sample in the repo, concatenated, with a generated table of contents using
+`row:N` links. It is regenerated by `ruby tools/gen_all_samples.rb`; edit the
+individual sample files, never `all_samples.l` itself. Deliberately-invalid
+negative samples are grouped at the end behind a `NEGATIVE SAMPLES` banner.
+
+## Consistency check (`tools/doctor.rb`)
+
+After changing anything, run the doctor to find out what else went stale:
+
+```sh
+ruby tools/doctor.rb            # report only — never writes
+ruby tools/doctor.rb --write    # also repair the regenerable items
+ruby tools/doctor.rb --list     # list checks and their write tier
+```
+
+Checks are split into three tiers, so a repair can never silently rewrite code:
+
+| Tier | Meaning | Items |
+|---|---|---|
+| `CHECK` | read-only; a mismatch is reported, never fixed | rule anchors, trailing-underscore identifiers, cross-file `row:N` links |
+| `GEN` | pure regeneration, idempotent | `examples/all_samples.l`, `examples/metaprogramming.l` index block |
+| `DOC` | numbers only, prose untouched | line counts quoted in `docs/*.md` and `README.md` |
+
+`GEN` items are safe to auto-write because they are comment-only regeneration.
+`doctor` never writes `.l` sources, `compiler/`, `runtime/`, `stdlib/`, or
+`.cursor/rules/*.mdc` — under any flag. `CHECK` items that would change program
+semantics stay manual on purpose.

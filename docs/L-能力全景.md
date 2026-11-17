@@ -1,4 +1,4 @@
-# L 能力全景
+﻿# L 能力全景
 
 **面向：想判断"该不该用 L 写我的项目"的评估者**
 **复核日期：2026-11-17 · 对应测试：169 条全通过**
@@ -47,7 +47,7 @@ L 现在的定位是：**借用 C 生态、语法接近脚本语言的静态编�
 | `?.` 与 `??` | ✅ | 安全链式访问 + 空值合并，左操作数只求值一次 | Rule 101 |
 | `Result<T,E>` + `?` 运算符 | ✅ | 无异常，错误显式传播 | Rule 53 / 54 |
 | `comptime` 编译期执行 | ✅ | 语法树注入，零运行时开销 | Rule 12 / 21 |
-| `LCMD` 编译期指令 | ✅ | `//LCMD_xxx` 触发展开 | Rule 18 / 19 |
+| `LCMD` 编译期指令 | ✅ | `//LCMD_xxx` 触发展开；写在类体内直接注入成员 | Rule 18 / 19 |
 | 模板字符串 | ✅ | `"Hello {name}"` 自动 `l_int_to_str` | Rule 47 |
 | 区间循环 `for i in a..b` | ✅ | 半开区间，退化为 `while` | Rule 44 |
 | 原生 Windows / Linux | ✅ | 同一份源码，平台差异在 runtime 内 | `runtime/` |
@@ -237,7 +237,7 @@ l build -O3 -o myapp.exe main.l
 | [`mini_parser.l`](../examples/mini_parser.l) | 109 | 递归下降解析器 |
 | [`plugin_framework.l`](../examples/plugin_framework.l) | 368 | `comptime` + `LCMD` 编译期代码生成 |
 | [`fibonacci.l`](../examples/fibonacci.l) | 28 | 最小可运行程序 |
-| [`all_samples.l`](../examples/all_samples.l) | 2747 | 全部语法特性合集（参考手册性质） |
+| [`all_samples.l`](../examples/all_samples.l) | 7249 | 全部语法特性合集（参考手册性质，由 `tools/gen_all_samples.rb` 生成，带 `row:N` 目录） |
 
 ---
 

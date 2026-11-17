@@ -776,7 +776,22 @@ do_something()
 - **LCMD / comptime Restriction (CRITICAL)**: Inside `__compile_time_handler` / `__on_class_parsed` / `comptime` blocks, operands MUST be plain literals or variables. The upfront tree-walking interpreter (`compiler/comptime/interpreter.cpp`) supports ONLY IntLiteral / BoolLiteral / StringLiteral / Identifier / Call / Binary. It does NOT implement `NewExpr`, so `String("x") == cmd` fails with `unsupported comptime expression`. Write `"x" == cmd`.
 - **Where It Applies**: stdlib / tests / benchmarks / examples — all `.l` files in the repo, no exceptions.
 
+## 112. In-Place Class-Body LCMD
+<!-- id:lcmd-in-place -->
+- **Syntax**: `//LCMD_xxx()` MAY be written directly inside a `class { ... }`
+  body. No `generate()` wrapper method is required.
+- **Path**: A directive in the class body receives the BARE class name
+  (`"User"`); a directive inside a method body receives `"User.method"`.
+- **Injection Scope (CRITICAL)**: A class-body directive's returned source is
+  parsed as CLASS MEMBERS (fields, methods, `delegate`). A method-body
+  directive's returned source is parsed as STATEMENTS in that method —
+  never as class members.
+- **Storage**: Class-body directives live in `ClassDeclStmt::directives` and
+  are expanded before the method walk, so injected methods are still visited.
+- **Ordering**: Injected members are visible to all later members; injected
+  methods are appended after the declared ones.
 
+  
 ## 999. AI Collaboration Discipline (CRITICAL)
 <!-- id:ai-discipline -->
 - **NO Auto-Rule Generation**: Do NOT automatically append or modify rules in `.mdc` after passing tests. 

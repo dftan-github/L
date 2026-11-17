@@ -16,3 +16,6 @@ tests/cases/pkg_test/l.lock
 
 # Instruction handoff between the analysis chat and the executor
 .agent-instructions/
+
+# App build outputs (apps/*/ is source; the binaries are rebuilt by build_env.bat)
+apps/*/*.exe
