@@ -9,6 +9,7 @@ add_library(l_runtime STATIC
   regex.c
   tls.c
   task.c
+  win32.c
 )
 
 target_include_directories(l_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -23,9 +24,9 @@ if(NOT MSVC AND L_RUNTIME_LTO)
   set_target_properties(l_runtime PROPERTIES INTERPROCEDURAL_OPTIMIZATION ON)
 endif()
 
-# pthreads on Unix; Winsock + Schannel on Windows.
+# pthreads on Unix; Winsock + Schannel + Win32 GUI (user32/gdi32/imm32) on Windows.
 if(WIN32)
-  target_link_libraries(l_runtime PUBLIC ws2_32 secur32)
+  target_link_libraries(l_runtime PUBLIC ws2_32 secur32 user32 gdi32 imm32)
 else()
   find_package(Threads REQUIRED)
   target_link_libraries(l_runtime PUBLIC Threads::Threads)

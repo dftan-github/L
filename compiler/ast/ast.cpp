@@ -542,6 +542,9 @@ void ClassDeclStmt::dump(std::ostream& out, int indent) const {
   for (const auto& method : methods) {
     if (method) method->dump(out, indent + 1);
   }
+  for (const auto& dir : directives) {
+    if (dir) dir->dump(out, indent + 1);
+  }
 }
 
 void InterfaceDeclStmt::dump(std::ostream& out, int indent) const {

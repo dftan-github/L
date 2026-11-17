@@ -244,8 +244,8 @@ bool linkWithRuntime(const std::string& object_path, const std::string& out_path
     for (const std::string& lib : extra_libs) {
       bat << " \"" << lib << "\"";
     }
-    // Winsock for l_socket_* (runtime/net.c); clang maps -lws2_32 → ws2_32.lib.
-    bat << " -lws2_32";
+    // Winsock for l_socket_* (runtime/net.c); user32/gdi32/imm32 for windows.
+    bat << " -lws2_32 -luser32 -lgdi32 -limm32";
     bat << " -o \"" << out_path << "\"\r\n";
     bat << "exit /b %ERRORLEVEL%\r\n";
   }

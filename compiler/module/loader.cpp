@@ -233,6 +233,10 @@ struct Loader {
   ImportSearchPaths search_paths;
   std::unordered_set<std::string> loading;
   std::unordered_set<std::string> loaded;
+  // Modules parsed early by `preloadImportTypes` so their type names are known
+  // while the importing file is parsed. The AST is parked here and merged in
+  // when the post-parse import walk reaches the same module.
+  std::unordered_map<std::string, ast::Module> preloaded;
   // Root of the entry file: namespaced module names are relative to it.
   fs::path root;
   // Stdlib generic type names are known up-front: an entry file may `import` a
@@ -321,6 +325,87 @@ struct Loader {
     return {};
   }
 
+  // Moves every statement of `src` into `dst`, keeping declaration order.
+  static void mergeModule(ast::Module&& src, ast::Module& dst) {
+    for (ast::StmtPtr& stmt : src.stmts) {
+      dst.stmts.push_back(std::move(stmt));
+    }
+    for (auto& hook : src.init_hooks) {
+      dst.init_hooks.push_back(std::move(hook));
+    }
+    for (auto& hook : src.deinit_hooks) {
+      dst.deinit_hooks.push_back(std::move(hook));
+    }
+    for (const std::string& m : src.imported_modules) {
+      dst.imported_modules.push_back(m);
+    }
+    for (const ast::UseAlias& u : src.usages) {
+      dst.usages.push_back(u);
+    }
+  }
+
+  // Registers the class / interface names exported by every module imported by
+  // `tokens`, so the parser accepts `-> Node`, `Node n` and `x as Node` for
+  // types that live in another file. Runs before the source is parsed; the
+  // post-parse import walk below stays authoritative for the AST itself.
+  bool preloadImportTypes(const std::vector<ast::Token>& tokens, const fs::path& import_base) {
+    for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
+      if (tokens[i].type != ast::TokenType::KwImport) {
+        continue;
+      }
+      std::string imp_path;
+      std::vector<std::string> segments;
+      const ast::Token& head = tokens[i + 1];
+      if (head.type == ast::TokenType::StringLiteral) {
+        imp_path = head.lexeme;
+      } else if (head.type == ast::TokenType::Identifier) {
+        segments.push_back(head.lexeme);
+        std::size_t j = i + 2;
+        while (j + 1 < tokens.size() && tokens[j].type == ast::TokenType::ColonColon &&
+               tokens[j + 1].type == ast::TokenType::Identifier) {
+          segments.push_back(tokens[j + 1].lexeme);
+          j += 2;
+        }
+        for (std::size_t k = 0; k < segments.size(); ++k) {
+          if (k != 0) {
+            imp_path += "/";
+          }
+          imp_path += segments[k];
+        }
+        imp_path += ".l";
+      } else {
+        continue;
+      }
+
+      fs::path child = resolveImportPath(imp_path, import_base);
+      if (child.empty() && !segments.empty()) {
+        child = resolveImportPath(flatSegments(segments), import_base);
+      }
+      if (child.empty()) {
+        // Leave the diagnostic to the post-parse walk so error ordering is
+        // unchanged and an import used only inside dead code still reports.
+        continue;
+      }
+
+      // A module that is already resolved has its types in `known_classes`
+      // already; skipping avoids a second cycle diagnostic.
+      const std::string child_key = canonicalOrSelf(child).string();
+      if (loaded.count(child_key) != 0) {
+        continue;
+      }
+
+      ast::Module scratch;
+      const fs::path canonical_child = canonicalOrSelf(child);
+      if (!loadFile(canonical_child, scratch)) {
+        return false;
+      }
+      // Park the AST: the importing file still has to be parsed, and the
+      // post-parse import walk must be able to move these statements in.
+      preloaded[canonical_child.string()] = std::move(scratch);
+    }
+    return true;
+  }
+
   bool loadBuffer(const std::string& source, const std::string& display_name,
                   const fs::path& import_base, ast::Module& out) {
     const std::string key = display_name;
@@ -334,12 +419,30 @@ struct Loader {
       return false;
     }
     if (loaded.count(key) != 0) {
+      // Parsed early by `preloadImportTypes`: hand the parked AST over now, so
+      // the module's statements still reach the program exactly once.
+      auto parked = preloaded.find(key);
+      if (parked != preloaded.end()) {
+        mergeModule(std::move(parked->second), out);
+        preloaded.erase(parked);
+      }
       return true;
     }
 
     loading.insert(key);
     l::lexer::Lexer lexer(display_name, source);
     std::vector<ast::Token> tokens = lexer.tokenize();
+
+    // Types from `import`ed modules must be visible WHILE this file is parsed:
+    // `fun f() -> Node` is only accepted when `Node` is a known class name
+    // (`Parser::isTypeStart`). Imports used to be walked after `parseModule()`,
+    // so the parser saw no outside types and rejected every cross-module class
+    // return / parameter type. Resolve imports first, then parse.
+    if (!preloadImportTypes(tokens, import_base)) {
+      loading.erase(key);
+      return false;
+    }
+
     l::parser::Parser parser(std::move(tokens), diags);
     knowTypeNames(parser);
 
@@ -545,6 +648,13 @@ struct Loader {
       return false;
     }
     if (loaded.count(key) != 0) {
+      // Parsed early by `preloadImportTypes`: hand the parked AST over now, so
+      // the module's statements still reach the program exactly once.
+      auto parked = preloaded.find(key);
+      if (parked != preloaded.end()) {
+        mergeModule(std::move(parked->second), out);
+        preloaded.erase(parked);
+      }
       return true;
     }
 

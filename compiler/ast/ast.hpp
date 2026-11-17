@@ -496,6 +496,10 @@ struct ClassDeclStmt : Stmt {
   bool is_pub = false;
   bool is_partial = false;  // `partial class` — merged in semantic before codegen
   std::string module_name;
+  // [lcmd-in-place] `//LCMD_cmd()` written directly in the class body. Expanded
+  // by the frontend with `enclosing_class = this`, so injected decls become
+  // members of THIS class. Empty in every non-LCMD program.
+  std::vector<std::unique_ptr<Stmt>> directives;
   StmtKind kind() const override { return StmtKind::ClassDecl; }
   void dump(std::ostream& out, int indent = 0) const override;
 };

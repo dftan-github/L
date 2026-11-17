@@ -31,6 +31,14 @@ void Parser::registerInterfaceName(const std::string& name) {
   interface_names_.insert(name);
 }
 
+std::vector<std::string> Parser::knownClassNames() const {
+  return {class_names_.begin(), class_names_.end()};
+}
+
+std::vector<std::string> Parser::knownInterfaceNames() const {
+  return {interface_names_.begin(), interface_names_.end()};
+}
+
 void Parser::addAstHook(AstHook hook) {
   ast_hooks_.push_back(std::move(hook));
 }
@@ -109,7 +117,8 @@ void Parser::maybeRunClassHook(ast::ClassDeclStmt& cls) {
     return;
   }
   std::vector<ast::StmtPtr> pieces =
-      comptime::parseSnippet(result.s, cls.loc, *diags_);
+      comptime::parseSnippet(result.s, cls.loc, *diags_, knownClassNames(),
+                             knownInterfaceNames());
   for (ast::StmtPtr& p : pieces) {
     pending_injections_.push_back(std::move(p));
   }
@@ -2144,7 +2153,31 @@ ast::StmtPtr Parser::parseClassDecl() {
 
   consume(ast::TokenType::LBrace, "expected '{' after class header");
 
-  while (!atEnd() && !check(ast::TokenType::RBrace)) {
+  parseClassMembersInto(*cls, /*until_rbrace=*/true);
+
+  consume(ast::TokenType::RBrace, "expected '}' after class body");
+  generic_type_names_ = saved_generics;
+  popContext();
+
+  // Only when explicitly enabled: run __on_class_parsed and queue AST injection.
+  maybeRunClassHook(*cls);
+  return cls;
+}
+
+// Parses class members into `cls` until '}' (or EOF when `until_rbrace` is
+// false). Shared by real class bodies and by LCMD-injected class fragments, so
+// both accept exactly the same member syntax.
+void Parser::parseClassMembersInto(ast::ClassDeclStmt& cls, bool until_rbrace) {
+  while (!atEnd()) {
+    if (until_rbrace && check(ast::TokenType::RBrace)) {
+      return;
+    }
+    // [lcmd-in-place] `//LCMD_cmd()` in the class body: keep it for the frontend
+    // expander, which injects the returned source as members of THIS class.
+    if (check(ast::TokenType::LcmdDirective)) {
+      cls.directives.push_back(parseDirective());
+      continue;
+    }
     // Method forms (do not steal `pub Type field`):
     //   fun | pub fun | static fun | pub static fun | static pub fun
     const bool starts_method =
@@ -2182,7 +2215,7 @@ ast::StmtPtr Parser::parseClassDecl() {
       method->is_method = true;
       method->is_pub = method_pub;
       method->is_static = method_static;
-      cls->methods.push_back(std::move(method));
+      cls.methods.push_back(std::move(method));
       continue;
     }
     // [delegate]: `delegate Engine` — anonymous field named after the type.
@@ -2200,10 +2233,10 @@ ast::StmtPtr Parser::parseClassDecl() {
       field->type_name = parseTypeName();
       field->name = field->type_name;
       consume(ast::TokenType::Semicolon, "expected ';' after delegate declaration");
-      cls->fields.push_back(std::move(field));
+      cls.fields.push_back(std::move(field));
       continue;
     }
-    // `pub i32 level_` / `i32 score_`
+    // `pub i32 score_` / `i32 level_`
     bool field_pub = false;
     if (check(ast::TokenType::KwPub)) {
       // Lookahead: pub + type starts a field (not handled above as pub fun).
@@ -2213,26 +2246,33 @@ ast::StmtPtr Parser::parseClassDecl() {
     if (!isTypeStart()) {
       errorAt(peek(), "expected field or method in class body");
       synchronize();
-      continue;
+      return;  // panic mode on injected fragments: stop at the first bad member
     }
     auto field = std::make_unique<ast::FieldDeclStmt>();
     field->loc = peek().loc;
     field->is_pub = field_pub;
     field->type_name = parseTypeName();
-    ast::Token field_name =
-        consume(ast::TokenType::Identifier, "expected field name");
+    ast::Token field_name = consume(ast::TokenType::Identifier, "expected field name");
     field->name = field_name.lexeme;
     consume(ast::TokenType::Semicolon, "expected ';' after field declaration");
-    cls->fields.push_back(std::move(field));
+    cls.fields.push_back(std::move(field));
   }
+}
 
-  consume(ast::TokenType::RBrace, "expected '}' after class body");
-  generic_type_names_ = saved_generics;
-  popContext();
-
-  // Only when explicitly enabled: run __on_class_parsed and queue AST injection.
-  maybeRunClassHook(*cls);
-  return cls;
+// Class-body view of an injected fragment: fields and methods only, EOF ends it.
+// Returned as field/method statements in declaration order.
+std::vector<ast::StmtPtr> Parser::parseClassMembers() {
+  ast::ClassDeclStmt holder;
+  holder.name = "<lcmd-injected>";
+  parseClassMembersInto(holder, /*until_rbrace=*/false);
+  std::vector<ast::StmtPtr> out;
+  for (auto& f : holder.fields) {
+    out.push_back(std::move(f));
+  }
+  for (auto& m : holder.methods) {
+    out.push_back(std::move(m));
+  }
+  return out;
 }
 
 const ast::Token& Parser::peek(std::size_t offset) const {
@@ -2328,6 +2368,9 @@ void Parser::synchronize() {
       case ast::TokenType::KwDefer:
       case ast::TokenType::KwSync:
       case ast::TokenType::KwSpawn:
+      // A directive is self-delimiting: resume here instead of swallowing it and
+      // everything up to the enclosing '}'.
+      case ast::TokenType::LcmdDirective:
         return;
       default:
         break;

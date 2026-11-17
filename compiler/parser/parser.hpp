@@ -22,10 +22,17 @@ public:
 
   std::unique_ptr<ast::Module> parseModule();
   ast::StmtPtr parseStatement();
+  // Class-body member list parsed until EOF: fields + methods, in order.
+  // Used to parse LCMD-injected fragments in a class context ([lcmd-in-place]).
+  std::vector<ast::StmtPtr> parseClassMembers();
   ast::ExprPtr parseExpression(int min_precedence = 0);
 
   void registerClassName(const std::string& name);
   void registerInterfaceName(const std::string& name);
+  // Type names known to this parse — handed to snippet parsing so injected
+  // fragments resolve user types the same way as the surrounding source.
+  std::vector<std::string> knownClassNames() const;
+  std::vector<std::string> knownInterfaceNames() const;
   void addAstHook(AstHook hook);
 
   // Opt-in ClassDecl hooks ([hook-performance]). Default false = zero interpreter cost.
@@ -115,6 +122,9 @@ private:
   ast::MatchPatternPtr parseClassPatternBody(ast::MatchPatternPtr out);
   ast::MatchPatternPtr parseArrayPattern();
   ast::StmtPtr parseClassDecl();
+  // Shared member-list parser for class bodies and injected class fragments
+  // ([lcmd-in-place]). `until_rbrace=false` means "members until EOF".
+  void parseClassMembersInto(ast::ClassDeclStmt& cls, bool until_rbrace);
   ast::StmtPtr parseInterfaceDecl();
   ast::StmtPtr parseDeferStmt();
   ast::StmtPtr parseSyncBlock();
