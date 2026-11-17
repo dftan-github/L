@@ -1,3 +1,4 @@
+// [anchor:135-line-preserved] magic file/line/func names fold to literals, no runtime call.
 fun test_context() {
     print("File: " + __FILE__)
     print("Line: " + __LINE__)

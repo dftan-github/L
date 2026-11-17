@@ -1,3 +1,4 @@
+// [anchor:134-uid-monotonic] uid_counter() is monotonic and collision-free across directives.
 pub fun __compile_time_handler(String path, String cmd, String args) -> String {
     if "gen_var" == cmd {
         id := uid_counter()

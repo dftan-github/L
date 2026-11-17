@@ -1,4 +1,4 @@
-// [lcmd-in-place] `//LCMD_xxx()` written directly in a class body.
+// [anchor:133-lcmd-in-class] `//LCMD_xxx()` written directly in a class body.
 //
 // The path seen by the handler is the bare class name, and whatever the handler
 // returns is parsed as CLASS MEMBERS (methods, fields, delegates) — no

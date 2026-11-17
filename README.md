@@ -364,6 +364,46 @@ sample in the repo, concatenated, with a generated table of contents using
 individual sample files, never `all_samples.l` itself. Deliberately-invalid
 negative samples are grouped at the end behind a `NEGATIVE SAMPLES` banner.
 
+### Anchors instead of line numbers
+
+Hand-written cross-references use **numeric content anchors**, not line numbers:
+
+```l
+// [anchor:121-uid-counter] uid_counter() hands out a compile-time-unique id, ...
+// call it, then see [link:121-uid-counter] for the definition
+```
+
+* **Definition** — `[anchor:<id>-<label>]`, exactly one per id, repo-wide.
+* **Reference** — `[link:<id>-<label>]`, any number of them.
+* **Only the number resolves.** The label after the dash is human text: rewrite
+  it, shorten it, translate it — links still resolve. Renumbering is the one edit
+  that breaks things, which is why ids are append-only: `.anchors.json` holds a
+  single counter, `next_anchor_id`, so a new anchor always takes a number never
+  used before and a retired id is never reissued. The counter is the only thing
+  that file tracks — what exists is defined by the `[anchor:...]` markers in the
+  code itself.
+
+Rule sections carry the same marker in HTML-comment form, since a `.mdc` file
+has no `//`:
+
+```
+## 97. Implicit Delegation (Struct Embedding)
+<!-- anchor:97-Implicit-Delegation -->
+```
+
+The number there is allocated in document order, so `## 999` may well own anchor
+`113`; the two never need to agree, and neither shifts when a section is
+inserted. Gaps in the numbering mean a section was retired, not that a link is
+broken.
+
+An anchor travels with the code it describes, so inserting or deleting lines
+anywhere else never invalidates a link. Markers are ordinary comments: the lexer
+discards them before parsing, so they cannot affect behaviour. When marker plus
+description would exceed 120 columns, the marker goes on its own line and the
+description follows. `ruby tests/check_anchors.rb` verifies uniqueness, link
+resolution, the 120-column budget, and that no `row:N` survives; `--list` prints
+the whole table.
+
 ## Consistency check (`tools/doctor.rb`)
 
 After changing anything, run the doctor to find out what else went stale:
@@ -378,8 +418,8 @@ Checks are split into three tiers, so a repair can never silently rewrite code:
 
 | Tier | Meaning | Items |
 |---|---|---|
-| `CHECK` | read-only; a mismatch is reported, never fixed | rule anchors, trailing-underscore identifiers, cross-file `row:N` links |
-| `GEN` | pure regeneration, idempotent | `examples/all_samples.l`, `examples/metaprogramming.l` index block |
+| `CHECK` | read-only; a mismatch is reported, never fixed | rule anchors, content anchors + links, trailing-underscore identifiers |
+| `GEN` | pure regeneration, idempotent | `examples/all_samples.l` |
 | `DOC` | numbers only, prose untouched | line counts quoted in `docs/*.md` and `README.md` |
 
 `GEN` items are safe to auto-write because they are comment-only regeneration.

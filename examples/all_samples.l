@@ -9,189 +9,189 @@
 //   examples/http_parse.l                          row:334
 //   examples/http_server.l                         row:419
 //   examples/metaprogramming.l                     row:518
-//   examples/mini_lexer.l                          row:761
-//   examples/mini_parser.l                         row:819
-//   examples/plugin_framework.l                    row:932
-//   examples/typed_config.l                        row:1304
-//   tests/cases/_probe_dsl.l                       row:1340
-//   tests/cases/app_cfg.l                          row:1375
-//   tests/cases/arena_test.l                       row:1384
-//   tests/cases/array_ops_test.l                   row:1406
-//   tests/cases/array_poly_test.l                  row:1470
-//   tests/cases/array_string_eq_test.l             row:1512
-//   tests/cases/array_sugar.l                      row:1579
-//   tests/cases/array_test.l                       row:1593
-//   tests/cases/async_await_test.l                 row:1606
-//   tests/cases/atomic_stress.l                    row:1644
-//   tests/cases/auto_free.l                        row:1665
-//   tests/cases/break_continue_test.l              row:1687
-//   tests/cases/callback_test.l                    row:1777
-//   tests/cases/cast_test.l                        row:1796
-//   tests/cases/chained_call_test.l                row:1841
-//   tests/cases/class_basic.l                      row:1919
-//   tests/cases/cli_args_test.l                    row:1936
-//   tests/cases/cli_flags_test.l                   row:1945
-//   tests/cases/clone_test.l                       row:1965
-//   tests/cases/closure_escape_good.l              row:1989
-//   tests/cases/coalesce_boxing_test.l             row:2004
-//   tests/cases/coalesce_expr_pos_test.l           row:2072
-//   tests/cases/coalesce_test.l                    row:2130
-//   tests/cases/code_as_config/lconf.l             row:2151
-//   tests/cases/code_as_config/main.l              row:2165
-//   tests/cases/codegen_simple.l                   row:2172
-//   tests/cases/comment_pollution_test.l           row:2181
-//   tests/cases/compound_assign.l                  row:2223
-//   tests/cases/comptime_assert_fail_test.l        row:2237
-//   tests/cases/comptime_fail_test.l               row:2251
-//   tests/cases/comptime_ok_test.l                 row:2262
-//   tests/cases/concurrency_stress.l               row:2275
-//   tests/cases/config_layered_test.l              row:2319
-//   tests/cases/config_test.l                      row:2425
-//   tests/cases/constructor.l                      row:2463
-//   tests/cases/context_macro_test.l               row:2482
-//   tests/cases/control_flow.l                     row:2496
-//   tests/cases/debug_info_test.l                  row:2532
-//   tests/cases/delegate_conflict_test.l           row:2547
-//   tests/cases/delegate_optional_test.l           row:2575
-//   tests/cases/delegate_test.l                    row:2624
-//   tests/cases/destructure.l                      row:2643
-//   tests/cases/destructure_array.l                row:2665
-//   tests/cases/destructure_match.l                row:2720
-//   tests/cases/destructure_type_mismatch.l        row:2836
-//   tests/cases/destructure_unknown_field.l        row:2857
-//   tests/cases/doc_sample.l                       row:2875
-//   tests/cases/downcast_test.l                    row:2899
-//   tests/cases/drop_test.l                        row:2944
-//   tests/cases/dynamic_dispatch.l                 row:3013
-//   tests/cases/env_client_test.l                  row:3054
-//   tests/cases/ergonomics_test.l                  row:3081
-//   tests/cases/expr.l                             row:3208
-//   tests/cases/extern_test.l                      row:3214
-//   tests/cases/ffi_export.l                       row:3227
-//   tests/cases/field_syntax_test.l                row:3269
-//   tests/cases/file_io_test.l                     row:3304
-//   tests/cases/for_in.l                           row:3328
-//   tests/cases/fs_test.l                          row:3345
-//   tests/cases/func_call.l                        row:3398
-//   tests/cases/func_def.l                         row:3404
-//   tests/cases/generic_constraint.l               row:3411
-//   tests/cases/generic_depth_ok.l                 row:3441
-//   tests/cases/generic_inference.l                row:3456
-//   tests/cases/generic_test.l                     row:3466
-//   tests/cases/global_class_test.l                row:3492
-//   tests/cases/global_test.l                      row:3517
-//   tests/cases/golden.l                           row:3533
-//   tests/cases/heap_defer.l                       row:3585
-//   tests/cases/hello_world.l                      row:3601
-//   tests/cases/http_chunked_test.l                row:3609
-//   tests/cases/http_client_test.l                 row:3742
-//   tests/cases/http_parse_test.l                  row:3836
-//   tests/cases/http_server_test.l                 row:3935
-//   tests/cases/http_stdlib_test.l                 row:3989
-//   tests/cases/implicit_boxing_test.l             row:4017
-//   tests/cases/inc_dec.l                          row:4072
-//   tests/cases/incremental_cache.l                row:4101
-//   tests/cases/input_test.l                       row:4111
-//   tests/cases/interface_test.l                   row:4121
-//   tests/cases/join_test.l                        row:4146
-//   tests/cases/json_test.l                        row:4159
-//   tests/cases/kw_mixed.l                         row:4319
-//   tests/cases/lambda_capture.l                   row:4334
-//   tests/cases/lambda_state.l                     row:4348
-//   tests/cases/lambda_test.l                      row:4361
-//   tests/cases/lcmd_in_class.l                    row:4381
-//   tests/cases/lcmd_l_callback.l                  row:4448
-//   tests/cases/lcmd_path.l                        row:4464
-//   tests/cases/lexer_demo_test.l                  row:4502
-//   tests/cases/lfree_double_free.l                row:4525
-//   tests/cases/lifecycle_test.l                   row:4592
-//   tests/cases/log_config_test.l                  row:4608
-//   tests/cases/log_level_test.l                   row:4633
-//   tests/cases/log_sink_test.l                    row:4677
-//   tests/cases/main_import.l                      row:4769
-//   tests/cases/map_ops_test.l                     row:4780
-//   tests/cases/map_test.l                         row:4848
-//   tests/cases/match_expr_test.l                  row:4865
-//   tests/cases/match_test.l                       row:4944
-//   tests/cases/memory_leak_hard.l                 row:4962
-//   tests/cases/memory_stress.l                    row:5014
-//   tests/cases/mini_parser_test.l                 row:5042
-//   tests/cases/mod_a.l                            row:5073
-//   tests/cases/mod_math.l                         row:5080
-//   tests/cases/mod_scope_ok.l                     row:5098
-//   tests/cases/modulo_test.l                      row:5111
-//   tests/cases/multi_a.l                          row:5156
-//   tests/cases/multi_b.l                          row:5163
-//   tests/cases/multi_main.l                       row:5170
-//   tests/cases/namespace_test.l                   row:5182
-//   tests/cases/nested_init.l                      row:5207
-//   tests/cases/net_server.l                       row:5238
-//   tests/cases/net_test.l                         row:5260
-//   tests/cases/node_hook_optin.l                  row:5337
-//   tests/cases/node_hook_optin_off.l              row:5366
-//   tests/cases/optional_iface_chain.l             row:5397
-//   tests/cases/optional_test.l                    row:5488
-//   tests/cases/optional_unwrap_chain_test.l       row:5500
-//   tests/cases/partial_test.l                     row:5567
-//   tests/cases/path_fs_ext_test.l                 row:5592
-//   tests/cases/pkg_cycle/main.l                   row:5628
-//   tests/cases/pkg_test/main.l                    row:5635
-//   tests/cases/plugin_framework_test.l            row:5645
-//   tests/cases/print_format.l                     row:5769
-//   tests/cases/process_capture_test.l             row:5786
-//   tests/cases/process_test.l                     row:5807
-//   tests/cases/properties_test.l                  row:5822
-//   tests/cases/property_fallback.l                row:5929
-//   tests/cases/property_tree_test.l               row:5959
-//   tests/cases/ref_pass.l                         row:6058
-//   tests/cases/regex_overflow_test.l              row:6084
-//   tests/cases/regex_test.l                       row:6112
-//   tests/cases/result_test.l                      row:6131
-//   tests/cases/run_hello.l                        row:6151
-//   tests/cases/safe_field_test.l                  row:6159
-//   tests/cases/sort_test.l                        row:6209
-//   tests/cases/static_method_test.l               row:6242
-//   tests/cases/str_reassign_test.l                row:6258
-//   tests/cases/string_concat.l                    row:6307
-//   tests/cases/string_ext_test.l                  row:6318
-//   tests/cases/string_infer_test.l                row:6357
-//   tests/cases/string_interp.l                    row:6381
-//   tests/cases/string_test.l                      row:6399
-//   tests/cases/sync_pass.l                        row:6408
-//   tests/cases/sync_try_release.l                 row:6420
-//   tests/cases/test_framework_test.l              row:6476
-//   tests/cases/thread_test.l                      row:6557
-//   tests/cases/time_format_test.l                 row:6575
-//   tests/cases/time_test.l                        row:6589
-//   tests/cases/timer_test.l                       row:6613
-//   tests/cases/to_string_test.l                   row:6633
-//   tests/cases/try_operator.l                     row:6651
-//   tests/cases/type_promotion.l                   row:6676
-//   tests/cases/typed_cfg.l                        row:6695
-//   tests/cases/uid_test.l                         row:6795
-//   tests/cases/var_decl.l                         row:6815
-//   tests/cases/variant_ext_test.l                 row:6822
-//   tests/cases/variant_test.l                     row:6845
-//   tests/cases/variant_unbox_return_test.l        row:6868
-//   tests/cases/async_await_loop_bad.l             row:6929
-//   tests/cases/break_outside_loop_bad.l           row:6954
-//   tests/cases/coalesce_non_optional_bad.l        row:6964
-//   tests/cases/delegate_conflict_bad.l            row:6975
-//   tests/cases/delegate_private_bad.l             row:7001
-//   tests/cases/delegate_same_type_bad.l           row:7024
-//   tests/cases/delegate_same_type_partial_bad.l   row:7046
-//   tests/cases/field_syntax_bad.l                 row:7071
-//   tests/cases/generic_constraint_bad.l           row:7084
-//   tests/cases/generic_depth_bad.l                row:7112
-//   tests/cases/kw_bad.l                           row:7129
-//   tests/cases/mod_scope_private_bad.l            row:7144
-//   tests/cases/mod_scope_unknown_bad.l            row:7156
-//   tests/cases/ref_bad.l                          row:7166
-//   tests/cases/static_method_bad.l                row:7187
-//   tests/cases/string_literal_no_stdlib_bad.l     row:7202
-//   tests/cases/sync_fail.l                        row:7215
-//   tests/cases/this_in_static_bad.l               row:7226
-//   tests/cases/uid_bad.l                          row:7242
+//   examples/mini_lexer.l                          row:794
+//   examples/mini_parser.l                         row:852
+//   examples/plugin_framework.l                    row:965
+//   examples/typed_config.l                        row:1337
+//   tests/cases/_probe_dsl.l                       row:1373
+//   tests/cases/app_cfg.l                          row:1408
+//   tests/cases/arena_test.l                       row:1417
+//   tests/cases/array_ops_test.l                   row:1439
+//   tests/cases/array_poly_test.l                  row:1503
+//   tests/cases/array_string_eq_test.l             row:1545
+//   tests/cases/array_sugar.l                      row:1612
+//   tests/cases/array_test.l                       row:1626
+//   tests/cases/async_await_test.l                 row:1639
+//   tests/cases/atomic_stress.l                    row:1677
+//   tests/cases/auto_free.l                        row:1698
+//   tests/cases/break_continue_test.l              row:1720
+//   tests/cases/callback_test.l                    row:1810
+//   tests/cases/cast_test.l                        row:1829
+//   tests/cases/chained_call_test.l                row:1874
+//   tests/cases/class_basic.l                      row:1952
+//   tests/cases/cli_args_test.l                    row:1969
+//   tests/cases/cli_flags_test.l                   row:1978
+//   tests/cases/clone_test.l                       row:1998
+//   tests/cases/closure_escape_good.l              row:2022
+//   tests/cases/coalesce_boxing_test.l             row:2037
+//   tests/cases/coalesce_expr_pos_test.l           row:2105
+//   tests/cases/coalesce_test.l                    row:2163
+//   tests/cases/code_as_config/lconf.l             row:2184
+//   tests/cases/code_as_config/main.l              row:2198
+//   tests/cases/codegen_simple.l                   row:2205
+//   tests/cases/comment_pollution_test.l           row:2214
+//   tests/cases/compound_assign.l                  row:2256
+//   tests/cases/comptime_assert_fail_test.l        row:2270
+//   tests/cases/comptime_fail_test.l               row:2285
+//   tests/cases/comptime_ok_test.l                 row:2296
+//   tests/cases/concurrency_stress.l               row:2309
+//   tests/cases/config_layered_test.l              row:2353
+//   tests/cases/config_test.l                      row:2459
+//   tests/cases/constructor.l                      row:2497
+//   tests/cases/context_macro_test.l               row:2516
+//   tests/cases/control_flow.l                     row:2531
+//   tests/cases/debug_info_test.l                  row:2567
+//   tests/cases/delegate_conflict_test.l           row:2582
+//   tests/cases/delegate_optional_test.l           row:2610
+//   tests/cases/delegate_test.l                    row:2659
+//   tests/cases/destructure.l                      row:2678
+//   tests/cases/destructure_array.l                row:2700
+//   tests/cases/destructure_match.l                row:2755
+//   tests/cases/destructure_type_mismatch.l        row:2871
+//   tests/cases/destructure_unknown_field.l        row:2892
+//   tests/cases/doc_sample.l                       row:2910
+//   tests/cases/downcast_test.l                    row:2934
+//   tests/cases/drop_test.l                        row:2979
+//   tests/cases/dynamic_dispatch.l                 row:3048
+//   tests/cases/env_client_test.l                  row:3089
+//   tests/cases/ergonomics_test.l                  row:3116
+//   tests/cases/expr.l                             row:3243
+//   tests/cases/extern_test.l                      row:3249
+//   tests/cases/ffi_export.l                       row:3262
+//   tests/cases/field_syntax_test.l                row:3304
+//   tests/cases/file_io_test.l                     row:3339
+//   tests/cases/for_in.l                           row:3363
+//   tests/cases/fs_test.l                          row:3380
+//   tests/cases/func_call.l                        row:3433
+//   tests/cases/func_def.l                         row:3439
+//   tests/cases/generic_constraint.l               row:3446
+//   tests/cases/generic_depth_ok.l                 row:3476
+//   tests/cases/generic_inference.l                row:3491
+//   tests/cases/generic_test.l                     row:3501
+//   tests/cases/global_class_test.l                row:3527
+//   tests/cases/global_test.l                      row:3552
+//   tests/cases/golden.l                           row:3568
+//   tests/cases/heap_defer.l                       row:3620
+//   tests/cases/hello_world.l                      row:3636
+//   tests/cases/http_chunked_test.l                row:3644
+//   tests/cases/http_client_test.l                 row:3777
+//   tests/cases/http_parse_test.l                  row:3871
+//   tests/cases/http_server_test.l                 row:3970
+//   tests/cases/http_stdlib_test.l                 row:4024
+//   tests/cases/implicit_boxing_test.l             row:4052
+//   tests/cases/inc_dec.l                          row:4107
+//   tests/cases/incremental_cache.l                row:4136
+//   tests/cases/input_test.l                       row:4146
+//   tests/cases/interface_test.l                   row:4156
+//   tests/cases/join_test.l                        row:4181
+//   tests/cases/json_test.l                        row:4194
+//   tests/cases/kw_mixed.l                         row:4354
+//   tests/cases/lambda_capture.l                   row:4369
+//   tests/cases/lambda_state.l                     row:4383
+//   tests/cases/lambda_test.l                      row:4396
+//   tests/cases/lcmd_in_class.l                    row:4416
+//   tests/cases/lcmd_l_callback.l                  row:4483
+//   tests/cases/lcmd_path.l                        row:4499
+//   tests/cases/lexer_demo_test.l                  row:4537
+//   tests/cases/lfree_double_free.l                row:4560
+//   tests/cases/lifecycle_test.l                   row:4627
+//   tests/cases/log_config_test.l                  row:4643
+//   tests/cases/log_level_test.l                   row:4668
+//   tests/cases/log_sink_test.l                    row:4712
+//   tests/cases/main_import.l                      row:4804
+//   tests/cases/map_ops_test.l                     row:4815
+//   tests/cases/map_test.l                         row:4883
+//   tests/cases/match_expr_test.l                  row:4900
+//   tests/cases/match_test.l                       row:4979
+//   tests/cases/memory_leak_hard.l                 row:4997
+//   tests/cases/memory_stress.l                    row:5049
+//   tests/cases/mini_parser_test.l                 row:5077
+//   tests/cases/mod_a.l                            row:5108
+//   tests/cases/mod_math.l                         row:5115
+//   tests/cases/mod_scope_ok.l                     row:5133
+//   tests/cases/modulo_test.l                      row:5146
+//   tests/cases/multi_a.l                          row:5191
+//   tests/cases/multi_b.l                          row:5198
+//   tests/cases/multi_main.l                       row:5205
+//   tests/cases/namespace_test.l                   row:5217
+//   tests/cases/nested_init.l                      row:5242
+//   tests/cases/net_server.l                       row:5273
+//   tests/cases/net_test.l                         row:5295
+//   tests/cases/node_hook_optin.l                  row:5372
+//   tests/cases/node_hook_optin_off.l              row:5401
+//   tests/cases/optional_iface_chain.l             row:5432
+//   tests/cases/optional_test.l                    row:5523
+//   tests/cases/optional_unwrap_chain_test.l       row:5535
+//   tests/cases/partial_test.l                     row:5602
+//   tests/cases/path_fs_ext_test.l                 row:5627
+//   tests/cases/pkg_cycle/main.l                   row:5663
+//   tests/cases/pkg_test/main.l                    row:5670
+//   tests/cases/plugin_framework_test.l            row:5680
+//   tests/cases/print_format.l                     row:5804
+//   tests/cases/process_capture_test.l             row:5821
+//   tests/cases/process_test.l                     row:5842
+//   tests/cases/properties_test.l                  row:5857
+//   tests/cases/property_fallback.l                row:5964
+//   tests/cases/property_tree_test.l               row:5994
+//   tests/cases/ref_pass.l                         row:6093
+//   tests/cases/regex_overflow_test.l              row:6119
+//   tests/cases/regex_test.l                       row:6147
+//   tests/cases/result_test.l                      row:6166
+//   tests/cases/run_hello.l                        row:6186
+//   tests/cases/safe_field_test.l                  row:6194
+//   tests/cases/sort_test.l                        row:6244
+//   tests/cases/static_method_test.l               row:6277
+//   tests/cases/str_reassign_test.l                row:6293
+//   tests/cases/string_concat.l                    row:6342
+//   tests/cases/string_ext_test.l                  row:6353
+//   tests/cases/string_infer_test.l                row:6392
+//   tests/cases/string_interp.l                    row:6416
+//   tests/cases/string_test.l                      row:6434
+//   tests/cases/sync_pass.l                        row:6443
+//   tests/cases/sync_try_release.l                 row:6455
+//   tests/cases/test_framework_test.l              row:6511
+//   tests/cases/thread_test.l                      row:6592
+//   tests/cases/time_format_test.l                 row:6610
+//   tests/cases/time_test.l                        row:6624
+//   tests/cases/timer_test.l                       row:6648
+//   tests/cases/to_string_test.l                   row:6668
+//   tests/cases/try_operator.l                     row:6686
+//   tests/cases/type_promotion.l                   row:6711
+//   tests/cases/typed_cfg.l                        row:6730
+//   tests/cases/uid_test.l                         row:6830
+//   tests/cases/var_decl.l                         row:6851
+//   tests/cases/variant_ext_test.l                 row:6858
+//   tests/cases/variant_test.l                     row:6881
+//   tests/cases/variant_unbox_return_test.l        row:6904
+//   tests/cases/async_await_loop_bad.l             row:6965
+//   tests/cases/break_outside_loop_bad.l           row:6990
+//   tests/cases/coalesce_non_optional_bad.l        row:7000
+//   tests/cases/delegate_conflict_bad.l            row:7011
+//   tests/cases/delegate_private_bad.l             row:7037
+//   tests/cases/delegate_same_type_bad.l           row:7060
+//   tests/cases/delegate_same_type_partial_bad.l   row:7082
+//   tests/cases/field_syntax_bad.l                 row:7107
+//   tests/cases/generic_constraint_bad.l           row:7120
+//   tests/cases/generic_depth_bad.l                row:7148
+//   tests/cases/kw_bad.l                           row:7165
+//   tests/cases/mod_scope_private_bad.l            row:7180
+//   tests/cases/mod_scope_unknown_bad.l            row:7192
+//   tests/cases/ref_bad.l                          row:7202
+//   tests/cases/static_method_bad.l                row:7223
+//   tests/cases/string_literal_no_stdlib_bad.l     row:7238
+//   tests/cases/sync_fail.l                        row:7251
+//   tests/cases/this_in_static_bad.l               row:7262
+//   tests/cases/uid_bad.l                          row:7278
 
 //------------------------------------------------
 // examples/config_parser.l
@@ -524,40 +524,56 @@ pub fun serve_once(i32 port) -> i32 {
 //   PART B — comptime          : //LCMD-free, pure frontend blocks stripped
 //                                before codegen.
 //
-// Concept index — every line number below is verified against the real
-// file by build/gen_meta_index.rb. Re-run it after editing this file.
+// MARKERS — this file demonstrates the convention.
 //
-//   row:N                        line N of THIS file
-//   rel/path.l row:N             line N of another file
+// An anchor names a piece of CONTENT, not a position. A marker is a comment
+// whose sole leading token is a bracketed id, one space after the slashes:
+//
+//     `// [link:121-uid-counter] uid_counter() hands out a compile-time-unique id`
+//
+// A link is the same id in square brackets, either in this file's index below
+// or written beside a path to another file:
+//
+//     `[link:121-uid-counter]`      `tests/cases/uid_test.l  [link:134-uid-monotonic]`
+//
+// Because an anchor travels with the code it describes, inserting or deleting
+// lines elsewhere never invalidates a link. Only renaming the id does, and
+// check_anchors.rb reports that immediately.
+
+// Jump targets — every bracketed id below is defined by a `// [id]` marker
+// further down in this file or in the linked file.
 //
 // PART A — LCMD directives (handler first, then its call sites):
-//   A1  row:62   directive with args + 5-arg handler (path, cmd, args, line, col)
-//   A2  row:65   class-body injection -> methods / fields / delegate, path = "Point"
-//   A3  row:79   statement injection -> statements into a function body
-//   A4  row:78   hierarchical path -> "Point.generate" vs bare "Point"
-//   A5  row:92   uid_counter() in a directive -> collision-free generated names
-//   A6  row:111  explicit class hook -> enable_class_hook + __on_class_parsed
-//   A7  row:102  source_line/column() -> directive position inside the handler
+//   A1  [link:115-directive-with-args]   directive with args + 5-arg handler (path, cmd, args, line, col)
+//   A2  [link:117-class-body-site]    class-body injection -> methods / fields / delegate, path = "Point"
+//   A3  [link:118-injected-statements]     statement injection -> statements into a function body
+//   A4  [link:119-hierarchical-path]     hierarchical path -> "Point.generate" vs bare "Point"
+//   A5  [link:121-uid-counter]   uid_counter() in a directive -> collision-free generated names
+//   A6  [link:122-class-hook-on]    explicit class hook -> enable_class_hook + __on_class_parsed
+//   A7  [link:124-source-line-column]    source_line/column() -> directive position inside the handler
 //
 // PART B — comptime:
-//   B1  row:180  comptime { } -> frontend-only, stripped before codegen
-//   B2  row:162  comptime_assert -> build veto on a false condition
-//   B3  row:172  uid_counter() -> monotonic, inlined as a constant
-//   B4  row:187  __FILE__ / __FUNC__ -> folded to string literals at codegen
-//   B5  row:188  __LINE__ -> folded to an i32 constant
-//   B6  row:194  zero-cost proof -> 100k iterations, no comptime residue
+//   B1  [link:125-comptime-block]      comptime { } -> frontend-only, stripped before codegen
+//   B2  [link:126-comptime-assert] comptime_assert -> build veto on a false condition
+//   B3  [link:127-comptime-uid]   uid_counter() -> monotonic, inlined as a constant
+//   B4  [link:128-magic-file]    __FILE__ / __FUNC__ -> folded to string literals at codegen
+//   B5  [link:130-magic-line]    __LINE__ -> folded to an i32 constant
+//   B6  [link:131-zero-runtime-cost]     zero-cost proof -> 100k iterations, no comptime residue
+//
+// Same constants, evaluated inside comptime (a second marker for B4):
+//   B4c [link:129-magic-file-comptime]   __FILE__ resolves while compiling
 //
 // Call sites (where the directives are literally written):
-//   A2 member sites row:129  the three class-body directives
-//   A4 method body  row:135  the in-method directive
-//   A6 hook toggle  row:145  hook enabled for Audited
+//   A2  [link:116-class-body-vs-method]         the three class-body directives
+//   A4  [link:120-method-body-site]   the in-method directive
+//   A6  [link:123-hook-opt-in]   hook enabled for Audited
 //
 // Isolation cases (same concept, one file each):
-//   tests/cases/lcmd_in_class.l                row:25   class-body members + in-method statements
-//   tests/cases/lcmd_path.l                    row:12   hierarchical path in a method body
-//   tests/cases/uid_test.l                     row:3    uid_counter across two directives
-//   tests/cases/context_macro_test.l           row:4    __FILE__ / __LINE__ / __FUNC__ at runtime
-//   tests/cases/comptime_assert_fail_test.l    row:5    comptime_assert vetoing a build
+//   tests/cases/lcmd_in_class.l                [link:133-lcmd-in-class]  class-body members + in-method statements
+//   tests/cases/lcmd_path.l                    [link:132-lcmd-context-path]      hierarchical path in a method body
+//   tests/cases/uid_test.l                     [link:134-uid-monotonic]       uid_counter across two directives
+//   tests/cases/context_macro_test.l           [link:135-line-preserved]  __FILE__ / __LINE__ / __FUNC__ at runtime
+//   tests/cases/comptime_assert_fail_test.l    [link:136-comptime-veto]  comptime_assert vetoing a build
 //
 // Interpreter limits (compiler/comptime/interpreter.cpp): comptime accepts only
 // int/bool/string literals, identifiers, calls and binary ops — no loops, no
@@ -574,13 +590,15 @@ import "stdlib/string.l"
 // PART A — LCMD: directives are L functions returning L source.
 // ===========================================================================
 
-// A1 + A3 + A5 + A7: the 5-argument form receives the directive's exact source
-// position, in addition to (path, cmd, args). `uid_counter()` is the only safe
-// way to mint symbol names: it is monotonic across the whole compilation, so
-// two directives in two files can never produce the same identifier.
+// [anchor:115-directive-with-args] [link:118-injected-statements] [link:121-uid-counter] [link:124-source-line-column]
+// The 5-argument form receives the directive's exact source position, in addition
+// to (path, cmd, args). `uid_counter()` is the only safe way to mint symbol names:
+// it is monotonic across the whole compilation, so two directives in two files can
+// never produce the same identifier.
 pub fun __compile_time_handler(String path, String cmd, String args, i32 line, i32 col) -> String {
-    // A2: written in the class body, so `path` is the BARE class name and the
-    // result must parse as class members (methods, fields, delegates).
+    // [anchor:117-class-body-site]
+    // Written in the CLASS body, so `path` is the bare class name and the returned
+    // source must parse as class members: methods, fields, `delegate`.
     if "Point" == path && "method" == cmd {
         return "pub fun injected() -> i32 { return 7; }"
     }
@@ -591,23 +609,25 @@ pub fun __compile_time_handler(String path, String cmd, String args, i32 line, i
         return "delegate Bag;"
     }
 
-    // A4: the same class, but the directive sits in a METHOD body. The path
-    // gains the method name and the result is parsed as statements/members of
-    // that method's scope.
+    // [anchor:119-hierarchical-path]
+    // The same class, but the directive sits in a METHOD body. The path gains the
+    // method name, so "Point.generate" != "Point".
     if "Point.generate" == path && "in_method" == cmd {
         return "return 11;"
     }
 
-    // A1: `args` is the raw text inside the parentheses; `line`/`col` are the
-    // directive's own source position, so generated code can report it.
+    // [anchor:118-injected-statements]
+    // `args` is the raw text inside the parentheses; `line`/`col` are the directive's
+    // own source position, so generated code can report it.
     if "echo_args" == cmd && "true" == args {
         return "i32 echo_line = " + line + ";"
     }
 
-    // A5: a directive that generates uniquely-named locals. `uid_counter()`
-    // hands out a compile-time-unique id, so repeated directives — or the same
-    // directive in two files — can never emit the same identifier. The ids are
-    // also asserted monotonic right here, during the build.
+    // [anchor:121-uid-counter]
+    // A directive that generates uniquely-named locals. `uid_counter()` hands out a
+    // compile-time-unique id, so repeated directives — or the same directive in two
+    // files — can never emit the same identifier. The ids are also asserted monotonic
+    // right here, during the build.
     if "gen_local" == cmd {
         first := uid_counter()
         second := uid_counter()
@@ -615,18 +635,19 @@ pub fun __compile_time_handler(String path, String cmd, String args, i32 line, i
         return "i32 gen_" + args + " = " + first + ";"
     }
 
-    // A7: source_line()/source_column() evaluated DURING compilation. The
-    // numbers are baked into the emitted source; the functions themselves are
-    // never called at runtime.
+    // [anchor:124-source-line-column]
+    // source_line()/source_column() evaluated DURING compilation. The numbers are baked
+    // into the emitted source; the functions themselves are never called at runtime.
     if "where_directive" == cmd {
         return "i32 directive_line = " + source_line() + ";"
     }
     return ""
 }
 
-// A6: class hooks are OPT-IN. `__on_class_parsed` fires only for classes parsed
-// while a `//LCMD_enable_class_hook()` is active; everything else takes the
-// fast path and never touches the interpreter.
+// [anchor:122-class-hook-on]
+// Class hooks are OPT-IN. `__on_class_parsed` fires only for classes parsed while a
+// `//LCMD_enable_class_hook()` is active; everything else takes the fast path and
+// never touches the interpreter.
 pub fun __on_class_parsed(String className) -> String {
     if "Audited" == className {
         return "pub fun audit_tag() -> i32 { return 999; }"
@@ -641,8 +662,9 @@ pub class Bag {
     pub fun set_stored(i32 v) { stored = v; }
 }
 
-// A2 + A4: members are injected straight into this class body — no `generate()`
-// wrapper method required.
+// [anchor:116-class-body-vs-method]
+// Members are injected straight into this class body — no `generate()` wrapper
+// method required.
 class Point {
     i32 id
     //LCMD_method()
@@ -650,7 +672,8 @@ class Point {
     //LCMD_delegate()
 
     fun generate() -> i32 {
-        // A4: path here is "Point.generate", not "Point".
+        // [anchor:120-method-body-site]
+        // Path here is "Point.generate", not "Point".
         //LCMD_in_method()
         return 0;
     }
@@ -658,9 +681,10 @@ class Point {
     pub fun own() -> i32 { return 5; }
 }
 
-// A6: the hook is enabled for exactly these two declarations, then disabled.
-// The injected source is parsed at MODULE level, so the hook emits a free
-// function — that is the documented contract, not a class member.
+// [anchor:123-hook-opt-in]
+// The hook is enabled for exactly these two declarations, then disabled. The injected
+// source is parsed at MODULE level, so the hook emits a free function — that is the
+// documented contract, not a class member.
 //LCMD_enable_class_hook()
 class Audited {
     i32 x
@@ -675,24 +699,30 @@ class NotAudited {
 // PART B — comptime: frontend-only, gone by codegen.
 // ===========================================================================
 
-// B2: both hold, so the build proceeds. Flip either and the compiler stops with
-// `[ERROR] file:line:col - Compile-time error: ...`.
+// B1: frontend-only block, stripped before codegen.
+// [anchor:125-comptime-block]
+//
+// B2: both assertions hold, so the build proceeds. Flip either and the compiler
+// stops with `[ERROR] file:line:col - Compile-time error: ...`.
+// [anchor:126-comptime-assert]
 comptime {
     comptime_assert(1 + 1 == 2, "arithmetic must hold at compile time")
     comptime_assert("a" + "b" == "ab", "string concat must hold at compile time")
 }
 
-// B3: uid_counter() returns the current counter and increments it. The values
-// are inlined as constants, so `id_second == id_first + 1` and no runtime call
-// exists. This is the same counter PART A's directives consume.
+// [anchor:127-comptime-uid]
+// uid_counter() returns the current counter and increments it. The values are inlined as
+// constants, so `id_second == id_first + 1` and no runtime call exists. This is the same
+// counter PART A's directives consume.
 comptime {
     i32 id_first = uid_counter()
     i32 id_second = uid_counter()
     comptime_assert(id_second == id_first + 1, "uid_counter must be monotonic")
 }
 
-// B4 + B5: the magic constants also resolve INSIDE comptime. __FUNC__ has no
+// B4 + B5 inside comptime: the magic constants resolve here too. __FUNC__ has no
 // function here, so it reports "<comptime>", and __LINE__ is the block's line.
+// [anchor:129-magic-file-comptime]
 comptime {
     comptime_assert(__FILE__ != "", "__FILE__ must resolve inside comptime")
     if 42 >= 42 {
@@ -701,6 +731,8 @@ comptime {
 }
 
 // B4 + B5 at RUNTIME: intercepted at codegen, folded to literals.
+// [anchor:128-magic-file]
+// [anchor:130-magic-line]
 pub fun where_am_i() -> i32 {
     print(__FILE__)
     print(__FUNC__)
@@ -708,8 +740,9 @@ pub fun where_am_i() -> i32 {
     return 0
 }
 
-// B6: 100k iterations. If any comptime machinery survived into the binary this
-// would still be correct — the assertion is on the IR, in run_tests.rb.
+// [anchor:131-zero-runtime-cost]
+// 100k iterations. If any comptime machinery survived into the binary this would still be
+// correct — the assertion is on the IR, in run_tests.rb.
 pub fun hot_loop() -> i32 {
     total! := 0
     i! := 0
@@ -2236,6 +2269,7 @@ fun main() -> i32 {
 //------------------------------------------------
 // tests/cases/comptime_assert_fail_test.l
 //------------------------------------------------
+// [anchor:136-comptime-veto] A false comptime_assert stops the build before codegen.
 // Negative case: a false comptime_assert must veto the build.
 // Expected: [ERROR] <file>:<line>:<col> - Compile-time error: <msg>
 // and NO object file is produced (the frontend stops before codegen).
@@ -2481,6 +2515,7 @@ fun main() -> i32 {
 //------------------------------------------------
 // tests/cases/context_macro_test.l
 //------------------------------------------------
+// [anchor:135-line-preserved] magic file/line/func names fold to literals, no runtime call.
 fun test_context() {
     print("File: " + __FILE__)
     print("Line: " + __LINE__)
@@ -4380,7 +4415,7 @@ fun main() -> i32 {
 //------------------------------------------------
 // tests/cases/lcmd_in_class.l
 //------------------------------------------------
-// [lcmd-in-place] `//LCMD_xxx()` written directly in a class body.
+// [anchor:133-lcmd-in-class] `//LCMD_xxx()` written directly in a class body.
 //
 // The path seen by the handler is the bare class name, and whatever the handler
 // returns is parsed as CLASS MEMBERS (methods, fields, delegates) — no
@@ -4463,7 +4498,7 @@ fun main() -> i32 {
 //------------------------------------------------
 // tests/cases/lcmd_path.l
 //------------------------------------------------
-// [lcmd-path] The handler receives a HIERARCHICAL context path.
+// [anchor:132-lcmd-context-path] The handler receives a HIERARCHICAL context path.
 //
 // A directive inside a method body sees "User.generate" (class + method), and
 // its returned source is injected as STATEMENTS into that method — so
@@ -6794,6 +6829,7 @@ fun main() -> i32 {
 //------------------------------------------------
 // tests/cases/uid_test.l
 //------------------------------------------------
+// [anchor:134-uid-monotonic] uid_counter() is monotonic and collision-free across directives.
 pub fun __compile_time_handler(String path, String cmd, String args) -> String {
     if "gen_var" == cmd {
         id := uid_counter()

@@ -233,7 +233,7 @@ bool linkWithRuntime(const std::string& object_path, const std::string& out_path
     bat << "if errorlevel 1 exit /b 1\r\n";
     // `-shared` + static l_runtime → self-contained DLL exporting pub symbols.
     bat << '"' << clang << "\" " << opt_flag;
-    // [performance-first] -flto lets the linker pull bitcode out of l_runtime
+    // [link:109-Performance-First-Architecture] -flto lets the linker pull bitcode out of l_runtime
     // and inline runtime helpers into this object before code generation.
     // Clang requires LLD for LTO; lld-link ships with our LLVM toolchain.
     bat << " -flto -fuse-ld=lld";

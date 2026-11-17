@@ -464,7 +464,8 @@ ast::Token Lexer::lexIdentifierOrKeyword() {
 
   const std::string text(source_.substr(begin, index_ - begin));
   const ast::TokenType ty = keywordOrType(text);
-// [no-trailing-underscore] [identifier-exceptions] Identifiers must not end with `_` (physical fields are compiler-hidden).
+// [link:69-Banned-Trailing-Underscores-Field-Syntax] [link:72-Identifier-Boundary-Exceptions]
+// Identifiers must not end with `_` (physical fields are compiler-hidden).
   // Bare `_` remains valid (match wildcard). Compile-time context macros are exceptions.
   if (ty == ast::TokenType::Identifier && text.size() > 1 && text.back() == '_') {
     if (text != "__FILE__" && text != "__FUNC__" && text != "__LINE__") {

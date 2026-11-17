@@ -85,7 +85,7 @@ void Parser::flushPendingInjections(ast::Module& module) {
 }
 
 void Parser::maybeRunClassHook(ast::ClassDeclStmt& cls) {
-  // Fast path: disabled → no interpreter lookup or call ([hook-performance]).
+  // Fast path: disabled → no interpreter lookup or call ([link:22-Hook-Performance-Demand-Triggering]).
   if (!class_hook_enabled_) {
     return;
   }
@@ -418,7 +418,7 @@ void Parser::attachTrailingBlockIfPresent(std::vector<ast::CallArg>& args,
   if (!check(ast::TokenType::LBrace)) {
     return;
   }
-  // Method trailing without parens still requires `{ |` ([config-syntax] relative-init).
+  // Method trailing without parens still requires `{ |` ([link:67-Nested-Relative-Assignment] relative-init).
   // Free calls `delay(100) { ... }` allow a bare brace as a zero-arg block.
   if (!allow_bare_brace && peek(1).type != ast::TokenType::Pipe &&
       peek(1).type != ast::TokenType::PipePipe) {
@@ -1962,7 +1962,7 @@ ast::StmtPtr Parser::parseDirective() {
 
   stmt->context_path = currentContextPath();
 
-  // Opt-in class-hook toggles ([hook-performance]) — no interpreter cost by themselves.
+  // Opt-in class-hook toggles ([link:22-Hook-Performance-Demand-Triggering]) — no interpreter cost by themselves.
   if (stmt->command == "enable_class_hook") {
     class_hook_enabled_ = true;
   } else if (stmt->command == "disable_class_hook") {
@@ -2172,7 +2172,7 @@ void Parser::parseClassMembersInto(ast::ClassDeclStmt& cls, bool until_rbrace) {
     if (until_rbrace && check(ast::TokenType::RBrace)) {
       return;
     }
-    // [lcmd-in-place] `//LCMD_cmd()` in the class body: keep it for the frontend
+    // [link:112-Place-Class-Body-LCMD] `//LCMD_cmd()` in the class body: keep it for the frontend
     // expander, which injects the returned source as members of THIS class.
     if (check(ast::TokenType::LcmdDirective)) {
       cls.directives.push_back(parseDirective());
@@ -2218,7 +2218,7 @@ void Parser::parseClassMembersInto(ast::ClassDeclStmt& cls, bool until_rbrace) {
       cls.methods.push_back(std::move(method));
       continue;
     }
-    // [delegate]: `delegate Engine` — anonymous field named after the type.
+    // [link:97-Implicit-Delegation]: `delegate Engine` — anonymous field named after the type.
     if (check(ast::TokenType::KwDelegate)) {
       auto field = std::make_unique<ast::FieldDeclStmt>();
       field->loc = peek().loc;

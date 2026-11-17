@@ -30,7 +30,7 @@ private:
       const ast::ClassDeclStmt& cls,
       const std::unordered_map<std::string, std::vector<std::size_t>>& partials,
       const std::unordered_map<std::string, std::size_t>& solids);
-  // Reject a class that delegates the same type twice ([delegate]).
+  // Reject a class that delegates the same type twice ([link:97-Implicit-Delegation]).
   void checkDelegateFields(const ast::ClassDeclStmt& cls);
   // Inject `pub fun clone() -> Self` when the class does not define clone.
   void injectAutoCloneMethods(ast::Module& module);
@@ -53,7 +53,7 @@ private:
 
   diag::DiagnosticEngine* diags_ = nullptr;
   bool in_sync_ = false;
-  // Data-race checks apply only inside `spawn { ... }` ([closure-integration]).
+  // Data-race checks apply only inside `spawn { ... }` ([link:42-Closure-Integration-Data-Race-Refinement]).
   bool in_spawn_ = false;
   // `await` is only legal inside an `async fun` body.
   bool in_async_fn_ = false;

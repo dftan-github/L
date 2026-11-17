@@ -502,7 +502,9 @@ def fingerprintable_source?(path)
   return false if under_build_or_out?(path)
   return false if path.expand_path == TEST_CACHE_PATH.expand_path
   # Sources only — never .exe/.o/.obj/.dll/.lib/.json cache artifacts.
-  %w[.l .li .toml .c .rb .md].include?(path.extname.downcase)
+  # .mdc belongs here: test_rule_refs_consistent! reads language-rules.mdc, and
+  # without it a rules edit leaves that test green-but-stale in the cache.
+  %w[.l .li .toml .c .rb .md .mdc].include?(path.extname.downcase)
 end
 
 # Alias used by --filter matching (source fixtures only).
@@ -808,6 +810,23 @@ def test_rule_refs_consistent!
   )
 
   puts "  OK rule_refs (#{combined.sub(/\AOK:\s*/, '')})"
+end
+
+# Anchor/link markers are comments, so a stale one cannot fail compilation — it
+# silently rots instead. This is the only thing that notices.
+def test_anchors_consistent!
+  script = ROOT.join("tests", "check_anchors.rb")
+  assert!(File.exist?(script), "anchor guard not found: #{script}")
+
+  stdout, stderr, status = Open3.capture3("ruby", script.to_s)
+  combined = "#{stdout}\n#{stderr}".gsub("\r\n", "\n").strip
+  assert!(status.success?, "anchor/link markers inconsistent\n#{combined}")
+  assert!(
+    combined.include?("links resolve"),
+    "unexpected anchor guard output:\n#{combined}"
+  )
+
+  puts "  OK anchors (#{combined.sub(/\AOK:\s*/, '')})"
 end
 
 def test_run_hello_e2e!
@@ -4625,7 +4644,7 @@ def test_lcmd_path_e2e!
   puts "  OK lcmd_path e2e (hierarchical path → class inject)"
 end
 
-# [lcmd-in-place] A directive in the CLASS BODY injects members under the bare
+# [link:112-Place-Class-Body-LCMD] A directive in the CLASS BODY injects members under the bare
 # class-name path; the legacy in-method form still yields `Class.method`.
 def test_lcmd_in_class_e2e!
   assert!(File.exist?(LCMD_IN_CLASS), "lcmd_in_class case not found: #{LCMD_IN_CLASS}")
@@ -4702,8 +4721,9 @@ def test_context_macro_e2e!
     lines[0].include?("File: ") && lines[0].include?("context_macro_test.l"),
     "File line missing path, got #{lines[0].inspect}"
   )
+  # Match the real statement, not a comment that happens to mention the name.
   expected_line = File.readlines(CONTEXT_MACRO_TEST).each_with_index.find { |l, _|
-    l.include?("__LINE__")
+    l.include?("__LINE__") && !l.lstrip.start_with?("//")
   }[1] + 1
   assert!(
     lines[1] == "Line: #{expected_line}",
@@ -5052,6 +5072,7 @@ def main
     test_func_def_dump_ast!
     test_codegen_simple_emit_llvm!
     test_rule_refs_consistent!
+    test_anchors_consistent!
     test_run_hello_e2e!
     test_control_flow_e2e!
     test_class_basic_e2e!

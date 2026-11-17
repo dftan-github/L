@@ -58,7 +58,8 @@ class Interpreter {
 public:
   explicit Interpreter(diag::DiagnosticEngine* diags = nullptr);
 
-  // Directive / comptime source position ([source-line] [source-column]) for builtins.
+  // Directive / comptime source position
+  // ([link:90-Source-Line-Tracking-Unique-IDs] [link:91-Column-Tracking]) for builtins.
   void setSourceContext(const ast::SourceLocation& loc);
   // Logical function name for `__FUNC__` while interpreting a callback.
   void setFuncContext(std::string name);

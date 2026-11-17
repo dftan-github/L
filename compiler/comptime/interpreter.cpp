@@ -39,7 +39,7 @@ Value Interpreter::evalCall(const ast::CallExpr& call) {
     return evalExpr(*a.value);
   };
 
-  // [uid-counter]: compile-time builtin — never a runtime LLVM call.
+  // [link:93-Compile-Time-Unique-IDs]: compile-time builtin — never a runtime LLVM call.
   if (call.callee == "uid_counter") {
     if (!call.args.empty()) {
       error(call.loc, "uid_counter() takes no arguments");
@@ -47,7 +47,7 @@ Value Interpreter::evalCall(const ast::CallExpr& call) {
     }
     return Value::makeInt(takeUidCounter());
   }
-  // [source-line] [source-column] expose directive/comptime source position.
+  // [link:90-Source-Line-Tracking-Unique-IDs] [link:91-Column-Tracking] expose directive/comptime source position.
   if (call.callee == "source_line") {
     if (!call.args.empty()) {
       error(call.loc, "source_line() takes no arguments");

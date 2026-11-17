@@ -25,6 +25,7 @@
 #   ruby tools/doctor.rb --quiet      # only show failures
 
 require "pathname"
+require "rbconfig"
 
 ROOT = Pathname.new(__dir__).parent
 WRITE = ARGV.include?("--write")
@@ -100,20 +101,7 @@ check("all-samples", :gen, "examples/all_samples.l matches its sources") do
   end
 end
 
-# 3. examples/metaprogramming.l concept index — the row:N block at the top.
-#    Comments only: the generator rewrites the header, never the code below.
-check("meta-index", :gen, "metaprogramming.l row:N index matches real line numbers") do
-  args = WRITE ? [] : ["--check"]
-  out = IO.popen(["ruby", ROOT.join("tests/gen_meta_index.rb").to_s, *args],
-                 err: %i[child out], &:read)
-  if $?.exitstatus.zero?
-    WRITE ? fixed!(out.strip) : ok!(out.strip)
-  else
-    fail!(out.strip)
-  end
-end
-
-# 4. Line counts quoted in docs. Derived straight from the file, so a drift is
+# 3. Line counts quoted in docs. Derived straight from the file, so a drift is
 #    unambiguous. Only the number is corrected — prose is never rewritten.
 DOC_ROW_RE = /\| \[`([^`]+)`\]\(([^)]+)\) \| (\d+) \|/.freeze
 
@@ -210,36 +198,20 @@ check("no-trailing-underscore", :check, "L sources contain no trailing-underscor
   end
 end
 
-# 6. Cross-file row:N links written in comments. Pure existence check.
-ROW_LINK_RE = %r{(?:^|\s)([\w./-]+\.l)\s+row:(\d+)}.freeze
-
-check("row-links", :check, "cross-file row:N links point at existing files and lines") do
-  bad = []
-  globs = %w[examples/*.l docs/*.md README.md]
-  globs.flat_map { |g| Dir.glob(ROOT.join(g)) }.sort.each do |f|
-    rel = Pathname.new(f).relative_path_from(ROOT).to_s.tr("\\", "/")
-    # all_samples.l is a concatenation: its row:N anchors index lines of the
-    # GENERATED file itself, not the linked sample. Its correctness is owned by
-    # the all-samples check above, so skip it here to avoid false positives.
-    next if rel == "examples/all_samples.l"
-    File.readlines(f, encoding: "UTF-8").each_with_index do |line, i|
-      line.scan(ROW_LINK_RE) do |path, num|
-        # Anchors may be written relative to the containing file (hand-written
-        # docs) or relative to the repo root (generated TOCs). Accept either.
-        candidates = [
-          Pathname.new(f).dirname.join(path).cleanpath,
-          ROOT.join(path).cleanpath
-        ].uniq
-        nxt = candidates.find(&:file?)
-        if nxt.nil?
-          bad << "#{rel}:#{i + 1}: missing file #{path}"
-        elsif num.to_i > nxt.read(encoding: "UTF-8").lines.length
-          bad << "#{rel}:#{i + 1}: #{path} has no row #{num}"
-        end
-      end
-    end
+# 6. Anchor/link consistency. Delegates to tests/check_anchors.rb so the rule
+#    has exactly one implementation; here we only surface its verdict.
+check("anchors", :check, "anchor ids unique, every link resolves, no row:N, width <= 120") do
+  script = ROOT.join("tests", "check_anchors.rb")
+  unless script.exist?
+    fail!("tests/check_anchors.rb is missing")
+    next
   end
-  bad.empty? ? ok!("all row:N links resolve") : fail!(bad.map { |b| "  #{b}" }.join("\n"))
+  out = IO.popen([RbConfig.ruby, script.to_s, err: %i[child out]], &:read)
+  if $?.success?
+    ok!(out.strip.lines.last.to_s.strip)
+  else
+    fail!(out.strip.lines.map { |l| "  #{l.chomp}" }.join("\n"))
+  end
 end
 
 # ----------------------------------------------------------------------- main

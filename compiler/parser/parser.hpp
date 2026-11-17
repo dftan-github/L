@@ -23,7 +23,7 @@ public:
   std::unique_ptr<ast::Module> parseModule();
   ast::StmtPtr parseStatement();
   // Class-body member list parsed until EOF: fields + methods, in order.
-  // Used to parse LCMD-injected fragments in a class context ([lcmd-in-place]).
+  // Used to parse LCMD-injected fragments in a class context ([link:112-Place-Class-Body-LCMD]).
   std::vector<ast::StmtPtr> parseClassMembers();
   ast::ExprPtr parseExpression(int min_precedence = 0);
 
@@ -35,7 +35,7 @@ public:
   std::vector<std::string> knownInterfaceNames() const;
   void addAstHook(AstHook hook);
 
-  // Opt-in ClassDecl hooks ([hook-performance]). Default false = zero interpreter cost.
+  // Opt-in ClassDecl hooks ([link:22-Hook-Performance-Demand-Triggering]). Default false = zero interpreter cost.
   void setClassHookEnabled(bool enabled) { class_hook_enabled_ = enabled; }
   bool classHookEnabled() const { return class_hook_enabled_; }
 
@@ -83,7 +83,7 @@ private:
   void parseLambdaParamList(ast::LambdaExpr& lambda);
   ast::ExprPtr parseArrayLiteral();
   // After `foo(...)`, bare `{ ... }` is a zero-arg trailing block; after `obj.m`,
-  // require `{ |` so `obj.field { .x = 1 }` ([config-syntax]) is not treated as a lambda.
+  // require `{ |` so `obj.field { .x = 1 }` ([link:67-Nested-Relative-Assignment]) is not treated as a lambda.
   void attachTrailingBlockIfPresent(std::vector<ast::CallArg>& args,
                                     bool allow_bare_brace = false);
   // [dsl] Bare `{ ... }` block for registered config-block functions.
@@ -123,7 +123,7 @@ private:
   ast::MatchPatternPtr parseArrayPattern();
   ast::StmtPtr parseClassDecl();
   // Shared member-list parser for class bodies and injected class fragments
-  // ([lcmd-in-place]). `until_rbrace=false` means "members until EOF".
+  // ([link:112-Place-Class-Body-LCMD]). `until_rbrace=false` means "members until EOF".
   void parseClassMembersInto(ast::ClassDeclStmt& cls, bool until_rbrace);
   ast::StmtPtr parseInterfaceDecl();
   ast::StmtPtr parseDeferStmt();
@@ -153,7 +153,7 @@ private:
   std::unordered_set<std::string> interface_names_;
   std::unordered_set<std::string> generic_type_names_;  // in-scope <T: ...>
   std::vector<AstHook> ast_hooks_;
-  // [hook-performance]: ClassDecl hooks are off unless //LCMD_enable_class_hook().
+  // [link:22-Hook-Performance-Demand-Triggering]: ClassDecl hooks are off unless //LCMD_enable_class_hook().
   bool class_hook_enabled_ = false;
   // Hierarchical path stack: class / fun names → e.g. User.generate
   std::vector<std::string> context_path_;

@@ -237,7 +237,7 @@ l build -O3 -o myapp.exe main.l
 | [`mini_parser.l`](../examples/mini_parser.l) | 109 | 递归下降解析器 |
 | [`plugin_framework.l`](../examples/plugin_framework.l) | 368 | `comptime` + `LCMD` 编译期代码生成 |
 | [`fibonacci.l`](../examples/fibonacci.l) | 28 | 最小可运行程序 |
-| [`all_samples.l`](../examples/all_samples.l) | 7249 | 全部语法特性合集（参考手册性质，由 `tools/gen_all_samples.rb` 生成，带 `row:N` 目录） |
+| [`all_samples.l`](../examples/all_samples.l) | 7285 | 全部语法特性合集（参考手册性质，由 `tools/gen_all_samples.rb` 生成，带 `row:N` 目录） |
 
 ---
 

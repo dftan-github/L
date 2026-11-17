@@ -296,7 +296,7 @@ void Analyzer::checkExpr(ast::Expr& expr) {
     case ast::ExprKind::Coalesce: {
       auto& co = static_cast<ast::CoalesceExpr&>(expr);      if (co.left) checkExpr(*co.left);
       if (co.right) checkExpr(*co.right);
-      // Type rule: left must be Optional<T>; right must be T ([coalesce]).
+      // Type rule: left must be Optional<T>; right must be T ([link:101-Null-Coalescing-Operator]).
       // An unresolved left type (e.g. delegate-promoted `this.get(k)`) is left to
       // codegen, which has the full method table and reports the precise error.
       if (co.left && co.right) {
@@ -318,7 +318,7 @@ void Analyzer::checkExpr(ast::Expr& expr) {
     }
     case ast::ExprKind::Call: {
       auto& call = static_cast<ast::CallExpr&>(expr);
-      // [uid-counter]: uid_counter() is compile-time only (LCMD / comptime interpreter).
+      // [link:93-Compile-Time-Unique-IDs]: uid_counter() is compile-time only (LCMD / comptime interpreter).
       if (call.callee == "uid_counter") {
         error(call.loc, "uid_counter() is only allowed in compile-time context");
         break;
@@ -626,8 +626,8 @@ void Analyzer::checkMatchBranch(ast::MatchBranch& br) {
   popScope();
 }
 
-// `return;` must only appear in a void function ([early-exit]). Also marks a
-// returned capturing lambda for the fat-closure ABI ([closure-escape]).
+// `return;` must only appear in a void function ([link:110-Early-Exit-Guard-Clauses]). Also marks a
+// returned capturing lambda for the fat-closure ABI ([link:75-Escape-Analysis-Auto-Heap-Promotion]).
 void Analyzer::checkReturnStatement(ast::ReturnStmt& ret) {
   if (!ret.value) {
     const bool non_void = current_fn_ && !current_fn_->return_type.empty() &&
@@ -1448,7 +1448,7 @@ std::string Analyzer::methodReturnTypeOn(const std::string& recv_ty,
       return substitute(m->return_type.empty() ? std::string("void") : m->return_type);
     }
   }
-  // Associated free function (`Variant.from_i32`, [variant]): a module-level
+  // Associated free function (`Variant.from_i32`, [link:50-Variant]): a module-level
   // function whose name matches and whose return type is this class.
   {
     auto fit = free_funcs_.find(method);
@@ -1459,7 +1459,7 @@ std::string Analyzer::methodReturnTypeOn(const std::string& recv_ty,
       }
     }
   }
-  // [delegate]: unambiguous promotion only (ambiguity is diagnosed at emit time).
+  // [link:97-Implicit-Delegation]: unambiguous promotion only (ambiguity is diagnosed at emit time).
   const ast::ClassDeclStmt* hit = nullptr;
   for (const auto& f : cls->fields) {
     if (!f || !f->is_delegate) {
@@ -1586,7 +1586,8 @@ void Analyzer::checkPropertyAccess(const ast::MemberAccessExpr& access, bool is_
   if (!access.object || access.member.empty()) {
     return;
   }
-  // [no-trailing-underscore]: trailing `_` identifiers are forbidden (bare `_` is match wildcard only).
+  // [link:69-Banned-Trailing-Underscores-Field-Syntax]: trailing `_` identifiers are
+  // forbidden (bare `_` is match wildcard only).
   if (access.member.size() > 1 && access.member.back() == '_') {
     error(access.loc, "identifier ending with '_' is forbidden: '" + access.member + "'");
     return;
@@ -1726,7 +1727,7 @@ bool Analyzer::analyze(ast::Module& module, diag::DiagnosticEngine& diags) {
   }
   (void)mergePartialClasses(module);
   // After merging, every class is a single ClassDeclStmt, so a uniform scan also
-  // catches duplicates that were spread across partial parts ([delegate]).
+  // catches duplicates that were spread across partial parts ([link:97-Implicit-Delegation]).
   for (const ast::StmtPtr& stmt : module.stmts) {
     if (stmt && stmt->kind() == ast::StmtKind::ClassDecl) {
       checkDelegateFields(static_cast<const ast::ClassDeclStmt&>(*stmt));

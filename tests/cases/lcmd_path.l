@@ -1,4 +1,4 @@
-// [lcmd-path] The handler receives a HIERARCHICAL context path.
+// [anchor:132-lcmd-context-path] The handler receives a HIERARCHICAL context path.
 //
 // A directive inside a method body sees "User.generate" (class + method), and
 // its returned source is injected as STATEMENTS into that method — so

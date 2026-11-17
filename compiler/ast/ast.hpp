@@ -232,7 +232,8 @@ struct LambdaExpr : Expr {
   std::vector<StmtPtr> body;
   // Free locals referenced from the enclosing scope (filled by semantic).
   std::vector<std::string> captures;
-  // True when this capturing lambda is returned from its enclosing function ([closure-escape]).
+  // True when this capturing lambda is returned from its enclosing function
+  // ([link:75-Escape-Analysis-Auto-Heap-Promotion]).
   bool escapes = false;
   // [dsl] Bare-block config lambda: extra leading params (root, {|=0}) and
   // the body is emitted inline at the call site with `this` bound to the root.
@@ -249,7 +250,7 @@ struct CastExpr : Expr {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
-// `++a!` / `a!++` / `--a!` / `a!--` ([inc-dec]). Target is the lvalue without `!`.
+// `++a!` / `a!++` / `--a!` / `a!--` ([link:43-Increment-Decrement]). Target is the lvalue without `!`.
 struct IncDecExpr : Expr {
   bool is_prefix = true;
   bool is_inc = true;  // false → decrement
@@ -299,7 +300,7 @@ struct VarDeclStmt : Stmt {
   void dump(std::ostream& out, int indent = 0) const override;
 };
 
-// One LHS name in `(a, b!) := expr` ([destructure]).
+// One LHS name in `(a, b!) := expr` ([link:49-Destructuring-Assignment]).
 struct DestructureBinding {
   std::string name;
   bool is_mutable = false;
@@ -358,7 +359,8 @@ struct FuncDeclStmt : Stmt {
   bool is_compiler_generated = false;
   // `async fun` — lowered to a coroutine (LLVM coro intrinsics + CoroSplit).
   bool is_async = false;
-  // True when a capturing lambda is returned — LLVM ret is fat closure {fn,ctx} ([closure-escape]).
+  // True when a capturing lambda is returned — LLVM ret is fat closure {fn,ctx}
+  // ([link:75-Escape-Analysis-Auto-Heap-Promotion]).
   bool returns_fat_closure = false;
   std::string module_name;  // file stem; used for private mangling
   StmtKind kind() const override { return StmtKind::FuncDecl; }
@@ -482,7 +484,7 @@ struct FieldDeclStmt : Stmt {
   std::string type_name;
   std::string name;
   bool is_pub = false;  // `pub i32 level_` — required for property fallback `u.level`
-  bool is_delegate = false;  // `delegate Engine` — anonymous field; methods promote ([delegate])
+  bool is_delegate = false;  // `delegate Engine` — anonymous field; methods promote ([link:97-Implicit-Delegation])
   StmtKind kind() const override { return StmtKind::FieldDecl; }
   void dump(std::ostream& out, int indent = 0) const override;
 };
@@ -496,7 +498,7 @@ struct ClassDeclStmt : Stmt {
   bool is_pub = false;
   bool is_partial = false;  // `partial class` — merged in semantic before codegen
   std::string module_name;
-  // [lcmd-in-place] `//LCMD_cmd()` written directly in the class body. Expanded
+  // [link:112-Place-Class-Body-LCMD] `//LCMD_cmd()` written directly in the class body. Expanded
   // by the frontend with `enclosing_class = this`, so injected decls become
   // members of THIS class. Empty in every non-LCMD program.
   std::vector<std::unique_ptr<Stmt>> directives;

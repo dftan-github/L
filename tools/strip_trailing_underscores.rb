@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# Strip trailing `_` from L identifiers outside strings/comments ([no-trailing-underscore] migration).
+# Strip trailing `_` from L identifiers outside strings/comments ([link:69-Banned-Trailing-Underscores-Field-Syntax] migration).
 require "pathname"
 
 root = Pathname.new(__dir__).parent

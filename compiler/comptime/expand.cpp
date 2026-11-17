@@ -20,7 +20,8 @@ bool isClassHookToggle(const std::string& command) {
 std::string runHandler(const ast::FuncDeclStmt& handler, const ast::DirectiveStmt& dir,
                        diag::DiagnosticEngine& diags) {
   Interpreter interp(&diags);
-  // [source-line] [source-column] directive Token/AST loc carries exact line/column from Lexer.
+  // [link:90-Source-Line-Tracking-Unique-IDs] [link:91-Column-Tracking]
+  // directive Token/AST loc carries exact line/column from Lexer.
   interp.setSourceContext(dir.loc);
   interp.setFuncContext(handler.name);
 
@@ -170,7 +171,7 @@ bool expandStmtList(const ast::FuncDeclStmt* handler, std::vector<ast::StmtPtr>&
       }
       case ast::StmtKind::ClassDecl: {
         auto& cls = static_cast<ast::ClassDeclStmt&>(*stmt);
-        // [lcmd-in-place] Directives written in the class body inject classes'
+        // [link:112-Place-Class-Body-LCMD] Directives written in the class body inject classes'
         // members, so `enclosing_class` must be `&cls` — same contract as the
         // `generate()` workaround, just without the method wrapper. Runs BEFORE
         // the method walk so injected methods are still visited below.

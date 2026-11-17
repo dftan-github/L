@@ -57,7 +57,7 @@ std::string vtableName(const std::string& class_name, const std::string& iface) 
   return "vtable_" + class_name + "_" + iface;
 }
 
-// Logical field `age` → physical LLVM / field_index key `age_` ([no-trailing-underscore]).
+// Logical field `age` → physical LLVM / field_index key `age_` ([link:69-Banned-Trailing-Underscores-Field-Syntax]).
 std::string physicalFieldName(const std::string& logical) {
   return logical + "_";
 }
@@ -608,7 +608,7 @@ llvm::Function* Codegen::requireExtern(const std::string& name) {
   return nullptr;
 }
 
-// [performance-first] FNV-1a 64-bit over an in-memory C string, emitted as straight-line IR.
+// [link:109-Performance-First-Architecture] FNV-1a 64-bit over an in-memory C string, emitted as straight-line IR.
 // Per byte: load i8 -> zext i64 -> xor acc -> mul prime. The loop is a
 // rotate-free 2-PHI loop, so LLVM keeps it tight and inlines the whole thing at
 // the call site (no function body is generated — these are instructions only).
@@ -657,7 +657,7 @@ llvm::Value* Codegen::emitInlineStringHash(llvm::Value* cstr, llvm::Value* len,
   return acc;
 }
 
-// [performance-first] Inline C-string equality returning i32 (1 / 0), matching the runtime's
+// [link:109-Performance-First-Architecture] Inline C-string equality returning i32 (1 / 0), matching the runtime's
 // NULL-safe contract: identical pointers are equal; any NULL operand is not.
 llvm::Value* Codegen::emitInlineStringEq(llvm::Value* a, llvm::Value* b,
                                          const std::string& name_hint) {
@@ -737,7 +737,7 @@ llvm::Value* Codegen::emitInlineStringEq(llvm::Value* a, llvm::Value* b,
   return result;
 }
 
-// [performance-first] Dispatch on the callee name: FNV-1a and str_eq become inline IR.
+// [link:109-Performance-First-Architecture] Dispatch on the callee name: FNV-1a and str_eq become inline IR.
 llvm::Value* Codegen::tryEmitInlinedStringBuiltin(const ast::CallExpr& call,
                                                   const std::vector<llvm::Value*>& args) {
   if (call.callee == "l_hash_string" && args.size() == 1 && args[0] &&
@@ -873,7 +873,7 @@ std::string Codegen::methodReturnTypeOn(const std::string& recv_ty,
       return instantiateMemberType(m->return_type, *info);
     }
   }
-  // [delegate]: unambiguous delegate promotion for typing.
+  // [link:97-Implicit-Delegation]: unambiguous delegate promotion for typing.
   std::vector<const ClassInfo*> delegate_hits;
   for (const auto& field : info->ast->fields) {
     if (!field || !field->is_delegate || !isClassType(field->type_name)) {
@@ -2292,7 +2292,8 @@ llvm::Value* Codegen::classObjectPtr(const std::string& name) {
 Codegen::PropResolve Codegen::resolveProperty(const ClassInfo& info, const std::string& prop,
                                               PropAccess access) const {
   PropResolve out;
-  // Trailing `_` identifiers are forbidden in source ([no-trailing-underscore]); bare `_` is not a property.
+  // Trailing `_` identifiers are forbidden in source
+  // ([link:69-Banned-Trailing-Underscores-Field-Syntax]); bare `_` is not a property.
   if (prop.size() > 1 && prop.back() == '_') {
     return out;
   }
@@ -4413,7 +4414,7 @@ bool Codegen::initClassAtPtr(llvm::Value* base, const ClassInfo& info,
     builder_.CreateStore(zero, gep);
   }
 
-  // [delegate]: embedded fields are anonymous class instances; construct each
+  // [link:97-Implicit-Delegation]: embedded fields are anonymous class instances; construct each
   // one before the user's init runs so promoted method calls find a live object.
   if (info.ast) {
     for (size_t i = 0; i < info.ast->fields.size() && i < info.field_types.size(); ++i) {
@@ -4663,7 +4664,7 @@ bool Codegen::emitStackClassInit(llvm::AllocaInst* slot, const ClassInfo& info,
     return true;
   }
   // Method calls / String+ / other class-typed expressions.
-  // [variant] A Variant source unboxes to String first when that's the target.
+  // [link:50-Variant] A Variant source unboxes to String first when that's the target.
   llvm::Value* v = emitContextualVariantUnbox(init, decl.type_name, nullptr, /*immediate=*/true);
   if (!v) {
     v = emitExpr(init);
@@ -6298,7 +6299,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   }
 
   // First-class function local: `double := |x| x * 2` / `fun(i32)->i32 f = ...`
-  // Escaped returns: `cb := get_closure()` stores fat `{fn,ctx}` ([closure-escape]).
+  // Escaped returns: `cb := get_closure()` stores fat `{fn,ctx}` ([link:75-Escape-Analysis-Auto-Heap-Promotion]).
   if (isFunTypeName(type_name)) {
     if (!decl.init) {
       error("function variable '" + decl.name + "' requires an initializer");
@@ -6390,7 +6391,7 @@ bool Codegen::emitVarDecl(const ast::VarDeclStmt& decl) {
   llvm::Value* alloca = createLocalStorage(fn, lty, decl.name);
   llvm::Value* init = nullptr;
   if (decl.init) {
-    // [variant] `n := <Variant expr>` with an inferred primitive/String target.
+    // [link:50-Variant] `n := <Variant expr>` with an inferred primitive/String target.
     init = emitContextualVariantUnbox(*decl.init, type_name, lty, /*immediate=*/true);
     if (!init) {
       init = emitExpr(*decl.init);
@@ -7144,7 +7145,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
       // Only deref when the value really points at that struct (not a raw cstr).
       v = builder_.CreateLoad(dest_ty, v, "store.struct.copy");
     } else if (dest_ty && dest_ty->isPointerTy() && v->getType()->isStructTy()) {
-      // [performance-first] A `:=` String/class local is boxed to `ptr` (8 bytes),
+      // [link:109-Performance-First-Architecture] A `:=` String/class local is boxed to `ptr` (8 bytes),
       // but a method like `concat` hands back the class by value. Storing the
       // whole struct into the pointer slot overflows the alloca and corrupts
       // neighbouring locals. Box the value on the heap and keep the pointer.
@@ -7175,7 +7176,7 @@ bool Codegen::emitAssign(const ast::AssignStmt& assign) {
   return true;
 }
 
-// [variant] `return v` where `v : Variant` and the enclosing function
+// [link:50-Variant] `return v` where `v : Variant` and the enclosing function
 // returns String/i32/i64/f64/bool. Lowers to `v.as_<t>()` plus a runtime tag
 // check that panics on mismatch — the return type is a promise the tag must keep.
 // `immediate` keeps the success path in the caller's block; otherwise the
@@ -7324,7 +7325,7 @@ bool Codegen::emitReturn(const ast::ReturnStmt& ret) {
   }
   llvm::Value* v = nullptr;
   if (ret.value) {
-    // [closure-escape]: returning an escaping capturing lambda → fat closure {fn, ctx}.
+    // [link:75-Escape-Analysis-Auto-Heap-Promotion]: returning an escaping capturing lambda → fat closure {fn, ctx}.
     if (ret.value->kind() == ast::ExprKind::Lambda) {
       const auto& lam = static_cast<const ast::LambdaExpr&>(*ret.value);
       if (lam.escapes) {
@@ -7355,7 +7356,7 @@ bool Codegen::emitReturn(const ast::ReturnStmt& ret) {
     }
     // Escaping a heap local via return (often `as ptr`) must not auto-free it.
     cancelAutoFreeEscaping(*ret.value);
-    // [variant] `return v` with v:Variant into a primitive/String signature.
+    // [link:50-Variant] `return v` with v:Variant into a primitive/String signature.
     llvm::Value* unboxed =
         emitContextualVariantUnbox(*ret.value, current_fn_return_type_, fn->getReturnType());
     v = unboxed ? unboxed : emitExpr(*ret.value);
@@ -7449,7 +7450,7 @@ bool Codegen::emitPatternBindings(const ast::MatchPattern& pat, llvm::Value* slo
         continue;
       }
       // Field access mirrors property sugar: a getter is not a field, and
-      // destructuring must stay a raw GEP + load ([performance-first]).
+      // destructuring must stay a raw GEP + load ([link:109-Performance-First-Architecture]).
       const PropResolve res = resolveProperty(*info, pf.name, PropAccess::Read);
       if (res.kind == PropResolveKind::Method) {
         error(pf.loc, "cannot destructure '" + ty + "." + pf.name +
@@ -10090,7 +10091,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
       return nullptr;
     }
 
-    // [closure-integration]: Array.each + inline Lambda → while desugar (capturing-safe).
+    // [link:42-Closure-Integration-Data-Race-Refinement]: Array.each + inline Lambda → while desugar (capturing-safe).
     if (call.method == "each" && info->template_name == "Array" && !call.args.empty() &&
         call.args.back().value && call.args.back().value->kind() == ast::ExprKind::Lambda) {
       return emitArrayEachInline(id.name, *info,
@@ -10105,7 +10106,7 @@ llvm::Value* Codegen::emitMethodCall(const ast::MethodCallExpr& call,
       callee_fn = mit->second;
       callee_info = info;
     } else if (info->ast) {
-      // [delegate]: promote from delegates; multiple hits → hard ambiguity error.
+      // [link:97-Implicit-Delegation]: promote from delegates; multiple hits → hard ambiguity error.
       struct DelegateHit {
         std::string type_name;
         unsigned field_idx = 0;
@@ -10671,7 +10672,8 @@ llvm::Value* Codegen::emitLambda(const ast::LambdaExpr& expr, const std::string&
       return nullptr;
     }
     if (expr.escapes) {
-      // [closure-escape]: escaping closure — heap-allocate ctx and copy capture values into it.
+      // [link:75-Escape-Analysis-Auto-Heap-Promotion]: escaping closure — heap-allocate
+      // ctx and copy capture values into it.
       llvm::Function* alloc_fn = requireExtern("l_alloc");
       if (!alloc_fn) {
         return nullptr;
@@ -11672,7 +11674,7 @@ llvm::Value* Codegen::emitValueForParam(const ast::Expr& expr, llvm::Type* expec
     }
   }
 
-  // [variant] Contextual unbox: a `Variant` argument passed to a String /
+  // [link:50-Variant] Contextual unbox: a `Variant` argument passed to a String /
   // primitive formal is lowered to `arg.as_<t>()` (same rule as `return`).
   if (!expected_type_name.empty() && expected_type_name != "Variant") {
     llvm::Value* unboxed =
@@ -11790,7 +11792,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     return true;
   };
 
-  // [uid-counter]: never emit a runtime call for uid_counter (semantic should have rejected).
+  // [link:93-Compile-Time-Unique-IDs]: never emit a runtime call for uid_counter (semantic should have rejected).
   if (call.callee == "uid_counter") {
     error(call.loc, "uid_counter() is only allowed in compile-time context");
     return nullptr;
@@ -11800,7 +11802,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     return nullptr;
   }
 
-  // [auto-free] `l_free(x)` taken on a compiler-tracked owning local hands the
+  // [link:31-Auto-Free-Injection] `l_free(x)` taken on a compiler-tracked owning local hands the
   // release over to the program: drop `x` from every auto-free scope so the
   // end-of-scope injection does not free the same pointer a second time.
   // A `defer l_free(x)` is already handled by noteExplicitLFreeInDefer.
@@ -11819,7 +11821,8 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     }
   }
 
-  // [closure-integration] `delay(ms) { ... }` / `delay(ms, || ...)` with inline Lambda → spawn desugar.
+  // [link:42-Closure-Integration-Data-Race-Refinement] `delay(ms) { ... }` /
+  // `delay(ms, || ...)` with inline Lambda -> spawn desugar.
   if (call.callee == "delay" && call.args.size() == 2 && call.args[0].value &&
       call.args[1].value && call.args[1].value->kind() == ast::ExprKind::Lambda) {
     return emitDelayInline(*call.args[0].value,
@@ -12133,7 +12136,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     }
     const std::string arg_ty = exprTypeOf(arg_expr);
     const std::string resolved_arg_ty = resolveTypeName(arg_ty);
-    // [variant] `print(v)`: v:Variant prints its payload by tag; the Optional
+    // [link:50-Variant] `print(v)`: v:Variant prints its payload by tag; the Optional
     // form prints the payload when present and a blank line when absent.
     if (resolved_arg_ty == "Variant" || resolved_arg_ty == "Optional<Variant>") {
       llvm::Value* v = emitExpr(arg_expr);
@@ -12326,7 +12329,7 @@ llvm::Value* Codegen::emitGenericOrPlainCall(const ast::CallExpr& call) {
     }
     args.push_back(v);
   }
-  // [performance-first] Inline hot string primitives straight to IR instead of emitting a
+  // [link:109-Performance-First-Architecture] Inline hot string primitives straight to IR instead of emitting a
   // CallInst. Only the instruction stream changes; the runtime symbols and the
   // language semantics are untouched.
   if (llvm::Value* inlined = tryEmitInlinedStringBuiltin(call, args)) {
@@ -12392,7 +12395,7 @@ llvm::Value* Codegen::fieldSlotAddress(const ClassInfo& owner, llvm::Value* rece
   return builder_.CreateLoad(field_ty, slot, name + ".self");
 }
 
-// Loads a field of the current class through `this` ([property] fallback).
+// Loads a field of the current class through `this` ([link:34-Property-Fallback-Rule] fallback).
 llvm::Value* Codegen::loadFieldOnThis(const std::string& field_name) {
   const ClassInfo* info = findClass(current_class_);
   if (!info) {

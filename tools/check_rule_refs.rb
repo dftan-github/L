@@ -1,51 +1,47 @@
 #!/usr/bin/env ruby
-# Rule-anchor reference guard.
+# Rule-section anchor guard for .cursor/rules/language-rules.mdc
 #
-# The rules file (.cursor/rules/language-rules.mdc) numbers sections 1..N plus
-# 999. Numbers shift whenever sections are added or removed, so source comments
-# must reference the stable anchor id (<!-- id:delegate -->) rather than "rule 97".
+# Every numbered section must carry its anchor on the line directly below the
+# heading:
 #
-# This script fails (exit 1) when:
-#   1. a numbered heading ("## 99. Title" / "## 999.1 Title") has no
-#      <!-- id:xxx --> anchor right below it — anchors are mandatory for every
-#      numbered section, whether or not any code references it
-#   2. a "## <digit>..." heading is not even recognized as a numbered section
-#   3. an anchor id is duplicated
-#   3. section numbers are not unique
-#   4. code references an anchor id (see --list) that is not declared in the rules file
-#   5. code still contains a numeric reference like "rule 97" / "Rule 97"
+#     ## 97. Implicit Delegation (Struct Embedding)
+#     <!-- anchor:97-Implicit-Delegation -->
+#
+# Only the NUMBER is authoritative. The label after the dash is human text and
+# may be rewritten freely; nothing resolves on it. Numbers are APPEND-ONLY: a
+# section keeps its number forever, and a new section takes max+1, so inserting
+# a rule never renumbers — and never breaks — an existing reference.
+#
+# Fails (exit 1) when:
+#   1. a numbered heading has no anchor line below it, or the line is malformed
+#   2. a section number or anchor number is duplicated
+#   3. an anchor number does not match its section number (drift after an edit)
+#   4. code references "rule 97" numerically instead of by anchor
 #
 # Usage:
-#   ruby tools/check_rule_refs.rb            # check everything
-#   ruby tools/check_rule_refs.rb --list     # also print the anchor table
+#   ruby tools/check_rule_refs.rb            # verify
+#   ruby tools/check_rule_refs.rb --list     # also print the numbering table
+
 require "pathname"
 
 ROOT = Pathname.new(__dir__).parent
 RULES = ROOT.join(".cursor", "rules", "language-rules.mdc")
+
 CODE_GLOBS = %w[
   compiler/**/*.cpp
   compiler/**/*.hpp
   runtime/*.c
+  CMakeLists.txt
+  runtime/CMakeLists.txt
   tools/*.rb
   tests/*.rb
 ].freeze
 
-ANCHOR_RE = /^<!-- id:([a-z0-9][a-z0-9-]*) -->$/
 # Section numbers may be flat (99), multi-level (999.1) or suffixed (12a).
-# Every "## <number>..." heading MUST be followed by an anchor line: an
-# unparsed heading would otherwise be skipped silently and its anchor never
-# verified (that is exactly how `## 999.1` slipped through).
-HEADING_RE = /^## (\d+(?:\.\d+)*[a-z]?)\.?\s+(.+)$/
-REF_RE = /\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]/
+HEADING_RE = %r{^## (\d+(?:\.\d+)*[a-z]?)\.?\s+(.+)$}
+# <!-- anchor:97-Implicit-Delegation -->
+ANCHOR_RE = %r{^<!-- anchor:(\d+)-([^\s>]+) -->$}
 NUMERIC_RE = /\b[Rr]ules?\s+\d+\b/
-
-# Words that appear in brackets in prose/indexing and must never be read as anchors.
-PLAIN_WORDS = %w[
-  key keys value values name names path paths file files index idx cache
-  this self argv args type types flag flags tag tags node nodes
-  item items part parts size len mode data text line lines
-  test tests case cases true false null none main index name
-].freeze
 
 errors = []
 
@@ -54,94 +50,95 @@ unless RULES.file?
   exit 2
 end
 
-lines = RULES.read.force_encoding("UTF-8").split("\n", -1)
-anchors = {}      # id => section number (string)
-sections = {}     # number => id
-table = []
-number_headings = 0
+lines = RULES.read(encoding: "UTF-8").split("\n", -1)
+by_section = {}   # section number  => anchor number
+by_id      = {}   # anchor number   => section number
+table      = []
+headings   = 0
 
 lines.each_with_index do |line, i|
-  # Any "## <something starting with a digit>" is a numbered section and MUST
-  # carry an anchor. Fail loudly instead of skipping unparsed shapes.
-  if (line =~ /^##\s+\d/) && (HEADING_RE.match(line).nil?)
-    errors << "line #{i + 1}: unrecognized numbered heading (expected '## <number>. <title>'): #{line.strip}"
+  # A heading that starts with a digit but does not parse is a hard error:
+  # skipping it silently is how an un-anchored section slips through.
+  if line =~ %r{^##\s+\d} && HEADING_RE.match(line).nil?
+    errors << "line #{i + 1}: unrecognized numbered heading " \
+              "(expected '## <number>. <title>'): #{line.strip}"
     next
   end
 
   heading = HEADING_RE.match(line)
   next unless heading
 
-  number_headings += 1
+  headings += 1
   num = heading[1]
   title = heading[2].strip
-  anchor_line = lines[i + 1].to_s
-  match = ANCHOR_RE.match(anchor_line.strip)
+  raw = lines[i + 1].to_s.strip
+  match = ANCHOR_RE.match(raw)
 
   if match.nil?
-    errors << "line #{i + 1}: section #{num} (#{title}) has no anchor line below it"
+    errors << "line #{i + 1}: section #{num} (#{title}) has no " \
+              "'<!-- anchor:N-Label -->' line below it"
     next
   end
 
   id = match[1]
-  errors << "line #{i + 1}: duplicate section number #{num}" if sections.key?(num)
-  errors << "line #{i + 1}: duplicate anchor id '#{id}' (also used by section #{anchors[id]})" if anchors.key?(id)
+  label = match[2]
 
-  anchors[id] = num
-  sections[num] = id
-  table << [num, id, title]
+  # Anchor numbers are allocated in document order (1..N) and are deliberately
+  # NOT forced to equal the section number: sections such as 999 live in a
+  # separate namespace, and renumbering a section must never move its anchor.
+  if by_section.key?(num)
+    errors << "line #{i + 1}: duplicate section number #{num}"
+  end
+  if by_id.key?(id)
+    errors << "line #{i + 1}: duplicate anchor number #{id} " \
+              "(already used by section #{by_id[id]})"
+  end
+  errors << "line #{i + 1}: anchor #{id} has an empty label" if label.empty?
+
+  by_section[num] = id
+  by_id[id] = num
+  table << [num, id, label, title]
 end
 
-# Section numbers must not repeat; gaps are reported separately (informational).
-errors << "no sections found in #{RULES.basename}" if sections.empty?
-errors << "every numbered heading lost its anchor (0 verified)" if number_headings.positive? && sections.empty?
+errors << "no sections found in #{RULES.basename}" if by_section.empty?
+errors << "every heading lost its anchor (0 verified)" if headings.positive? && by_section.empty?
 
+# Numeric rule references are banned: they rot the moment a rule is inserted.
 CODE_GLOBS.flat_map { |g| Dir.glob(ROOT.join(g).to_s) }.uniq.sort.each do |file|
   rel = Pathname.new(file).relative_path_from(ROOT).to_s.tr("\\", "/")
   File.readlines(file, encoding: "UTF-8").each_with_index do |line, i|
-    # Strip string literals and C++/Ruby comments' contents so doc text like
-    # "[ERROR] file:line:col" or "[package]" is not mistaken for a reference.
     scan = line.dup
     scan.gsub!(/"[^"]*"/, '""')
     scan.gsub!(/'[^']*'/, "''")
-
-    comment_body =
+    body =
       case rel
-      when /\.(cpp|hpp|c)$/ then scan[/\/\/(.*)$/, 1] || scan[/\/\*(.*?)(\*\/|\z)/, 1]
-      when /\.rb$/ then scan[/#(.*)$/, 1]
+      when /\.(cpp|hpp|c)$/ then scan[%r{//(.*)$}, 1] || scan[%r{/\*(.*?)(\*/|\z)}, 1]
+      when /\.rb$/, %r{(^|/)CMakeLists\.txt$} then scan[/#(.*)$/, 1]
       end
-    next if comment_body.nil?
-
-    if comment_body =~ NUMERIC_RE
-      errors << "#{rel}:#{i + 1}: numeric rule reference — use an anchor id instead: #{line.strip}"
-    end
-
-    comment_body.scan(REF_RE) do |(id)|
-      # Only flag ids that a human could plausibly have meant as an anchor.
-      # Skip: short words, plain English, Ruby/C indexing like cache["files"][key],
-      # TOML table names ([package], [dependencies]) and diagnostic tags.
-      next if id.length < 4
-      next if %w[error warning package dependencies].include?(id)
-      next if PLAIN_WORDS.include?(id)
-      errors << "#{rel}:#{i + 1}: unknown anchor '#{id}' (not declared in #{RULES.basename})" unless anchors.key?(id)
-    end
+    next if body.nil?
+    next unless body =~ NUMERIC_RE
+    errors << "#{rel}:#{i + 1}: numeric rule reference — link by anchor instead: #{line.strip}"
   end
 end
 
 if ARGV.include?("--list")
-  sort_key = lambda do |(num, _id, _title)|
+  sort_key = lambda do |(num, _id, _label, _title)|
     parts = num.scan(/\d+/).map(&:to_i)
     parts.fill(0, parts.size...3)
     parts
   end
-  table.sort_by(&sort_key).each { |num, id, title| puts format("%7s  %-28s %s", num, id, title) }
+  table.sort_by(&sort_key).each do |num, id, label, title|
+    puts format("%7s  %-4s %-40s %s", num, id, label, title[0, 44])
+  end
   puts
 end
 
 if errors.empty?
-  puts "OK: #{anchors.size} anchors, all references resolve."
+  puts "OK: #{by_section.size} rule anchors, all references resolve " \
+       "(numbers match sections, no numeric refs)."
   exit 0
 end
 
-warn "FAIL: #{errors.size} rule-reference problem(s)"
+warn "FAIL: #{errors.size} rule-anchor problem(s)"
 errors.each { |e| warn "  - #{e}" }
 exit 1

@@ -52,7 +52,7 @@ public:
 private:
   struct InterfaceInfo {
     std::vector<std::string> method_names;
-    // Method slots start at 1; slot 0 is reserved for TypeID ([vtable-layout]).
+    // Method slots start at 1; slot 0 is reserved for TypeID ([link:63-Virtual-Table-Layout-Downcasting]).
     std::unordered_map<std::string, unsigned> method_index;
     std::unordered_map<std::string, const ast::FuncDeclStmt*> methods;
   };
@@ -78,7 +78,7 @@ private:
     bool bodies_emitted = false;
   };
 
-  // Property fallback ([property]): `u.age` → get_age/set_age else physical age_.
+  // Property fallback ([link:34-Property-Fallback-Rule]): `u.age` → get_age/set_age else physical age_.
   enum class PropAccess { Read, Write };
   enum class PropResolveKind { Method, Field, None };
   struct PropResolve {
@@ -123,7 +123,7 @@ private:
   // Look up a C ABI symbol previously declared via `extern module` (no auto-create).
   llvm::Function* requireExtern(const std::string& name);
 
-  // [performance-first] Replace `l_hash_string` / `l_str_eq` calls with inline IR. The C
+  // [link:109-Performance-First-Architecture] Replace `l_hash_string` / `l_str_eq` calls with inline IR. The C
   // runtime implementations stay as-is (other front ends / FFI users rely on
   // them); Codegen simply stops emitting the call in favor of straight-line
   // instructions, which removes the out-of-module indirection from every Map
@@ -530,7 +530,7 @@ private:
     llvm::StructType* ctx_ty = nullptr;
   };
   std::unordered_map<std::string, ClosureLocal> closure_locals_;
-  // Locals holding an escaped fat closure value `{fn_ptr, ctx_ptr}` ([closure-escape]).
+  // Locals holding an escaped fat closure value `{fn_ptr, ctx_ptr}` ([link:75-Escape-Analysis-Auto-Heap-Promotion]).
   // `local_types_` still stores the payload fun(...) type for call ABI.
   std::unordered_set<std::string> fat_closure_locals_;
   // Heap cells owned by an escaped fat closure (ctx + promoted captures) — free on scope exit.
