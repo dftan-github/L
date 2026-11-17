@@ -187,7 +187,7 @@ receives the bare class name as its path:
 
 ```l
 pub fun __compile_time_handler(String path, String cmd, String args) -> String {
-    if path == "User" && cmd == "make_hello" {
+    if "User" == path && "make_hello" == cmd {
         return "pub fun say_hello() -> i32 { return 42; }"
     }
     return ""
@@ -205,18 +205,39 @@ fun main() -> i32 {
 }
 ```
 
-The same directive inside a **method** injects statements into that method body, and its
-path carries the method name (`User.generate`). Only a class-body directive yields new
-members — a `fun` injected into a method body would be a nested function, which L does
-not have.
+The same directive inside a **method** body injects **statements** into that method, and
+its path carries the method name (`User.generate`). The handler must branch on the path,
+because the two sites want different kinds of output — this is the same handler as
+above, extended with a second branch:
 
 ```l
+pub fun __compile_time_handler(String path, String cmd, String args) -> String {
+    if "User" == path && "make_hello" == cmd {
+        return "pub fun say_hello() -> i32 { return 42; }"   // a class MEMBER
+    }
+    if "User.generate" == path && "make_hello" == cmd {
+        return "print(say_hello());"                          // a STATEMENT
+    }
+    return ""
+}
+
+pub fun say_hello() -> i32 {
+    return 42
+}
+
 class User {
-    fun generate() {
-        //LCMD_make_hello()     // path is "User.generate"
+    i32 id
+
+    pub fun generate() -> i32 {
+        //LCMD_make_hello()     // injects `print(say_hello());` here
+        return 0
     }
 }
 ```
+
+Only a class-body site can yield new **members**. A method-body site cannot, because a
+`fun` injected into a method would be a nested function, and L has none — return a
+statement instead, and declare the callee at module level as above.
 
 `comptime { ... }` runs in the frontend and is stripped before codegen — zero runtime
 cost (`compile_error` / `comptime_assert` veto the build outright). `uid_counter()`
