@@ -180,18 +180,18 @@ class String {
         while i < n {
             c := char_at(i)
             if c == sep {
-                if i > start {
-                    ptr p = l_str_substr(data, start, i - start)
-                    arr.push(String(p))
-                }
+                // Empty runs between separators are real elements: `"a,,b"` is
+                // three parts, and a blank source line must survive a split.
+                ptr p = l_str_substr(data, start, i - start)
+                arr.push(String(p))
                 start! = i + 1
             }
             i! = i + 1
         }
-        if start < n {
-            ptr p2 = l_str_substr(data, start, n - start)
-            arr.push(String(p2))
-        }
+        // Trailing element, including the empty one produced by a final
+        // separator (that empty part is what remembers `"...\n"`).
+        ptr p2 = l_str_substr(data, start, n - start)
+        arr.push(String(p2))
         return arr
     }
 

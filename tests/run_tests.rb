@@ -173,11 +173,14 @@ MAP_OPS_TEST = ROOT.join("tests", "cases", "map_ops_test.l")
 STDLIB_MAP = ROOT.join("stdlib", "map.l")
 LCMD_L_CALLBACK = ROOT.join("tests", "cases", "lcmd_l_callback.l")
 LCMD_PATH = ROOT.join("tests", "cases", "lcmd_path.l")
+LCMD_IN_CLASS = ROOT.join("tests", "cases", "lcmd_in_class.l")
 UID_TEST = ROOT.join("tests", "cases", "uid_test.l")
 UID_BAD = ROOT.join("tests", "cases", "uid_bad.l")
 CONTEXT_MACRO_TEST = ROOT.join("tests", "cases", "context_macro_test.l")
+METAPROGRAMMING_EXAMPLE = ROOT.join("examples", "metaprogramming.l")
 COMPTIME_OK_TEST = ROOT.join("tests", "cases", "comptime_ok_test.l")
 COMPTIME_FAIL_TEST = ROOT.join("tests", "cases", "comptime_fail_test.l")
+COMPTIME_ASSERT_FAIL_TEST = ROOT.join("tests", "cases", "comptime_assert_fail_test.l")
 DOC_SAMPLE = ROOT.join("tests", "cases", "doc_sample.l")
 CLONE_TEST = ROOT.join("tests", "cases", "clone_test.l")
 FIELD_SYNTAX_TEST = ROOT.join("tests", "cases", "field_syntax_test.l")
@@ -4622,6 +4625,28 @@ def test_lcmd_path_e2e!
   puts "  OK lcmd_path e2e (hierarchical path → class inject)"
 end
 
+# [lcmd-in-place] A directive in the CLASS BODY injects members under the bare
+# class-name path; the legacy in-method form still yields `Class.method`.
+def test_lcmd_in_class_e2e!
+  assert!(File.exist?(LCMD_IN_CLASS), "lcmd_in_class case not found: #{LCMD_IN_CLASS}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("lcmd_in_class.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(LCMD_IN_CLASS))
+  assert!(status.success?, "compile lcmd_in_class failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "lcmd_in_class.exe was not produced")
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "lcmd_in_class.exe exited #{st.exitstatus}\n#{err}")
+  normalized = out.gsub("\r\n", "\n")
+  # injected method, own method, delegate-promoted getter, injected field, legacy path
+  assert!(normalized == "7\n5\n3\n4\n42\n", "expected \"7\\n5\\n3\\n4\\n42\\n\", got #{normalized.inspect}")
+
+  puts "  OK lcmd_in_class e2e (class-body directive → members, no generate())"
+end
+
 def test_uid_counter_e2e!
   assert!(File.exist?(UID_TEST), "uid_test case not found: #{UID_TEST}")
 
@@ -4689,6 +4714,109 @@ def test_context_macro_e2e!
   puts "  OK context macros e2e (__FILE__ / __LINE__ / __FUNC__)"
 end
 
+# The single-file tour of every compile-time facility (examples/metaprogramming.l).
+# Asserts on the RUN, not just compilation: comptime is stripped, magic
+# constants are folded to literals, and the hot loop carries no residue.
+def test_metaprogramming_example_e2e!
+  assert!(File.exist?(METAPROGRAMMING_EXAMPLE),
+          "metaprogramming example not found: #{METAPROGRAMMING_EXAMPLE}")
+
+  FileUtils.mkdir_p(OUT_DIR)
+  exe = OUT_DIR.join("metaprogramming.exe")
+  FileUtils.rm_f(exe)
+
+  stdout, stderr, status = run_compiler("-o", exe.to_s, *with_runtime(METAPROGRAMMING_EXAMPLE))
+  assert!(status.success?,
+          "compile metaprogramming failed (#{status.exitstatus})\n#{stderr}\n#{stdout}")
+  assert!(File.exist?(exe), "metaprogramming.exe was not produced")
+
+  # (a) comptime diagnostics are a FRONTEND concern, and the whole-program
+  # build cache replays the object without re-running the frontend. So the
+  # diagnostic is asserted only when it is actually emitted, on a cache miss;
+  # correctness of the comptime phase itself is proven by the assertions in
+  # the source (which fail the build if violated) and by (f) below.
+  compile_log = stdout.to_s + stderr.to_s
+  if compile_log.include?("[comptime]")
+    assert!(compile_log.include?("[comptime] B1: arithmetic checked while compiling"),
+            "unexpected comptime diagnostic in compiler output:\n#{compile_log}")
+  end
+
+  out, err, st = Open3.capture3(exe.to_s)
+  assert!(st.success?, "metaprogramming.exe exited #{st.exitstatus}\n#{err}")
+  lines = out.gsub("\r\n", "\n").split("\n", -1)
+  src = File.readlines(METAPROGRAMMING_EXAMPLE)
+
+  # Line sites are read from the file so the assertions survive edits above.
+  def src_line(src, needle)
+    hit = src.each_with_index.find { |l, _| l.include?(needle) }
+    raise "#{needle} not found in source" unless hit
+    hit[1] + 1
+  end
+
+  # ---- PART A: LCMD injections -------------------------------------------
+  # A2/A4: class-body members injected with no `generate()` wrapper, plus the
+  # in-method directive whose path carries the method name.
+  assert!(lines[0] == "7",  "A2 injected method expected 7, got #{lines[0].inspect}")
+  assert!(lines[1] == "5",  "own() expected 5, got #{lines[1].inspect}")
+  assert!(lines[2] == "3",  "A2 injected delegate expected 3, got #{lines[2].inspect}")
+  assert!(lines[3] == "4",  "A2 injected field expected 4, got #{lines[3].inspect}")
+  assert!(lines[4] == "11", "A4 in-method injection expected 11, got #{lines[4].inspect}")
+
+  # A1: the 5-arg handler saw the directive's own line number, and `args` was
+  # passed through verbatim.
+  assert!(lines[5] == src_line(src, "//LCMD_echo_args(true)").to_s,
+          "A1 echo_line expected #{src_line(src, '//LCMD_echo_args(true)')}, got #{lines[5].inspect}")
+
+  # A5: uid_counter() minted a unique name; the value is a compile-time id, so
+  # it must be a non-negative integer literally baked into the source.
+  assert!(lines[6].match?(/\A\d+\z/), "A5 gen_answer expected an integer, got #{lines[6].inspect}")
+
+  # A7: source_line() evaluated during compilation, never at runtime.
+  assert!(lines[7] == src_line(src, "//LCMD_where_directive()").to_s,
+          "A7 directive_line expected #{src_line(src, '//LCMD_where_directive()')}, got #{lines[7].inspect}")
+
+  # A6: the opt-in class hook fired for `Audited` only, injecting a module-level
+  # function. `NotAudited` never triggered the interpreter.
+  assert!(lines[8] == "999", "A6 hook injection expected 999, got #{lines[8].inspect}")
+
+  # ---- PART B: comptime ---------------------------------------------------
+  # B4: __FILE__ folds to the source path (absolute or repo-relative).
+  assert!(lines[9].to_s.include?("metaprogramming.l"),
+          "B4 File line missing source path, got #{lines[9].inspect}")
+
+  # B4: __FUNC__ folds to the enclosing function name.
+  assert!(lines[10] == "where_am_i", "B4 Func expected \"where_am_i\", got #{lines[10].inspect}")
+
+  # B5: __LINE__ folds to the exact source line. Two print sites, in program
+  # order: inside where_am_i, then inside main.
+  line_sites = src.each_with_index.select { |l, _| l.strip.start_with?("print(__LINE__)") }
+  assert!(line_sites.length == 2, "expected 2 print(__LINE__) sites, got #{line_sites.length}")
+  expected_first = line_sites[0][1] + 1
+  expected_second = line_sites[1][1] + 1
+  assert!(lines[11] == expected_first.to_s,
+          "B5 first __LINE__ expected #{expected_first}, got #{lines[11].inspect}")
+  assert!(lines[12] == expected_second.to_s,
+          "B5 second __LINE__ expected #{expected_second}, got #{lines[12].inspect}")
+
+  # B6: zero-cost proof — exact loop result, and nothing from comptime leaked
+  # into the running binary.
+  assert!(lines[13] == "300000", "B6 hot loop expected 300000, got #{lines[13].inspect}")
+  assert!(!out.include?("[comptime]"),
+          "comptime output leaked into the RUNTIME binary:\n#{out}")
+
+  # B1/B2/B3 + codegen stripping: none of the compile-time machinery may reach
+  # the IR. This also proves the uid/assert results were folded, not called.
+  ir_out, ir_err, _ir_st = run_compiler("--emit-llvm", "-o", "-",
+                                        *with_runtime(METAPROGRAMMING_EXAMPLE))
+  ir = ir_out.to_s + ir_err.to_s
+  assert!(ir.include?("define"), "IR emission produced nothing:\n#{ir}")
+  %w[uid_counter comptime_assert source_line source_column __on_class_parsed].each do |sym|
+    assert!(!ir.include?(sym), "#{sym} lowered to a runtime symbol")
+  end
+
+  puts "  OK metaprogramming e2e (LCMD inject A1-A7, comptime B1-B6, stripped IR)"
+end
+
 def test_comptime_ok_e2e!
   assert!(File.exist?(COMPTIME_OK_TEST), "comptime_ok_test case not found: #{COMPTIME_OK_TEST}")
 
@@ -4722,6 +4850,23 @@ def test_comptime_fail_rejected!
   )
 
   puts "  OK compile_error rejected at comptime (Build forbidden)"
+end
+
+def test_comptime_assert_fail_rejected!
+  assert!(File.exist?(COMPTIME_ASSERT_FAIL_TEST),
+          "comptime_assert_fail_test case not found: #{COMPTIME_ASSERT_FAIL_TEST}")
+
+  stdout, stderr, status = run_compiler("--emit-llvm", *with_runtime(COMPTIME_ASSERT_FAIL_TEST))
+  assert!(!status.success?,
+          "comptime_assert_fail_test.l must fail to compile\n#{stdout}\n#{stderr}")
+  combined = "#{stdout}\n#{stderr}"
+  assert!(combined.match?(/Compile-time error: two is not greater than three/m),
+          "expected the assertion message in the diagnostic, got:\n#{combined}")
+  # The frontend stops before codegen, so no IR must be emitted at all.
+  assert!(!combined.include?("define i32 @main"),
+          "IR was emitted despite a failed comptime_assert:\n#{combined}")
+
+  puts "  OK comptime_assert vetoes the build before codegen"
 end
 
 def test_map_e2e!
@@ -5059,11 +5204,14 @@ def main
     test_map_ops_e2e!
     test_lcmd_l_callback_e2e!
     test_lcmd_path_e2e!
+    test_lcmd_in_class_e2e!
     test_uid_counter_e2e!
     test_uid_counter_bad_rejected!
     test_context_macro_e2e!
+    test_metaprogramming_example_e2e!
     test_comptime_ok_e2e!
     test_comptime_fail_rejected!
+    test_comptime_assert_fail_rejected!
     test_l_doc_markdown!
     test_node_hook_optin_e2e!
     test_stdin_compile_e2e!

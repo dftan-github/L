@@ -38,7 +38,8 @@ pub fun append_all(String path, String content) -> Result<bool, String> {
     return Result<bool, String>(true, true, String(""))
 }
 
-pub fun read_all(String path) -> Optional<String> {    f := l_file_open(path.c_str(), "rb")
+pub fun read_all(String path) -> Optional<String> {
+    f := l_file_open(path.c_str(), "rb")
     if l_ptr_is_null(f) != 0 {
         return Optional<String>()
     }
